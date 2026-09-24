@@ -126,6 +126,20 @@ fi
 chown root:critic /etc/loop/critic.env
 chmod 640 /etc/loop/critic.env
 
+# 役ごとのモデル。起動スクリプトが LOOP_MODEL を --model で渡す。
+# 新しく作ったファイルにも、前からあるファイルにも、行が無いときだけ足す。
+# 値は手で埋めたものを上書きしない。
+for who in solver planner critic; do
+  if ! grep -q '^LOOP_MODEL=' "/etc/loop/$who.env"; then
+    cat >> "/etc/loop/$who.env" <<'EOF'
+
+# モデル。空ならアカウントの既定のモデルを使う。
+# 例: LOOP_MODEL=claude-sonnet-5
+LOOP_MODEL=
+EOF
+  fi
+done
+
 # A malformed drop-in makes sudo refuse to run at all, including the sudo that
 # would fix it. Validate before either goes live.
 for spec in "solver:91-runner-to-solver" "planner:92-runner-to-planner" \

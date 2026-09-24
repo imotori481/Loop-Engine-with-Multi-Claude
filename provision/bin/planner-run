@@ -43,6 +43,12 @@ if [ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
 fi
 unset ANTHROPIC_API_KEY_CONSOLE
 
+# モデル。planner.env の LOOP_MODEL を --model で渡す。空ならアカウントの既定。
+model_args=()
+if [ -n "${LOOP_MODEL:-}" ]; then
+  model_args=(--model "$LOOP_MODEL")
+fi
+
 # A throwaway HOME for every invocation. Claude Code writes config, policy and
 # backup state into HOME, and with a fresh one each time nothing can carry from
 # one planning call to the next. `--bare` would have covered this in one flag,
@@ -70,6 +76,7 @@ cd "$OUT"
 # different uid and cannot signal this process at all. `timeout` exits 124.
 set +e
 timeout --kill-after=30 "$LIMIT" claude -p \
+  "${model_args[@]}" \
   --safe-mode \
   --setting-sources "" \
   --no-session-persistence \

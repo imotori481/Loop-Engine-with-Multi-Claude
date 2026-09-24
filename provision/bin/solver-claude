@@ -39,6 +39,12 @@ if [ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
 fi
 unset ANTHROPIC_API_KEY_CONSOLE
 
+# モデル。solver.env の LOOP_MODEL を --model で渡す。空ならアカウントの既定。
+model_args=()
+if [ -n "${LOOP_MODEL:-}" ]; then
+  model_args=(--model "$LOOP_MODEL")
+fi
+
 # 呼び出しごとに使い捨ての HOME を作る。前のステップの記憶を次へ持ち越させない。
 # BOOTSTRAP はステップ間でソルバーが記憶を失うことを求めている。codex の
 # --ephemeral と同じ役割を、置き場を無くすことで果たす。
@@ -59,6 +65,7 @@ trap 'rm -rf "$HOME"' EXIT
 # `timeout` は 124 で終わる。
 set +e
 timeout --kill-after=30 "$LIMIT" claude -p \
+  "${model_args[@]}" \
   --safe-mode \
   --setting-sources "" \
   --no-session-persistence \

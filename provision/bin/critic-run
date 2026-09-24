@@ -49,6 +49,12 @@ if [ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
 fi
 unset ANTHROPIC_API_KEY_CONSOLE
 
+# モデル。critic.env の LOOP_MODEL を --model で渡す。空ならアカウントの既定。
+model_args=()
+if [ -n "${LOOP_MODEL:-}" ]; then
+  model_args=(--model "$LOOP_MODEL")
+fi
+
 # A throwaway HOME for every invocation, exactly as planner-run does it. Here it
 # carries a second meaning: two critiques of the same plan must not be able to
 # agree with each other by remembering. Each one starts from the brief and
@@ -66,6 +72,7 @@ cd "$OUT"
 #     there is nothing here it should be revising.
 set +e
 timeout --kill-after=30 "$LIMIT" claude -p \
+  "${model_args[@]}" \
   --safe-mode \
   --setting-sources "" \
   --no-session-persistence \
