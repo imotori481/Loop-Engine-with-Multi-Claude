@@ -17,7 +17,7 @@ cd "$(dirname "$0")"
 
 # 05-isolation runs first: if wsl.conf never took effect there is no sandbox to
 # provision into, and every later step would succeed while meaning nothing.
-for s in 05-isolation.sh 10-users.sh 15-authkeys.sh 20-layout.sh 30-python.sh 35-node.sh 40-perms.sh 45-agent-invoke.sh 50-lockdown.sh; do
+for s in 05-isolation.sh 10-users.sh 15-authkeys.sh 20-layout.sh 25-runner.sh 30-python.sh 35-node.sh 40-perms.sh 45-agent-invoke.sh 50-lockdown.sh; do
   echo
   echo "=== $s ==="
   bash "$s"
