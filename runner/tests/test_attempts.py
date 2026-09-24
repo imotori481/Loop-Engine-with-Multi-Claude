@@ -63,6 +63,11 @@ class HowManyAttempts(Settings):
 
 
 class WhichSolverRunsWhichAttempt(Settings):
+    def test_the_default_is_claude_alone(self) -> None:
+        # solver_tiers を書かない計画は Claude Code だけで回る。
+        self.assertEqual(SOLVER_TIERS, ["claude"])
+        self.assertEqual(attempt_schedule(STEP), ["claude"] * 3)
+
     def test_one_backend_is_one_attempt_each(self) -> None:
         # Named rather than left to the default: the default describes the box
         # this happens to run on, and what is being pinned here is the shape of

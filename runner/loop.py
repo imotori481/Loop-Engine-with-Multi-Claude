@@ -184,16 +184,12 @@ RETRY_MODES = ("repair", "resample")
 # PLANNER call -- so a second solver tier is not an extra expense, it is the
 # cheaper of the two things that can happen next.
 #
-# The default describes the BOX, not the plan, and that is why it is here rather
-# than left to tasks.json. A plan cannot name a backend it was never told about:
-# BOOTSTRAP tells the planner that what implements a step is not its concern, so
-# a bootstrapped plan has no solver_tiers at all. With ["codex"] as the default,
-# every such plan would silently run on the rationed backend while the local one
-# sat idle. Not a bill -- codex here is a ChatGPT subscription, the same shape as
-# the planner's -- but a quota shared with whatever the human is doing in their
-# own window, spent by omission. Local first, rationed as the fallback; a plan
-# that does say solver_tiers still overrides this.
-SOLVER_TIERS = ["local", "codex"]
+# 既定値は計画ではなく箱の性質なので、tasks.json ではなくここに置く。
+# BOOTSTRAP はプランナーに「誰が実装するかは関知しない」と伝えている。
+# だからブートストラップした計画は solver_tiers を持たず、この既定値で回る。
+# 既定は Claude Code だけ。local と codex は、計画が solver_tiers で名前を
+# 挙げたときだけ使う。
+SOLVER_TIERS = ["claude"]
 
 
 # --------------------------------------------------------------------------
