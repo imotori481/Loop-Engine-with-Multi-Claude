@@ -97,6 +97,9 @@ ESCALATION = PLAN / "ESCALATION.md"
 # is the question `plan propose` answers, and one of those must not silently
 # become the other.
 PLANNER_ESCALATION = PLAN / "PLANNER_ESCALATION.md"
+# plan refine の途中でプランナーがエスカレーションしたときの控え。提案は
+# 改訂前に戻すので、エスカレーションの本文はここにしか残らない。
+REFINE_ESCALATION = STATE / "refine-escalation.md"
 
 # tests/ must be run with the project venv's pytest and nothing else. A plain
 # `python3 -m pytest` would put the solver's own ~/.local packages back on
@@ -1820,6 +1823,21 @@ def clear_proposal() -> None:
         entry.unlink()
 
 
+def restore_proposal(files: dict[str, str]) -> None:
+    """out/ を控えておいた提案に戻す。
+
+    plan refine は改訂を頼む前に out/ を空にする。改訂が失敗したり、プランナーが
+    エスカレーションしたりすると、リンタを通っていた改訂前の提案が失われる。
+    それを防ぐために、ランナーが控えから書き戻す。書き戻したファイルは runner の
+    所有になるが、次の clear_proposal で消せるので支障はない。
+    """
+    clear_proposal()
+    for name, text in files.items():
+        path = PLANNER_OUT / name
+        path.write_text(text, encoding="utf-8")
+        path.chmod(0o644)
+
+
 def call_planner(brief: str) -> str:
     """Hand the planner one brief. Same shape as call_solver, same reasons.
 
@@ -2963,14 +2981,33 @@ def cmd_plan_refine(modes: list[str]) -> int:
             return 4
 
         ledger("PLAN_REFINE", round=round_no, findings=total)
+        # 改訂前の提案を控える。plan_with_retry は最初に out/ を空にするので、
+        # 控えが無いと、改訂が失敗したときやエスカレーションしたときに、
+        # リンタを通っていた提案まで失われる。
+        draft = {name: text for name, text in read_proposal().items()
+                 if name in PROPOSAL_FILES}
         code = plan_with_retry(
             lambda feedback: brief_plan_refine(requirements, tasks, report, feedback),
             "PLAN_REFINE_DRAFT")
         if code != 0:
+            restore_proposal(draft)
+            ledger("REFINE_RESTORED", round=round_no, reason="revision failed",
+                   files=sorted(draft))
+            print(f"the revision failed; the draft from before round {round_no} "
+                  f"is back in {PLANNER_OUT}", file=sys.stderr)
             return code
-        if ESCALATE_NAME in read_proposal():
-            print("the planner escalated rather than revising; run `plan apply` "
-                  "to record it", file=sys.stderr)
+        proposal = read_proposal()
+        if ESCALATE_NAME in proposal:
+            REFINE_ESCALATION.write_text(proposal[ESCALATE_NAME], encoding="utf-8")
+            restore_proposal(draft)
+            ledger("REFINE_RESTORED", round=round_no, reason="planner escalated",
+                   files=sorted(draft))
+            print("The planner escalated to you rather than revising:\n")
+            print(proposal[ESCALATE_NAME])
+            print(f"\nthe draft from before round {round_no} is back in "
+                  f"{PLANNER_OUT}, and the escalation is kept at "
+                  f"{REFINE_ESCALATION}.\nRun `plan apply` to apply the draft as "
+                  f"it is, or `plan bootstrap` to start over.", file=sys.stderr)
             return 3
         # The planner rewrites the whole file, so the stamp goes back on. It is
         # the runner's mark, not the planner's, and a plan that lost it would
