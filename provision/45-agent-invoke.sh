@@ -196,6 +196,35 @@ if [ "$fail" -ne 0 ]; then
   exit 1
 fi
 
+# ---- 資格情報の柵、各役の視点で ------------------------------------------
+#
+# 3役が同じ Claude の資格情報の形を持つので、ファイルの権限だけが役を分ける。
+# 各役は自分の .env を読めて、他の役の .env を読めないことを確かめる。
+#
+# 40-perms.sh ではなくここで検査する。.env を作るのはこのスクリプトで、
+# 40-perms.sh はその前に走る。無いファイルへの `test -r` は失敗するので、
+# 「読めない」の検査が何も確かめずに通ってしまう。
+fail=0
+for who in solver planner critic; do
+  [ -f "/etc/loop/$who.env" ] || { echo "FAIL: /etc/loop/$who.env does not exist"; fail=1; continue; }
+  if ! sudo -u "$who" test -r "/etc/loop/$who.env" 2>/dev/null; then
+    echo "FAIL: $who should be able to: test -r /etc/loop/$who.env"
+    fail=1
+  fi
+  for other in solver planner critic; do
+    [ "$other" = "$who" ] && continue
+    if sudo -u "$other" test -r "/etc/loop/$who.env" 2>/dev/null; then
+      echo "FAIL: $other should NOT be able to: test -r /etc/loop/$who.env"
+      fail=1
+    fi
+  done
+done
+
+if [ "$fail" -ne 0 ]; then
+  echo "45-agent-invoke: CREDENTIAL FENCE BROKEN" >&2
+  exit 1
+fi
+
 # Report what is still missing, per account, rather than a bare "ok".
 pending=""
 for who in solver planner critic; do
