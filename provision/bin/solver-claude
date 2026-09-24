@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+# Claude Code で動くソルバーのバックエンド。
+#
+#     solver-claude <brief-file> <seconds>
+#
+# ランナーが名前 `claude` を渡すと、solver-run がこれを呼ぶ。uid は既に solver、
+# cwd は既に /srv/loop/project になっている。どちらも solver-run が決めることで、
+# このスクリプトは触らない。
+#
+# 形は planner-run と同じにしてある。違うのはツールの範囲だけ。
+#
+# Bash は許さない。テストを走らせる許可は、実質「ソルバーが書いたコードを
+# 動かす許可」になる。テストもソルバーが書くからだ。egress が閉じていない今、
+# それは外との通信と、timeout の後も残るプロセスを許すことになる。ランナーは
+# 別 uid なので、残ったプロセスを止められない。
+# 合否はランナーの VERIFY だけが出す。失敗の中身は次の試行のブリーフで届く。
+set -euo pipefail
+
+BRIEF="${1:?usage: solver-claude <brief-file> <seconds>}"
+LIMIT="${2:-900}"
+[ -r "$BRIEF" ] || { echo "solver-claude: cannot read brief: $BRIEF" >&2; exit 2; }
+
+# 資格情報は solver だけが読めるファイルに置く。planner.env や critic.env とは
+# 別にする。ある役の資格情報が漏れても、他の役の資格情報は渡らない。
+if [ -r /etc/loop/solver.env ]; then
+  set -a
+  . /etc/loop/solver.env
+  set +a
+fi
+if [ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
+  if [ -n "${ANTHROPIC_API_KEY_CONSOLE:-}" ]; then
+    export ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY_CONSOLE"
+    echo "solver-claude: no subscription token; falling back to Console credit" >&2
+  else
+    echo "solver-claude: no credentials in /etc/loop/solver.env" >&2
+    echo "    subscription (preferred): sudo -u solver -H claude setup-token" >&2
+    exit 3
+  fi
+fi
+unset ANTHROPIC_API_KEY_CONSOLE
+
+# 呼び出しごとに使い捨ての HOME を作る。前のステップの記憶を次へ持ち越させない。
+# BOOTSTRAP はステップ間でソルバーが記憶を失うことを求めている。codex の
+# --ephemeral と同じ役割を、置き場を無くすことで果たす。
+HOME="$(mktemp -d)"
+export HOME
+trap 'rm -rf "$HOME"' EXIT
+
+# --safe-mode / --setting-sources "" / --no-session-persistence
+#     ブリーフだけを入力にする（RUNNER_SPEC 5 章）。planner-run と同じ。
+# --allowedTools "Read Write Edit"
+#     ファイルを読んで書くだけ。書ける場所は src/ と tests/ で、それを決めるのは
+#     このフラグではなくファイルシステムの権限（40-perms.sh）。
+# --disallowedTools "Bash"
+#     許可リストに無い時点で -p では拒否される。上の理由を読み手に示すために
+#     明示する。
+#
+# 上限時間はここで掛ける。ランナーは別 uid で、このプロセスに信号を送れない。
+# `timeout` は 124 で終わる。
+set +e
+timeout --kill-after=30 "$LIMIT" claude -p \
+  --safe-mode \
+  --setting-sources "" \
+  --no-session-persistence \
+  --allowedTools "Read Write Edit" \
+  --disallowedTools "Bash" \
+  < "$BRIEF"
+rc=$?
+set -e
+exit "$rc"
