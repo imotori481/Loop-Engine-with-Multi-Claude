@@ -25,7 +25,9 @@ LIMIT="${2:-900}"
 #
 # The character class is the whole of the validation, and it has to be, because
 # the name goes into a path below.
-BACKEND="${3:-codex}"
+# 名前を省略したときは claude（solver-claude）を使う。codex は名前を指定した
+# ときだけ使う任意のバックエンドにする。
+BACKEND="${3:-claude}"
 case "$BACKEND" in
   ""|*[!a-z0-9]*) echo "solver-run: bad backend name: $BACKEND" >&2; exit 4 ;;
 esac

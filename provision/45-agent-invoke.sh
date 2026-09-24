@@ -19,6 +19,9 @@ install -d -o root -g root -m 755 /srv/loop/bin
 install -o root -g root -m 755 bin/solver-run   /srv/loop/bin/solver-run
 install -o root -g root -m 755 bin/planner-run  /srv/loop/bin/planner-run
 install -o root -g root -m 755 bin/critic-run   /srv/loop/bin/critic-run
+# solver-run が名前 `claude` で呼ぶ実体。ランナーは名前しか渡せないので、
+# バックエンドを増やせるのは root がここで置いたときだけ。
+install -o root -g root -m 755 bin/solver-claude /srv/loop/bin/solver-claude
 install -o root -g root -m 755 bin/smoke-solver /srv/loop/bin/smoke-solver
 install -o root -g root -m 755 bin/smoke-pytest /srv/loop/bin/smoke-pytest
 install -o root -g root -m 755 bin/smoke-planner /srv/loop/bin/smoke-planner
@@ -57,17 +60,30 @@ install -d -o runner -g humanw -m 3770 /srv/loop/human/in
 
 install -d -o root -g root -m 755 /etc/loop
 
-# There is deliberately NO credential file for the solver. It authenticates with
-# its own ChatGPT subscription login, which lands in /home/solver/.codex at mode
-# 700 -- so the credential is reachable by exactly one uid and by nothing else:
+# ソルバーの資格情報。planner.env や critic.env とは別のファイルにし、
+# solver だけが読めるようにする。ある役の資格情報が漏れても、他の役の資格情報は
+# 渡らない。
+#
+# codex バックエンドはこのファイルを使わない。solver 自身の ChatGPT ログインが
+# /home/solver/.codex（0700）に入る:
 #
 #     sudo -u solver -H codex login --device-auth
+if [ ! -f /etc/loop/solver.env ]; then
+  cat > /etc/loop/solver.env <<'EOF'
+# `solver` アカウントの非対話用資格情報。手で埋める。
 #
-# Logging in as the maintenance account does not work, and that is the property
-# worth having rather than a nuisance to route around: /home/<other> is 0700, so
-# a credential can only ever be used by the account it was issued to.
-# (Device auth needs no browser inside the distro -- it prints a code you enter
-# in a browser on the host.)
+# 推奨: サブスクリプションのトークン。
+#     sudo -u solver -H claude setup-token
+# 表示されたトークンを '=' の後ろに貼る。プランナー、クリティック、
+# あんた自身の対話作業と同じ利用枠を使う。
+CLAUDE_CODE_OAUTH_TOKEN=
+
+# 予備: 従量課金の Console クレジット。上のトークンが空のときだけ使う。
+ANTHROPIC_API_KEY_CONSOLE=
+EOF
+fi
+chown root:solver /etc/loop/solver.env
+chmod 640 /etc/loop/solver.env
 
 # The planner's credentials are a SEPARATE file with a separate key, readable by
 # a different uid. Two reasons, both mechanical rather than tidy-minded:
@@ -180,10 +196,38 @@ if [ "$fail" -ne 0 ]; then
   exit 1
 fi
 
+# ---- 資格情報の柵、各役の視点で ------------------------------------------
+#
+# 3役が同じ Claude の資格情報の形を持つので、ファイルの権限だけが役を分ける。
+# 各役は自分の .env を読めて、他の役の .env を読めないことを確かめる。
+#
+# 40-perms.sh ではなくここで検査する。.env を作るのはこのスクリプトで、
+# 40-perms.sh はその前に走る。無いファイルへの `test -r` は失敗するので、
+# 「読めない」の検査が何も確かめずに通ってしまう。
+fail=0
+for who in solver planner critic; do
+  [ -f "/etc/loop/$who.env" ] || { echo "FAIL: /etc/loop/$who.env does not exist"; fail=1; continue; }
+  if ! sudo -u "$who" test -r "/etc/loop/$who.env" 2>/dev/null; then
+    echo "FAIL: $who should be able to: test -r /etc/loop/$who.env"
+    fail=1
+  fi
+  for other in solver planner critic; do
+    [ "$other" = "$who" ] && continue
+    if sudo -u "$other" test -r "/etc/loop/$who.env" 2>/dev/null; then
+      echo "FAIL: $other should NOT be able to: test -r /etc/loop/$who.env"
+      fail=1
+    fi
+  done
+done
+
+if [ "$fail" -ne 0 ]; then
+  echo "45-agent-invoke: CREDENTIAL FENCE BROKEN" >&2
+  exit 1
+fi
+
 # Report what is still missing, per account, rather than a bare "ok".
 pending=""
-[ -r /home/solver/.codex/auth.json ] || pending="$pending solver(codex-login)"
-for who in planner critic; do
+for who in solver planner critic; do
   if ! grep -qE '^(CLAUDE_CODE_OAUTH_TOKEN|ANTHROPIC_API_KEY_CONSOLE)=.+' \
         "/etc/loop/$who.env" 2>/dev/null; then
     pending="$pending $who(token)"

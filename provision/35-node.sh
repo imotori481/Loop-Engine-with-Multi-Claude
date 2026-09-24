@@ -59,8 +59,13 @@ sudo -u runner tee "$TOOLS/package.json" >/dev/null <<EOF
 EOF
 
 # Writable while npm works, frozen immediately after.
+#
+# --legacy-peer-deps: vitest が任意で宣言するピア依存を自動で入れない。
+# npm 10.9 はその解決中に @vitest/browser-playwright の最新版（vitest 5 向け）を
+# 拾い、`Cannot read properties of null (reading 'edgesOut')` で落ちる。
+# この箱で使うのは package.json に書いた2つだけなので、自動解決は要らない。
 chmod -R u+w "$TOOLS"
-sudo -u runner npm install --prefix "$TOOLS" --no-audit --no-fund --silent
+sudo -u runner npm install --prefix "$TOOLS" --no-audit --no-fund --silent --legacy-peer-deps
 
 # ---- freeze ------------------------------------------------------------
 # Readable and executable by everyone, writable by runner alone. A stuck solver

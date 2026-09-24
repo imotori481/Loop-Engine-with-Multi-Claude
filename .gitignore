@@ -23,3 +23,6 @@ __pycache__/
 # Host dashboard runtime state and machine-local launcher configuration.
 host/dashboard/.state/
 host/dashboard/config.json
+
+# プロンプト
+/CLAUDE.md
