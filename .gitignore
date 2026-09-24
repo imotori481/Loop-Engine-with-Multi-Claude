@@ -25,4 +25,4 @@ host/dashboard/.state/
 host/dashboard/config.json
 
 # プロンプト
-CLAUDE.md
+/CLAUDE.md
