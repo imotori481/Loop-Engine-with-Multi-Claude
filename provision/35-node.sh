@@ -153,6 +153,21 @@ EOF
 chown runner:runner "$P/index.html"
 chmod 644 "$P/index.html"
 
+# ---- commit what this script wrote into the project --------------------
+#
+# 上で書いた3つは作業ツリーの中にある。コミットしないと、ランナーは最初の
+# PLAN_LOAD で「作業ツリーが dirty」と言って止まる。ソルバーの書き込みを
+# 見つけるための検査に、環境の側のファイルが引っかかるからだ。
+# 20-layout.sh の最初のコミットと同じく runner がコミットする。対象はこの3つ
+# だけにし、台帳など他の変更は巻き込まない。変更が無ければ何もしない。
+ENV_FILES=(.gitignore vitest.config.mjs index.html)
+sudo -u runner git -C "$P" add -- "${ENV_FILES[@]}"
+if ! sudo -u runner git -C "$P" diff --cached --quiet -- "${ENV_FILES[@]}"; then
+  sudo -u runner git -C "$P" commit -q -m "chore: environment files from 35-node.sh" \
+    -- "${ENV_FILES[@]}"
+  sudo -u runner git -C "$P" push -q origin main
+fi
+
 # ---- assertions, from the solver's point of view -----------------------
 # A permission model nobody tested is a permission model that does not exist.
 fail=0
