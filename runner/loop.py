@@ -2915,6 +2915,11 @@ def run_critique(modes: list[str], tasks: str) -> dict[str, list[dict]]:
     by_mode: dict[str, list[dict]] = {}
     for mode in modes:
         if mode == "coverage" and not requirements:
+            # 飛ばしたことを黙らない。飛ばしたモードは by_mode に入らないので、
+            # 呼び出し側から見ると「走って何も見つけなかった」と区別できない。
+            ledger("CRITIQUE_SKIPPED", mode=mode, reason=f"no requirements at {REQUIREMENTS}")
+            print(f"coverage skipped: no requirements at {REQUIREMENTS}",
+                  file=sys.stderr)
             continue
         brief = (brief_critique_coverage(requirements, tasks) if mode == "coverage"
                  else brief_critique_trace(tasks))
@@ -2926,6 +2931,21 @@ def run_critique(modes: list[str], tasks: str) -> dict[str, list[dict]]:
                titles=[str(f.get("title", ""))[:200] for f in findings])
         by_mode[mode] = findings
     return by_mode
+
+
+def no_critique_ran(modes: list[str]) -> int:
+    """頼んだモードが1つも走らなかったときの終わり方。
+
+    指摘ゼロとは別の結果として扱う。clean と表示すると、批評を1回も受けて
+    いない計画が、批評を通った計画と同じに見える。返す 1 は「ランナーが仕事を
+    できなかった」で、cmd_critique の 0（指摘なし）と 4（指摘あり）のどちらとも
+    重ならない。
+    """
+    ledger("CRITIQUE_NONE", requested=list(modes))
+    print(f"no critique ran (requested: {', '.join(modes)}). This is not a clean "
+          f"result: nothing looked at the plan.\nFor coverage, put the "
+          f"requirements at {REQUIREMENTS}.", file=sys.stderr)
+    return 1
 
 
 def cmd_plan_refine(modes: list[str]) -> int:
@@ -2962,6 +2982,8 @@ def cmd_plan_refine(modes: list[str]) -> int:
         language = json.loads(tasks).get("language", "python")
 
         by_mode = run_critique(modes, tasks)
+        if not by_mode:
+            return no_critique_ran(modes)
         total = sum(len(f) for f in by_mode.values())
         report = render_findings(by_mode)
         print(f"\n=== critique {round_no} of at most {cap + 1} ===")
@@ -3050,6 +3072,8 @@ def cmd_critique(modes: list[str]) -> int:
               file=sys.stderr)
 
     by_mode = run_critique(modes, tasks)
+    if not by_mode:
+        return no_critique_ran(modes)
     total = sum(len(f) for f in by_mode.values())
     print(render_findings(by_mode))
     if total == 0:
