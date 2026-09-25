@@ -65,6 +65,9 @@ trap 'rm -rf "$HOME"' EXIT
 # --allowedTools "Read Write Edit"
 #     ファイルを読んで書くだけ。書ける場所は src/ と tests/ で、それを決めるのは
 #     このフラグではなくファイルシステムの権限（40-perms.sh）。
+# --output-format json
+#     結果の文と、使ったモデル・トークン数・所要時間を1つの JSON で返す。
+#     ランナーが消費量を台帳に残し、結果の文だけを取り出す。
 # --disallowedTools "Bash"
 #     許可リストに無い時点で -p では拒否される。上の理由を読み手に示すために
 #     明示する。
@@ -74,6 +77,7 @@ trap 'rm -rf "$HOME"' EXIT
 set +e
 timeout --kill-after=30 "$LIMIT" claude -p \
   "${role_args[@]}" \
+  --output-format json \
   --safe-mode \
   --setting-sources "" \
   --no-session-persistence \

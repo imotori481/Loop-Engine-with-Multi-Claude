@@ -77,6 +77,8 @@ cd "$OUT"
 # --no-session-persistence
 #                        no transcript to resume from, so a planning call cannot
 #                        continue a previous one.
+# --output-format json   結果の文と消費量を1つの JSON で返す。ランナーが
+#                        消費量を台帳に残し、結果の文だけを取り出す。
 # --allowedTools         it reads its brief on stdin and writes one proposal
 #                        here; nothing else is pre-approved.
 #
@@ -85,6 +87,7 @@ cd "$OUT"
 set +e
 timeout --kill-after=30 "$LIMIT" claude -p \
   "${role_args[@]}" \
+  --output-format json \
   --safe-mode \
   --setting-sources "" \
   --no-session-persistence \

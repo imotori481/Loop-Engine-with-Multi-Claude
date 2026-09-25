@@ -7,6 +7,7 @@
     python3 -m unittest discover -s runner/tests
 """
 
+import json
 import subprocess
 import sys
 import unittest
@@ -71,6 +72,52 @@ class WaitingForQuota(unittest.TestCase):
         invoke = mock.Mock(return_value=proc(1, "Traceback"))
         self.assertEqual(loop.run_agent("critic", "CRITIQUE", invoke).returncode, 1)
         self.assertEqual(invoke.call_count, 1)
+        self.assertEqual(self.events, [])
+
+
+class UsageIsRecorded(unittest.TestCase):
+    """--output-format json の出力から消費量を台帳に残し、結果の文だけを返す。"""
+
+    def setUp(self) -> None:
+        self.events: list[tuple[str, dict]] = []
+        p = mock.patch.object(loop, "ledger",
+                              lambda event, **k: self.events.append((event, k)))
+        p.start()
+        self.addCleanup(p.stop)
+
+    def payload(self, **extra) -> str:
+        data = {"type": "result", "subtype": "success", "is_error": False,
+                "result": "Created src/smoke.txt", "num_turns": 3,
+                "duration_ms": 4200, "total_cost_usd": 0.01,
+                "usage": {"input_tokens": 10, "output_tokens": 20},
+                "modelUsage": {"claude-sonnet-5": {"outputTokens": 20}}}
+        data.update(extra)
+        return json.dumps(data)
+
+    def test_the_caller_gets_the_result_text_and_the_ledger_gets_the_usage(self):
+        result = loop.run_agent("solver", "IMPL", lambda: proc(0, self.payload()))
+        self.assertEqual(result.stdout.strip(), "Created src/smoke.txt")
+        (event, fields), = self.events
+        self.assertEqual(event, "USAGE")
+        self.assertEqual(fields["who"], "solver")
+        self.assertEqual(fields["models"], ["claude-sonnet-5"])
+        self.assertEqual(fields["usage"], {"input_tokens": 10, "output_tokens": 20})
+        self.assertEqual(fields["turns"], 3)
+
+    def test_a_quota_message_inside_the_json_is_still_recognised(self):
+        with mock.patch.object(loop.time, "sleep", lambda s: None), \
+             mock.patch.dict(loop.QUOTA, {"wait_seconds": 1, "waits": 1}):
+            calls = iter([
+                proc(1, self.payload(is_error=True, result="You've hit your session limit")),
+                proc(0, self.payload()),
+            ])
+            result = loop.run_agent("planner", "PLAN_PROPOSE", lambda: next(calls))
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual([e for e, _ in self.events], ["USAGE", "QUOTA_WAIT", "USAGE"])
+
+    def test_output_that_is_not_json_is_passed_through(self):
+        result = loop.run_agent("solver", "IMPL", lambda: proc(0, "plain text"))
+        self.assertEqual(result.stdout, "plain text")
         self.assertEqual(self.events, [])
 
 

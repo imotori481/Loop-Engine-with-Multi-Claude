@@ -75,12 +75,16 @@ cd "$OUT"
 
 # --safe-mode / --setting-sources "" / --no-session-persistence
 #     the brief is the only input, as for the planner (RUNNER_SPEC section 5).
+# --output-format json
+#     結果の文と消費量を1つの JSON で返す。ランナーが消費量を台帳に残し、
+#     結果の文だけを取り出す。
 # --allowedTools "Read Write"
 #     it reads its brief on stdin and writes one findings file here. No Edit:
 #     there is nothing here it should be revising.
 set +e
 timeout --kill-after=30 "$LIMIT" claude -p \
   "${role_args[@]}" \
+  --output-format json \
   --safe-mode \
   --setting-sources "" \
   --no-session-persistence \

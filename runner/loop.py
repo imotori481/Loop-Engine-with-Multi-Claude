@@ -846,14 +846,46 @@ def quota_problem(out: str) -> str | None:
     return None
 
 
+def unwrap_result(proc: subprocess.CompletedProcess):
+    """`claude -p --output-format json` の出力から、結果の文と JSON を取り出す。
+
+    起動スクリプトは JSON で出力させている。呼び出し側はこれまでどおり文を
+    受け取り、JSON は消費量の記録に回す。JSON として読めない出力は、起動前の
+    エラーや codex のように JSON を出さないバックエンドのもので、そのまま返す。
+    """
+    try:
+        data = json.loads(proc.stdout)
+    except ValueError:
+        return proc, None
+    if not isinstance(data, dict) or not ("result" in data or "usage" in data):
+        return proc, None
+    text = str(data.get("result") or data.get("subtype") or "")
+    return subprocess.CompletedProcess(proc.args, proc.returncode, text + "\n",
+                                       proc.stderr), data
+
+
+def record_usage(who: str, phase: str, data: dict) -> None:
+    """1回の呼び出しで使った枠を台帳に残す。どの役が枠を使ったかを run 後に読む。"""
+    ledger("USAGE", who=who, phase=phase,
+           models=sorted(data.get("modelUsage") or {}),
+           usage=data.get("usage"),
+           cost_usd=data.get("total_cost_usd"),
+           duration_ms=data.get("duration_ms"),
+           turns=data.get("num_turns"),
+           is_error=data.get("is_error"))
+
+
 def run_agent(who: str, phase: str, invoke) -> subprocess.CompletedProcess:
     """エージェントを1回呼ぶ。枠が無くて失敗したときだけ、待ってやり直す。
 
     それ以外の結果は、成功も失敗もそのまま返す。判断は呼び出し側に残す。
-    TimeoutExpired もそのまま上に通す。
+    TimeoutExpired もそのまま上に通す。出力が JSON なら、消費量を台帳に残し、
+    結果の文だけを返す。
     """
     for round_no in range(1, QUOTA["waits"] + 2):
-        proc = invoke()
+        proc, data = unwrap_result(invoke())
+        if data is not None:
+            record_usage(who, phase, data)
         kind = quota_problem(proc.stdout + proc.stderr) if proc.returncode != 0 else None
         if kind is None:
             return proc
