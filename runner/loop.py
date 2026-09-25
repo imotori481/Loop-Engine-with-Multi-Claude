@@ -135,6 +135,34 @@ TIMEOUTS = {"test": 120, "solver": 960, "planner": 1800, "critic": 900}
 # cover solver-run/planner-run's `--kill-after=30` plus the time to write output.
 BACKSTOP_MARGIN = 120
 
+# 利用上限と一時的な混雑。3役は同じサブスクリプションの枠を使うので、上限に
+# 当たるのは計画の失敗でもソルバーの失敗でもない。それを Halt にすると
+# エスカレーションになり、エスカレーションはプランナーを呼んで、同じ枠を
+# さらに使う。だから見分けて、待ってから同じ呼び出しをやり直す。
+#
+# 文面は Claude Code のエラーのドキュメントにあるもの。-p では、実行中の
+# 失敗はこの文が標準出力に出て、0 以外で終わる。
+#   usage_limit  サブスクリプションの枠。Claude Code は自分ではやり直さない
+#   rate_limit   429 と 529。Claude Code が何度かやり直したうえで諦めたもの
+QUOTA_PATTERNS = {
+    "usage_limit": re.compile(r"You[’']ve hit your \w+ limit"),
+    "rate_limit": re.compile(r"Request rejected \(429\)|temporarily limiting requests"
+                             r"|Repeated 529 Overloaded"),
+}
+# 1回の待ち時間と、待つ回数の上限。既定は 15分 × 24回 = 6時間で、セッションの
+# 枠が戻るまでの時間を覆う。週の枠は覆わない。そのときは待ち切ってから止まる。
+QUOTA = {"wait_seconds": 900, "waits": 24}
+
+
+class QuotaExhausted(Exception):
+    """待ち切っても枠が戻らなかった。Halt ではないので、エスカレーションしない。"""
+
+    def __init__(self, who: str, phase: str, kind: str):
+        super().__init__(f"{who} is still out of quota ({kind}) in {phase}")
+        self.who = who
+        self.phase = phase
+        self.kind = kind
+
 # RUNNER_SPEC 6-2. BOOTSTRAP 1-4 caps the ATTEMPTS inside a step but says nothing
 # about the loop outside it, so a planner answering (a) over and over is
 # unbounded -- and (a) is the answer a planner will keep reaching for, because it
@@ -810,6 +838,34 @@ def agent_command(user: str, script: Path, brief_path: Path, limit: int,
     return argv
 
 
+def quota_problem(out: str) -> str | None:
+    """出力が利用上限か一時的な混雑を示していれば、その種類を返す。"""
+    for kind, pattern in QUOTA_PATTERNS.items():
+        if pattern.search(out):
+            return kind
+    return None
+
+
+def run_agent(who: str, phase: str, invoke) -> subprocess.CompletedProcess:
+    """エージェントを1回呼ぶ。枠が無くて失敗したときだけ、待ってやり直す。
+
+    それ以外の結果は、成功も失敗もそのまま返す。判断は呼び出し側に残す。
+    TimeoutExpired もそのまま上に通す。
+    """
+    for round_no in range(1, QUOTA["waits"] + 2):
+        proc = invoke()
+        kind = quota_problem(proc.stdout + proc.stderr) if proc.returncode != 0 else None
+        if kind is None:
+            return proc
+        if round_no > QUOTA["waits"]:
+            break
+        ledger("QUOTA_WAIT", who=who, phase=phase, kind=kind, round=round_no,
+               of=QUOTA["waits"], seconds=QUOTA["wait_seconds"])
+        time.sleep(QUOTA["wait_seconds"])
+    ledger("QUOTA_EXHAUSTED", who=who, phase=phase, kind=kind)
+    raise QuotaExhausted(who, phase, kind)
+
+
 def call_solver(phase: str, brief: str, backend: str | None = None) -> str:
     """Hand the solver one brief and nothing else.
 
@@ -833,8 +889,9 @@ def call_solver(phase: str, brief: str, backend: str | None = None) -> str:
     # default applied on the far side of a sudo boundary is not an answer.
     backend = backend or SOLVER_TIERS[0]
     try:
-        proc = run(agent_command("solver", SOLVER_RUN, brief_path, limit, backend),
-                   timeout=limit + BACKSTOP_MARGIN)
+        proc = run_agent("solver", phase, lambda: run(
+            agent_command("solver", SOLVER_RUN, brief_path, limit, backend),
+            timeout=limit + BACKSTOP_MARGIN))
     except subprocess.TimeoutExpired:
         # Reaching this means solver-run's own, shorter ceiling did not fire.
         # Killing the agent from here is not possible -- it belongs to another
@@ -1870,8 +1927,9 @@ def call_planner(brief: str) -> str:
     try:
         # The limit is passed, not assumed: planner-run defaults to 900s, so a
         # value set here and not handed over is a ceiling that never applies.
-        proc = run(agent_command("planner", PLANNER_RUN, brief_path, limit),
-                   timeout=limit + BACKSTOP_MARGIN)
+        proc = run_agent("planner", "PLAN_PROPOSE", lambda: run(
+            agent_command("planner", PLANNER_RUN, brief_path, limit),
+            timeout=limit + BACKSTOP_MARGIN))
     except subprocess.TimeoutExpired:
         raise Halt("PLAN_PROPOSE", f"planner still running after {limit + BACKSTOP_MARGIN}s",
                    "planner-run's internal timeout did not fire; check with: "
@@ -2803,8 +2861,9 @@ def call_critic(brief: str, mode: str) -> str:
 
     limit = TIMEOUTS["critic"]
     try:
-        proc = run(agent_command("critic", CRITIC_RUN, brief_path, limit),
-                   timeout=limit + BACKSTOP_MARGIN)
+        proc = run_agent("critic", "CRITIQUE", lambda: run(
+            agent_command("critic", CRITIC_RUN, brief_path, limit),
+            timeout=limit + BACKSTOP_MARGIN))
     except subprocess.TimeoutExpired:
         raise Halt("CRITIQUE", f"critic still running after {limit + BACKSTOP_MARGIN}s",
                    "critic-run's internal timeout did not fire; check with: "
@@ -3973,6 +4032,16 @@ def main() -> int:
     except Halt as halt:
         print(f"HALT [{halt.phase}] {halt.reason}\n{halt.detail}", file=sys.stderr)
         return 2
+    except QuotaExhausted as quota:
+        # エスカレーションはしていない。計画にもソルバーにも落ち度は無く、
+        # 枠が戻れば同じところからやり直せる。
+        waited = QUOTA["waits"] * QUOTA["wait_seconds"] // 60
+        print(f"QUOTA [{quota.phase}] {quota.who} is still out of quota ({quota.kind}) "
+              f"after waiting {waited} minutes. Nothing was escalated.\n"
+              f"When the limit has reset: if a step was in progress, run "
+              f"`reset <step-id>` first, then run the same command again.",
+              file=sys.stderr)
+        return 5
     except FileNotFoundError as missing:
         # Almost always one thing: a fresh project with no plan in it yet. Say
         # so, rather than printing a traceback about tasks.json.
