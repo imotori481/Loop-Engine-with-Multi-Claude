@@ -45,12 +45,8 @@ class WhatTheMachineLooksLike(unittest.TestCase):
         self.assertIn("tkinter imports", self.facts(display="", tk_ok=True))
 
 
-class ThePageBelongsToTypeScript(unittest.TestCase):
-    """35-node.sh は言語に関係なく index.html と vitest.config.mjs を置く。
-
-    Python の計画にそれを見せると、クリティックは「人が開く index.html から
-    コードに届かない」と指摘し、プランナーはそれに答えられない。
-    """
+class RootFiles:
+    """35-node.sh と同じく、根に index.html と vitest.config.mjs を置いた箱。"""
 
     def facts(self, language: str) -> str:
         with tempfile.TemporaryDirectory() as temp:
@@ -69,6 +65,14 @@ class ThePageBelongsToTypeScript(unittest.TestCase):
                     returncode=0, stdout="v22.23.3", stderr="")
                 return loop.environment_facts()
 
+
+class ThePageBelongsToTypeScript(RootFiles, unittest.TestCase):
+    """35-node.sh は言語に関係なく index.html と vitest.config.mjs を置く。
+
+    Python の計画にそれを見せると、クリティックは「人が開く index.html から
+    コードに届かない」と指摘し、プランナーはそれに答えられない。
+    """
+
     def test_a_python_plan_is_not_told_about_the_page(self):
         facts = self.facts("python")
         self.assertNotIn("index.html", facts)
@@ -78,6 +82,28 @@ class ThePageBelongsToTypeScript(unittest.TestCase):
         facts = self.facts("typescript")
         self.assertIn("It is what a person opens", facts)
         self.assertIn('import { start } from "/src/main.ts"', facts)
+
+
+class TheRootBelongsToTheEnvironment(RootFiles, unittest.TestCase):
+    """根のファイルは最初のステップより前に完成している。
+
+    run 8 の S10 は index.html の中身を確かめる条件を持っていた。スタブの時点で
+    通るので R4 で必ず止まり、プランナーは人間に差し戻した。
+    """
+
+    def test_the_files_on_disk_are_named_and_the_trap_is_explained(self):
+        facts = self.facts("typescript")
+        self.assertIn("belong to the environment: index.html, vitest.config.mjs", facts)
+        self.assertIn("already true against the stub", facts)
+        self.assertIn("(R4)", facts)
+
+    def test_the_page_gets_an_example_of_what_to_test_instead(self):
+        self.assertIn("call `start` on an element", self.facts("typescript"))
+
+    def test_a_python_plan_is_not_told_about_files_it_is_not_shown(self):
+        facts = self.facts("python")
+        self.assertNotIn("belong to the environment", facts)
+        self.assertNotIn("call `start`", facts)
 
 
 class WhatTheSolverCanDo(unittest.TestCase):

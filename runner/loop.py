@@ -2479,6 +2479,31 @@ def environment_facts() -> str:
         listing.append(f"  {rel}/" if child.is_dir() else f"  {rel}")
     tree = "\n".join(listing) or "  (empty apart from the directories above)"
 
+    # 根に置かれたファイルは環境の持ち物で、どのステップも書かない。最初の
+    # ステップより前に完成しているので、中身だけを確かめる条件はスタブの時点で
+    # 通り、RED_GATE の R4 で必ず止まる。run 8 の S10 は index.html の中身を
+    # 確かめる条件で止まり、プランナーは人間に差し戻した。名前は書き写さず、
+    # 実際に置かれているものから取る。
+    provided = sorted(child.name for child in PROJECT.iterdir()
+                      if child.is_file() and child.name not in skip) \
+        if PROJECT.is_dir() else []
+    provided_text = ""
+    if provided:
+        provided_text = f"""
+These files at the root belong to the environment: {", ".join(provided)}.
+No step writes them, and each is already in its final form before the first
+step runs. So a criterion that checks only one of them -- what it says, what it
+imports, that it exists -- is already true against the stub. RED_GATE runs every
+test before anything is implemented, sees that one pass, and stops the step
+(R4). Every criterion has to stay false until this step's own code under src/
+is written. Where one of these files matters, test the code it calls, not the
+file.
+"""
+        if "index.html" in provided:
+            provided_text += """For the page: call `start` on an element and check what it puts there. Do not
+write a criterion about the text of index.html.
+"""
+
     # The file that decides what the tests can reach. Different name per
     # language, same job, and in both cases the planner has to see it: a plan
     # that fights the import path loses.
@@ -2585,7 +2610,7 @@ Everything under the project root, except plan/, .git/ and the frozen
 toolchain -- this is the whole of what exists today:
 
 {tree}
-
+{provided_text}
 {wiring.name} at the root, which the test runner loads automatically:
 
 {wiring_text}
