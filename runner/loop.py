@@ -2934,6 +2934,15 @@ Then say plainly:
 - Are there states the artifact is evidently built to handle that no sequence
   of user actions can ever reach? Name them and show why.
 
+  This question is about the artifact's OWN logic: a goal that can never be
+  met, a purchase that can never be afforded, a screen that can never be
+  shown. It is not about input that arrives from outside the user's actions --
+  saved data read back from storage, storage that was edited or corrupted, a
+  save written by an older version, a clock that moved, a file or response
+  from elsewhere. That input is real even though no click produces it, and a
+  test that feeds it in is checking a defence, not exercising dead code. Do
+  not report it.
+
 Show your derivation with the actual numbers from the criteria, so that someone
 can check each step. Do not describe what the plan intends -- describe what it
 specifies. If your derivation contradicts what the prose in `goal` or

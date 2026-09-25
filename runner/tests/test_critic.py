@@ -58,6 +58,14 @@ class WhatTheCriticIsTold(unittest.TestCase):
             self.assertIn("empty `findings` list", brief)
             self.assertIn("cannot approve", brief)
 
+    def test_the_tracer_is_told_a_defence_is_not_dead_code(self):
+        # run 8 の計画では、壊れたセーブや知らない ID への守りのテストを、
+        # 3回の批評すべてで「遊んでいても届かない状態」と指摘した。訊いた問いが
+        # そう答えるよう誘っていた。外から来る入力は対象外だと伝える。
+        brief = brief_critique_trace(TASKS)
+        self.assertIn("the artifact's OWN logic", brief)
+        self.assertIn("checking a defence, not exercising dead code", brief)
+
 
 class ReadingTheAnswer(unittest.TestCase):
     """An unreadable critique has said nothing, and must never read as clean."""
