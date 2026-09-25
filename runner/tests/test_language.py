@@ -407,6 +407,14 @@ class RewritingTestsThatDoNotCompile(unittest.TestCase):
         coloured = chr(27) + "[31m" + "PARSE_ERROR" + chr(27) + "[0m"
         self.assertEqual(loop.ANSI.sub("", coloured), "PARSE_ERROR")
 
+    def test_the_codes_that_lost_their_escape_in_the_xml_are_stripped_too(self):
+        # JUnit の XML に ESC は書けないので、vitest は ESC だけを落とす。
+        # Claude で回した run 8 の S1 では、ソルバーがこの切れ端を6回渡された。
+        coloured = "[38;5;249ma[0m[38;5;249ms[0m"
+        self.assertEqual(loop.ANSI.sub("", coloured), "as")
+        # 数字の無い `[m` は、コードの一部かもしれないので残す。
+        self.assertEqual(loop.ANSI.sub("", "arr[m]"), "arr[m]")
+
 
 class TellingTheSolverWhatFailed(unittest.TestCase):
     """The assertion, not the path of a file the solver cannot open.
@@ -551,6 +559,31 @@ class TheRunnerWritesTheStub(Language):
         self.assertIsNone(loop.generate_stub(
             {"files_write": ["src/a.ts"],
              "contracts": {"provides": ["src/a.ts: something in prose"]}}, []))
+
+    def test_a_method_in_an_interface_becomes_a_callable_not_a_field(self):
+        # Claude で回した run 8 の S1。メソッドの引数 `listener` をフィールドと
+        # 取り違え、`): () => void` を型の位置に残した。スタブがコンパイルせず、
+        # ソルバーはテストしか書き直せないので、6回続けて落ちた。
+        self.speak("typescript")
+        stub = loop.generate_stub(
+            {"files_write": ["src/idle/store.ts"],
+             "contracts": {"provides": [
+                 "src/idle/store.ts: interface Store { getState(): GameState; "
+                 "setState(state: GameState): void; "
+                 "subscribe(listener: (state: GameState) => void): () => void }",
+                 "src/idle/store.ts: function createStore(initial: GameState): Store"]}},
+            ["src/idle/state.ts: interface GameState { resource: number }"])
+        text = stub["src/idle/store.ts"]
+        self.assertNotIn("listener:", text.split("function createStore")[1])
+        self.assertIn("subscribe: ((..._args: unknown[]) => (((..._args: unknown[]) => (undefined))))",
+                      text)
+        self.assertIn("getState: ((..._args: unknown[]) => ({ resource: -999999 }))", text)
+        self.assertIn("setState: ((..._args: unknown[]) => (undefined))", text)
+
+    def test_a_function_type_is_split_at_its_own_parenthesis(self):
+        self.assertEqual(loop.split_function_type("(l: (s: S) => void) => () => void"),
+                         ("l: (s: S) => void", "() => void"))
+        self.assertIsNone(loop.split_function_type("(A | B)[]"))
 
     def test_python_is_left_alone(self):
         self.speak("python")

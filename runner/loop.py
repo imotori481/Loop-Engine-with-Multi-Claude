@@ -607,7 +607,12 @@ LANGUAGE = dict(LANGUAGES["python"])
 # last line is where the exception class is actually legible; see failure_kind.
 # vitest colours its transform errors, and the escape codes make the message
 # unreadable wherever it is quoted back -- a brief, an escalation, a ledger.
-ANSI = re.compile(chr(27) + r"\[[0-9;]*m")
+#
+# ESC の無い形も取り除く。JUnit の XML に ESC は書けないので、vitest は
+# ESC だけを落として `[38;5;249m` の部分を残す。構文エラーの位置を示す図は
+# NO_COLOR を見ずに色を付けるので、レポートの message はこの切れ端だらけになる。
+# ESC の無い形は数字を必須にする。`arr[m]` の `[m` を消さないためだ。
+ANSI = re.compile(chr(27) + r"\[[0-9;]*m|\[\d{1,3}(?:;\d{1,3})*m")
 FAILURE_TAIL = re.compile(r":\s*([A-Za-z_][\w.]*)\s*$")
 
 
@@ -1134,6 +1139,85 @@ def literal_keys(step: dict) -> list[str]:
     return list(seen)
 
 
+def split_top(text: str, separators: str) -> list[str]:
+    """括弧の外にある区切り文字だけで分ける。
+
+    `(a: A, b: B) => C` の中の `,` や、`=>` の `>` で分けてはいけない。
+    """
+    parts, current, depth, previous = [], [], 0, ""
+    for ch in text:
+        if ch in "([{<":
+            depth += 1
+        elif ch in ")]}" or (ch == ">" and previous != "="):
+            depth -= 1
+        if ch in separators and depth == 0:
+            parts.append("".join(current))
+            current = []
+        else:
+            current.append(ch)
+        previous = ch
+    parts.append("".join(current))
+    return [p.strip() for p in parts if p.strip()]
+
+
+def split_function_type(kind: str) -> tuple[str, str] | None:
+    """`(args) => returns` を (args, returns) に分ける。関数の型でなければ None。
+
+    正規表現では足りない。引数の中に関数の型があると、最後の `) =>` まで
+    引数として読んでしまう。先頭の括弧に対応する閉じ括弧を数えて探す。
+    """
+    kind = kind.strip()
+    if not kind.startswith("("):
+        return None
+    depth = 0
+    for index, ch in enumerate(kind):
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                rest = kind[index + 1:].lstrip()
+                if rest.startswith("=>"):
+                    return kind[1:index], rest[2:].strip()
+                return None
+    return None
+
+
+def interface_fields(rest: str) -> list[tuple[str, str]]:
+    """interface の中身を (名前, 型) の並びにする。メソッドは関数の型に直す。
+
+    `subscribe(listener: (s: S) => void): () => void` を、名前 `subscribe`、
+    型 `(listener: (s: S) => void) => () => void` として扱う。以前は
+    「名前: 型」の正規表現で読み、メソッドの引数をフィールドと取り違えて、
+    コンパイルできないスタブを書いていた（Claude で回した run 8 の S1 で6回）。
+    """
+    start, end = rest.find("{"), rest.rfind("}")
+    if start < 0 or end < start:
+        return []
+    fields = []
+    for member in split_top(rest[start + 1:end], ";,\n"):
+        method = re.match(r"^(?:readonly\s+)?(\w+)\??\s*\(", member)
+        if method:
+            opened = member.index("(")
+            depth = 0
+            for index in range(opened, len(member)):
+                if member[index] == "(":
+                    depth += 1
+                elif member[index] == ")":
+                    depth -= 1
+                    if depth == 0:
+                        after = member[index + 1:].lstrip()
+                        returns = after[1:].strip() if after.startswith(":") else "void"
+                        fields.append((method.group(1),
+                                       f"({member[opened + 1:index]}) => {returns}"))
+                        break
+            continue
+        prop = re.match(r"^(?:readonly\s+)?(\w+)\??\s*:\s*(.+)$", member, re.S)
+        if prop:
+            fields.append((prop.group(1), prop.group(2).strip()))
+    return fields
+
+
 def sentinel_for(kind: str, types: dict, keys: list[str] | None = None) -> str:
     """A value of that type that no correct implementation returns for any input.
 
@@ -1152,6 +1236,13 @@ def sentinel_for(kind: str, types: dict, keys: list[str] | None = None) -> str:
         return '"__stub__"'
     if kind == "boolean":
         return '"__stub__" as unknown as boolean'
+    # 関数の型は、呼べる関数を返す。キャストした文字列だと、テストが呼んだ
+    # ところで TypeError になり、RED_GATE がそれを赤と認めない（R5）。
+    # `[]` の判定より先に見る。`() => number[]` は配列ではない。
+    function = split_function_type(kind)
+    if function is not None:
+        value = sentinel_for(function[1], types, keys) or "undefined"
+        return f"((..._args: unknown[]) => ({value}))"
     if kind.endswith("[]"):
         return "[" + sentinel_for(kind[:-2], types, keys) + "]"
     match = re.fullmatch(r"(Array|ReadonlyArray)<(.+)>", kind)
@@ -1184,7 +1275,7 @@ def ts_type_values(declarations: list[dict], keys: list[str] | None = None) -> d
     for _ in range(2):
         for d in declarations:
             if d["kind"] == "interface":
-                fields = re.findall(r"(\w+)\s*:\s*([^;}]+)", d["rest"])
+                fields = interface_fields(d["rest"])
                 if not fields:
                     continue
                 types[d["name"]] = "{ " + ", ".join(
