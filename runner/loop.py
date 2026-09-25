@@ -2968,6 +2968,14 @@ Then say plainly:
   test that feeds it in is checking a defence, not exercising dead code. Do
   not report it.
 
+  That exemption covers the DEFENCE, not the thing being read. If the
+  artifact reads something back -- a save, a setting, a record -- check that
+  some step in the plan also writes it. Something the artifact reads that no
+  step ever writes, and that the plan does not say comes from elsewhere (a
+  file the user supplies, a response from a server), is a defect in the
+  artifact's own logic: the read path is reachable, and what it finds is
+  always nothing. Report that.
+
 Show your derivation with the actual numbers from the criteria, so that someone
 can check each step. Do not describe what the plan intends -- describe what it
 specifies. If your derivation contradicts what the prose in `goal` or

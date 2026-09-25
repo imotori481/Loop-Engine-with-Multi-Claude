@@ -66,6 +66,15 @@ class WhatTheCriticIsTold(unittest.TestCase):
         self.assertIn("the artifact's OWN logic", brief)
         self.assertIn("checking a defence, not exercising dead code", brief)
 
+    def test_the_exemption_does_not_cover_a_read_nothing_writes(self):
+        # 守りを対象外にした説明を広く取ると、読み込む処理はあるのに書き込む
+        # 処理が無い、という成果物自身の欠陥まで黙る。対象外は守りだけで、
+        # 読まれるものが書かれているかは確かめさせる。
+        brief = brief_critique_trace(TASKS)
+        self.assertIn("covers the DEFENCE, not the thing being read", brief)
+        self.assertIn("step ever writes", brief)
+        self.assertIn("Report that.", brief)
+
 
 class ReadingTheAnswer(unittest.TestCase):
     """An unreadable critique has said nothing, and must never read as clean."""
