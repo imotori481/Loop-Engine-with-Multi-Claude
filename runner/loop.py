@@ -1451,7 +1451,14 @@ def declared_name(line: str) -> str:
 # A NUMBER, not a digit. `\d` alone was satisfied by the "2" in a variable name
 # called `s2`, which let "s2 == p.state exactly" through as a concrete result --
 # the criterion that then passed against the stub and stopped the step at R4.
-CONCRETE = re.compile(r"(?<![\w.])\d+(?:\.\d+)?(?!\w)|'[^']*'|\"[^\"]*\"|\b[A-Z]\w*(?:Error|Exception)\b")
+#
+# 空のコレクションと Python の定数もリテラルとして数える。境界のケースで一番
+# よく出る答えは `returns exactly []` や `{}` や `None` で、どれも具体的な値だ。
+# 数えないと、プランナーは `len(tokenize(""))` → `0` のように言い換えて逃げるか、
+# 書き直しで呼び出しを1回使う。TypeScript の true / false / null / undefined は
+# 数えない。英語の単語と見分けがつかず、"is true for every" のような形容が通る。
+CONCRETE = re.compile(r"(?<![\w.])\d+(?:\.\d+)?(?!\w)|'[^']*'|\"[^\"]*\"|\b[A-Z]\w*(?:Error|Exception)\b"
+                      r"|\[\]|\{\}|\(\)|\b(?:True|False|None)\b")
 
 CASES = {"normal", "boundary", "error"}
 REQUIRED_KEYS = {
@@ -2124,7 +2131,8 @@ yourself first.
          acceptance case
     L7   expected_tests is at least the number of acceptance criteria
     L8   with review_gate false, the `then` of every criterion states a concrete
-         value ON ITS OWN: a number, a quoted literal, or an exception type
+         value ON ITS OWN: a number, a quoted literal, an exception type, an
+         empty collection ([] {} ()), or True / False / None
     L10  the LAST step is kind "integration"
     L11  a "unit" step may not provide something that no later step requires
     L12  files_write is under src/, files_test is under tests/

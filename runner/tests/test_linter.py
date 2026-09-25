@@ -204,6 +204,21 @@ class TheExpectedResultIsAValue(unittest.TestCase):
     def test_an_exception_type_is_a_concrete_result(self) -> None:
         self.assertEqual(self.plan_with("raises InsufficientFundsError"), [])
 
+    def test_an_empty_collection_or_a_python_constant_is_a_concrete_result(self) -> None:
+        # 境界のケースの答えとして一番よく出る形。数えないと、プランナーは
+        # len(...) == 0 のように言い換えるか、書き直しで呼び出しを1回使う。
+        for then in ("returns exactly []", "returns exactly {}", "returns exactly ()",
+                     "returns None", "returns True", "returns False"):
+            with self.subTest(then=then):
+                self.assertEqual(self.plan_with(then), [])
+
+    def test_words_that_only_describe_emptiness_are_still_rejected(self) -> None:
+        for then in ("returns an empty list", "the result is true for every input"):
+            with self.subTest(then=then):
+                problems = self.plan_with(then)
+                self.assertEqual(len(problems), 1)
+                self.assertIn("L8", problems[0])
+
 
 class RulesThatAreGone(unittest.TestCase):
     def test_l9_is_retired(self) -> None:
