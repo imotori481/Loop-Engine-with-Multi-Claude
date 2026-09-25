@@ -29,7 +29,7 @@
 | 一部完了 | smoke を Claude ソルバーで通す | 別 uid での起動、認証、非対話実行、書いたファイルの所有者を確かめる | smoke-solver、smoke-planner、smoke-critic、smoke-dom を箱で実行して通過。smoke-pytest は下の行で書き換える | `provision/bin/smoke-*` |
 | 完了 | 批評が走らなかったときに clean と表示しない | 要件が `/srv/loop/human/in/REQUIREMENTS.md` に無いと、coverage が黙って飛ばされ、指摘ゼロとして扱われる | Python。飛ばしたモードを台帳（`CRITIQUE_SKIPPED`）と画面に出す。走ったモードが無ければ `no_critique_ran` が終了コード 1 で止める。`unittest.mock` でテスト | `runner/loop.py`（`run_critique` `no_critique_ran` `cmd_plan_refine` `cmd_critique`）、`runner/tests/test_refine.py` |
 | 完了 | 35-node.sh が作ったファイルをコミットする | `.gitignore`、`index.html`、`vitest.config.mjs` が未コミットのまま残り、最初の `run --all` が dirty で止まる | bash。3つを書いた直後に、runner として `git add`、`git commit`、`git push` する。対象はこの3つだけに絞り、変更が無ければ何もしない。20-layout.sh の最初のコミットと同じ形 | `provision/35-node.sh` |
-| 未着手 | `/srv/loop` を root 所有にする | 親ディレクトリが runner 所有なので、runner は `bin/` や `runner/` を改名して差し替えられる。sudoers はパスで許可しているので、偽の `solver-run` を他の uid で実行できる | runner が `/srv/loop` 直下に書く場所を洗い出す。`/srv/loop` を root 所有にし、洗い出した場所だけを runner に渡す。改名できないことを assert する | `provision/20-layout.sh` ほか |
+| 完了 | `/srv/loop` を root 所有にする | 親ディレクトリが runner 所有なので、runner は `bin/` や `runner/` を改名して差し替えられる。sudoers はパスで許可しているので、偽の `solver-run` を他の uid で実行できる | bash。`/srv/loop` を `root:root 755` にする。`repo.git/` と `project/` は無いときだけ root が runner 所有の空ディレクトリを作り、runner が `git init --bare` と `git clone` で中身を作る。走行ログ用に `logs/` を runner に渡す。runner が `/srv/loop` に書けないことと、渡した場所に書けることを assert する | `provision/20-layout.sh` |
 | 未着手 | `index.html` を TypeScript のときだけ置く | Python の計画でも置かれ、「環境の事実」としてクリティックに渡る。クリティックはこれを根拠に的外れな指摘を出す | `environment_facts` が言語を見て `index.html` の記述を出し分ける。置く側の扱いも合わせて決める | `provision/35-node.sh`、`runner/loop.py`（`environment_facts`） |
 | 未着手 | smoke-pytest を書き換える | ソルバーに pytest を実行させる smoke は、Bash を許さない方針では必ず失敗する | ソルバーに pytest の実行を頼み、レポートが作られないことを確かめる形にする | `provision/bin/smoke-pytest` |
 | 未着手 | venv の判定に pip の有無を加える | `python` だけある壊れた venv を「作成済み」とみなし、`pip` が見つからず止まる | 判定を `bin/python` と `bin/pip` の両方の有無にする。片方しか無ければ消して作り直す | `provision/30-python.sh` |
@@ -38,7 +38,7 @@
 | 未着手 | 利用上限への到達を失敗と区別する | 3役が同じサブスクリプションの枠を共有する。上限到達が Halt → エスカレーションに化け、エスカレーションがさらにプランナー呼び出しで枠を使う連鎖を止める | 上限到達時の `claude` の出力と終了コードを実測する。起動スクリプトは専用の終了コードを返し、ランナーは待ってから同じ呼び出しをやり直す | `provision/bin/solver-claude`、`planner-run`、`critic-run`、`runner/loop.py`（`call_solver` `call_planner` `call_critic`） |
 | 未着手 | 消費量を台帳に残す | どの役が枠を使ったかを run 後に読める | `claude -p --output-format json` の `usage` と `modelUsage` を取り出し、`ledger` に記録する | `provision/bin/planner-run`、`critic-run`、`solver-claude`、`runner/loop.py` |
 | 未着手 | run 8 の計画を Claude ソルバーで回す | run 5（Codex）、run 6（ローカル 9B）と同じ物差しで比較する | run 8 の要件で `plan bootstrap` から回し、ステップごとの試行回数と所要時間を記録する | `docs/HANDOFF.md` |
-| 未着手 | ドキュメントを Claude 単独構成に揃える | 役の表、資格情報の置き場、未決事項、tier の例を現構成に合わせる | 各ドキュメントを書き直す。箱の作り方に、実行する場所（Git Bash / PowerShell / 箱）、鍵の名前、公開鍵の流し込み、クローンでの配置を反映する | `README.md`、`docs/ARCHITECTURE.md`、`docs/RUNNER_SPEC.md`（§4-4-1、§11-1）、`docs/LOCAL_SOLVER.md`、`provision/README.md`、`host/README.md`、`provision/70-local-solver.sh`、`.gitignore` |
+| 未着手 | ドキュメントを Claude 単独構成に揃える | 役の表、資格情報の置き場、未決事項、tier の例を現構成に合わせる | 各ドキュメントを書き直す。箱の作り方に、実行する場所（Git Bash / PowerShell / 箱）、鍵の名前、公開鍵の流し込み、クローンでの配置を反映する。走行ログの置き場を `/srv/loop/logs/` に、run の退避を保守ユーザーの `sudo mv` に書き換える | `README.md`、`docs/ARCHITECTURE.md`、`docs/RUNNER_SPEC.md`（§4-4-1、§11-1）、`docs/LOCAL_SOLVER.md`、`provision/README.md`、`host/README.md`、`provision/70-local-solver.sh`、`.gitignore` |
 | 未着手 | 英語コメントの日本語化 | 日本人である私が読めるようにする | 英語のコメントを、意味を変えずに日本語へ書き直す | 英語コメントアウト全般 |
 
 ### 着手前に決めること

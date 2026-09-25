@@ -15,12 +15,27 @@
 #                        plan/ and therefore never sees tasks.json.
 set -euo pipefail
 
-install -d -o runner -g runner -m 755 /srv/loop
+# /srv/loop そのものは root 所有。runner の所有にすると、runner は直下の
+# エントリを改名できる。中身が root 所有でも関係なく、bin/ を退けて自分の
+# solver-run を置けば、sudoers はパスで許可しているので、それを solver として
+# 実行できる。runner/ を退ければ関門のコードも差し替えられる。
+# runner が書く場所は、下で1つずつ runner に渡す。
+install -d -o root -g root -m 755 /srv/loop
 # setgid: briefs written here by runner must land in group solverw, or the
 # solver cannot read the one channel it has.
 install -d -o runner -g solverw -m 2750 /srv/loop/brief
+# 走行ログの置き場。runner は /srv/loop の直下に書けないので、ここに書く。
+install -d -o runner -g runner -m 755 /srv/loop/logs
 
-if [ ! -d /srv/loop/repo.git ]; then
+# repo.git と project は runner が中身を作る。直下に作る権限は runner に無いので、
+# 空のディレクトリを root が runner 所有で先に用意する。git init --bare も
+# git clone も、空の既存ディレクトリをそのまま使える。
+# 無いときだけ作る。project は 40-perms.sh が 3770 に締めるので、ここで毎回
+# 755 に戻すと、このスクリプトを単独で流したときに誰からでも読める状態になる。
+[ -d /srv/loop/repo.git ] || install -d -o runner -g runner -m 755 /srv/loop/repo.git
+[ -d /srv/loop/project ]  || install -d -o runner -g runner -m 755 /srv/loop/project
+
+if [ ! -f /srv/loop/repo.git/HEAD ]; then
   sudo -u runner git init --bare -b main /srv/loop/repo.git
 fi
 
@@ -86,4 +101,21 @@ EOF
   sudo -u runner git push -q origin main
 fi
 
+# ---- assertions, from the runner's point of view -----------------------
+# 直下に書けなければ、直下のエントリは改名も削除もできない。bin/ と runner/ を
+# 差し替える経路はこれで閉じる。渡した場所には書けることも合わせて確かめる。
+fail=0
+if sudo -u runner test -w /srv/loop; then
+  echo "FAIL: runner should NOT be able to: test -w /srv/loop"; fail=1
+fi
+for d in /srv/loop/brief /srv/loop/logs /srv/loop/repo.git /srv/loop/project; do
+  if ! sudo -u runner test -w "$d"; then
+    echo "FAIL: runner should be able to: test -w $d"; fail=1
+  fi
+done
+
+if [ "$fail" -ne 0 ]; then
+  echo "20-layout: LAYOUT BROKEN" >&2
+  exit 1
+fi
 echo "20-layout: ok"
