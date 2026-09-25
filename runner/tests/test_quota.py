@@ -7,9 +7,12 @@
     python3 -m unittest discover -s runner/tests
 """
 
+import contextlib
+import io
 import json
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -114,6 +117,24 @@ class UsageIsRecorded(unittest.TestCase):
             result = loop.run_agent("planner", "PLAN_PROPOSE", lambda: next(calls))
         self.assertEqual(result.returncode, 0)
         self.assertEqual([e for e, _ in self.events], ["USAGE", "QUOTA_WAIT", "USAGE"])
+
+    def test_the_screen_gets_one_short_line_and_the_ledger_gets_everything(self):
+        # setUp の差し替えを外し、本物の ledger で台帳と画面を比べる。
+        mock.patch.stopall()
+        with tempfile.TemporaryDirectory() as temp, \
+             mock.patch.object(loop, "LEDGER", Path(temp) / "ledger.jsonl"):
+            screen = io.StringIO()
+            with contextlib.redirect_stdout(screen):
+                loop.record_usage("solver", "IMPL", json.loads(self.payload(
+                    usage={"input_tokens": 4, "cache_read_input_tokens": 100,
+                           "cache_creation_input_tokens": 6, "output_tokens": 20,
+                           "iterations": [{"input_tokens": 2}]})))
+            record = json.loads(loop.LEDGER.read_text(encoding="utf-8"))
+        line = screen.getvalue().strip()
+        self.assertEqual(line, "[USAGE] who=solver phase=IMPL model=claude-sonnet-5 "
+                               "in=110 out=20 sec=4 usd=0.01")
+        self.assertNotIn("iterations", line)
+        self.assertIn("iterations", record["usage"])
 
     def test_output_that_is_not_json_is_passed_through(self):
         result = loop.run_agent("solver", "IMPL", lambda: proc(0, "plain text"))

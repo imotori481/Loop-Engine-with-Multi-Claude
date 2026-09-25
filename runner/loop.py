@@ -280,14 +280,19 @@ def source_files(path: Path):
             yield child
 
 
-def ledger(event: str, **fields) -> None:
+def ledger(event: str, *, echo: str | None = None, **fields) -> None:
     """Append-only. The ledger is how a step is resumed after the VM dies, and
-    under WSL2 that is a matter of when, not if (RUNNER_SPEC 1-6)."""
+    under WSL2 that is a matter of when, not if (RUNNER_SPEC 1-6).
+
+    echo を渡すと、画面にはそれを出す。台帳には常に fields を全部書く。
+    """
     record = {"ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "event": event, **fields}
     LEDGER.parent.mkdir(parents=True, exist_ok=True)
     with LEDGER.open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(record, ensure_ascii=False) + "\n")
-    print(f"[{event}] " + " ".join(f"{k}={v}" for k, v in fields.items() if k != "detail"))
+    shown = echo if echo is not None else \
+        " ".join(f"{k}={v}" for k, v in fields.items() if k != "detail")
+    print(f"[{event}] {shown}")
 
 
 def sha256(path: Path) -> str:
@@ -870,11 +875,27 @@ def unwrap_result(proc: subprocess.CompletedProcess):
 
 
 def record_usage(who: str, phase: str, data: dict) -> None:
-    """1回の呼び出しで使った枠を台帳に残す。どの役が枠を使ったかを run 後に読む。"""
-    ledger("USAGE", who=who, phase=phase,
-           models=sorted(data.get("modelUsage") or {}),
+    """1回の呼び出しで使った枠を台帳に残す。どの役が枠を使ったかを run 後に読む。
+
+    台帳には usage を丸ごと書く。画面には1行に要るものだけを出す。usage の
+    中身は、キャッシュの内訳や iterations まで入っていて、1回の呼び出しで
+    画面を数行占めていた。入力は、キャッシュから読んだ分と書いた分を足す。
+    """
+    usage = data.get("usage") or {}
+    models = sorted(data.get("modelUsage") or {})
+    tokens_in = sum(int(usage.get(k) or 0) for k in (
+        "input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"))
+    tokens_out = int(usage.get("output_tokens") or 0)
+    seconds = (data.get("duration_ms") or 0) / 1000
+    cost = data.get("total_cost_usd")
+    echo = (f"who={who} phase={phase} model={','.join(models) or '-'} "
+            f"in={tokens_in} out={tokens_out} sec={seconds:.0f}"
+            + (f" usd={cost:.2f}" if isinstance(cost, (int, float)) else "")
+            + (" ERROR" if data.get("is_error") else ""))
+    ledger("USAGE", echo=echo, who=who, phase=phase,
+           models=models,
            usage=data.get("usage"),
-           cost_usd=data.get("total_cost_usd"),
+           cost_usd=cost,
            duration_ms=data.get("duration_ms"),
            turns=data.get("num_turns"),
            is_error=data.get("is_error"))
