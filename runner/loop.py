@@ -2629,7 +2629,7 @@ def proposal_problems(proposal: dict[str, str]) -> list[str]:
     return check_proposal(old, new) + validate_plan(new)
 
 
-def plan_with_retry(brief_for, tag: str) -> int:
+def plan_with_retry(brief_for, tag: str, keep: dict[str, str] | None = None) -> int:
     """Call the planner, check what it wrote, and hand back the violations.
 
     This is what lets the planner meet the environment on its own terms rather
@@ -2657,6 +2657,22 @@ def plan_with_retry(brief_for, tag: str) -> int:
             return 2
 
         removed = prune_proposal()
+
+        # keep: プランナーが書かなかったファイルを補う控え。改訂のブリーフは
+        # CONTEXT.md と SYSTEM_SPEC.md を「変えるときだけ書け」と伝えている。
+        # ところが out/ は呼ぶ前に空にしてあり、未適用の計画は B1 で3ファイル
+        # すべてを要求される。補わないと、ブリーフに従ったプランナーが落ちる
+        # （run 8 の改訂で2回、プランナーの呼び出しを1回ずつ無駄にした）。
+        # エスカレーションには補わない。ESCALATE.md は他のファイルと並べられない。
+        if keep and ESCALATE_NAME not in names:
+            carried = sorted(n for n in keep if not (PLANNER_OUT / n).exists())
+            for name in carried:
+                path = PLANNER_OUT / name
+                path.write_text(keep[name], encoding="utf-8")
+                path.chmod(0o644)
+            if carried:
+                ledger("PLAN_CARRIED", attempt=attempt, files=carried)
+
         proposal = read_proposal()
 
         # An escalation is an answer, not a draft. Nothing to check and nothing
@@ -3226,9 +3242,11 @@ def cmd_plan_refine(modes: list[str]) -> int:
         # リンタを通っていた提案まで失われる。
         draft = {name: text for name, text in read_proposal().items()
                  if name in PROPOSAL_FILES}
+        # tasks.json は補わない。プランナーが書かなければ、改訂が無いということだ。
         code = plan_with_retry(
             lambda feedback: brief_plan_refine(requirements, tasks, report, feedback),
-            "PLAN_REFINE_DRAFT")
+            "PLAN_REFINE_DRAFT",
+            keep={name: text for name, text in draft.items() if name != "tasks.json"})
         if code != 0:
             restore_proposal(draft)
             ledger("REFINE_RESTORED", round=round_no, reason="revision failed",

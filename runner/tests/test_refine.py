@@ -58,7 +58,7 @@ class PendingDraft(unittest.TestCase):
 
 class RefineKeepsTheDraft(PendingDraft):
     def test_an_escalation_puts_the_draft_back(self) -> None:
-        def escalate(brief_for, tag):
+        def escalate(brief_for, tag, keep=None):
             loop.clear_proposal()
             (self.out / loop.ESCALATE_NAME).write_text("人間に訊く", encoding="utf-8")
             return 0
@@ -70,7 +70,7 @@ class RefineKeepsTheDraft(PendingDraft):
         self.assertEqual(self.escalation.read_text(encoding="utf-8"), "人間に訊く")
 
     def test_a_failed_revision_puts_the_draft_back(self) -> None:
-        def fail(brief_for, tag):
+        def fail(brief_for, tag, keep=None):
             loop.clear_proposal()
             (self.out / "tasks.json").write_text("{}", encoding="utf-8")
             return 4
@@ -102,6 +102,59 @@ class NoCritiqueIsNotClean(PendingDraft):
 
     def test_critique_stops_instead_of_calling_it_clean(self) -> None:
         self.assertEqual(loop.cmd_critique(["coverage"]), 1)
+
+
+class ARevisionKeepsWhatItDidNotRewrite(unittest.TestCase):
+    """改訂のブリーフは CONTEXT.md と SYSTEM_SPEC.md を「変えるときだけ書け」と言う。
+
+    out/ は呼ぶ前に空にされ、未適用の計画は B1 で3ファイルを要求される。
+    補わないと、ブリーフに従ったプランナーが落ちる。run 8 で2回起きた。
+    """
+
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.out = Path(self.temp.name)
+        self.events: list[str] = []
+        # B1 と同じ判定だけを残す。3ファイル揃っていれば通る。
+        b1 = lambda proposal: [] if {"tasks.json", "CONTEXT.md", "SYSTEM_SPEC.md"} \
+            <= set(proposal) else ["B1: a first plan must include all three files"]
+        for p in (mock.patch.object(loop, "PLANNER_OUT", self.out),
+                  mock.patch.object(loop, "proposal_problems", b1),
+                  mock.patch.object(loop, "ledger",
+                                    lambda event, **k: self.events.append(event))):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def planner_writes(self, files: dict[str, str]):
+        def call(brief):
+            for name, text in files.items():
+                (self.out / name).write_text(text, encoding="utf-8")
+            return ""
+        return mock.patch.object(loop, "call_planner", call)
+
+    def test_the_files_it_left_alone_are_carried_from_the_draft(self) -> None:
+        keep = {"CONTEXT.md": DRAFT["CONTEXT.md"], "SYSTEM_SPEC.md": DRAFT["SYSTEM_SPEC.md"]}
+        with self.planner_writes({"tasks.json": '{"steps": ["revised"]}'}):
+            self.assertEqual(loop.plan_with_retry(lambda f: "", "T", keep=keep), 0)
+        self.assertEqual((self.out / "CONTEXT.md").read_text(encoding="utf-8"),
+                         DRAFT["CONTEXT.md"])
+        self.assertEqual((self.out / "tasks.json").read_text(encoding="utf-8"),
+                         '{"steps": ["revised"]}')
+        self.assertIn("PLAN_CARRIED", self.events)
+
+    def test_what_it_did_rewrite_is_not_overwritten(self) -> None:
+        keep = {"CONTEXT.md": "old", "SYSTEM_SPEC.md": "old"}
+        with self.planner_writes({"tasks.json": "{}", "CONTEXT.md": "new"}):
+            loop.plan_with_retry(lambda f: "", "T", keep=keep)
+        self.assertEqual((self.out / "CONTEXT.md").read_text(encoding="utf-8"), "new")
+        self.assertEqual((self.out / "SYSTEM_SPEC.md").read_text(encoding="utf-8"), "old")
+
+    def test_an_escalation_is_left_on_its_own(self) -> None:
+        keep = {"CONTEXT.md": "old", "SYSTEM_SPEC.md": "old"}
+        with self.planner_writes({loop.ESCALATE_NAME: "人間に訊く"}):
+            self.assertEqual(loop.plan_with_retry(lambda f: "", "T", keep=keep), 0)
+        self.assertEqual(sorted(p.name for p in self.out.iterdir()), [loop.ESCALATE_NAME])
 
 
 if __name__ == "__main__":
