@@ -1,8 +1,8 @@
-"""HTTP server for the Loop Engine operator dashboard.
+"""Loop Engine の運用者向けダッシュボードの HTTP サーバ。
 
-Listens on loopback only, always. Reaching it from a phone is done by putting
-`tailscale serve` in front, which proxies from the tailnet to 127.0.0.1 -- so
-nothing here is ever exposed to the LAN, and the machine keeps one door.
+listen するのは常にループバックだけ。スマホから届かせるには、前に
+`tailscale serve` を置く。これが tailnet から 127.0.0.1 へ中継する。だから
+ここにあるものは LAN に一切出ず、機械の入り口は1つのまま保たれる。
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ try:
     from .access import LOCAL, Reach
     from .actions import Launchers
     from .state import DashboardState
-except ImportError:  # direct execution: python host/dashboard/server.py
+except ImportError:  # 直接実行したとき: python host/dashboard/server.py
     from access import LOCAL, Reach
     from actions import Launchers
     from state import DashboardState
@@ -52,16 +52,16 @@ def handler_for(state: DashboardState, launchers: Launchers, reach: Reach, token
             return value
 
         def _caller(self):
-            """(scope, user), or (None, "") for a request that is refused.
+            """(scope, user) を返す。断る要求なら (None, "") を返す。
 
-            Binding 127.0.0.1 and requiring a custom header keep an ordinary
-            web page out: the header forces a CORS preflight, and there is no
-            do_OPTIONS to answer it.  DNS rebinding defeats both -- the
-            attacker's name is made to resolve to 127.0.0.1, the page and this
-            server become same-origin, and the browser stops objecting.  What
-            the rebound request cannot change is the Host header, which still
-            carries the attacker's name.  So the names this server answers to
-            are a list, and everything else is 403.
+            127.0.0.1 に bind し、独自のヘッダを必須にすれば、普通の Web
+            ページは入れない。そのヘッダは CORS のプリフライトを起こし、
+            それに答える do_OPTIONS は無いからだ。DNS リバインディングは
+            その両方を破る。攻撃者の名前が 127.0.0.1 に解決されるように
+            仕組まれ、そのページとこのサーバが同一オリジンになり、ブラウザは
+            止めなくなる。付け替えた要求でも変えられないのが Host ヘッダで、
+            そこには攻撃者の名前が残る。だから、このサーバが応じる名前は
+            一覧で決め、それ以外はすべて 403 にする。
             """
             return reach.of(self.headers)
 
@@ -75,8 +75,8 @@ def handler_for(state: DashboardState, launchers: Launchers, reach: Reach, token
                 return
             path = urlparse(self.path).path
             if path == "/api/session":
-                # The page is told what it may do rather than finding out by
-                # being refused: a button that cannot work should not be there.
+                # 何をしてよいかは、断られて知るのではなく先にページへ伝える。
+                # 押しても動かないボタンは、最初から置くべきでない。
                 self._json({"token": token, "scope": scope, "user": user,
                             "launchers": launchers.public() if scope == LOCAL else []})
                 return
@@ -117,9 +117,8 @@ def handler_for(state: DashboardState, launchers: Launchers, reach: Reach, token
                     self._json(result, HTTPStatus.CREATED)
                     return
                 if path == "/api/launch":
-                    # Starting a program is the one thing that only makes sense
-                    # where the screen is. A phone would start a window nobody
-                    # is looking at.
+                    # プログラムの起動だけは、画面のある場所でしか意味が無い。
+                    # スマホから起動すれば、誰も見ていない窓が開くだけだ。
                     if scope != LOCAL:
                         raise ValueError(
                             "artifacts can only be started at the machine itself")

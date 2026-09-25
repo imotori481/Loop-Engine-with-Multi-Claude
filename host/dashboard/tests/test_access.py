@@ -1,9 +1,8 @@
-"""The Host header decides who is asking.
+"""誰が訊いているかは Host ヘッダで決める。
 
-It is the one value a DNS-rebound request cannot forge, which is why the
-loopback check leans on it -- and once the dashboard is published to a tailnet,
-it is also what separates "at the machine" from "on a phone". Both answers come
-from the same place for the same reason.
+DNS を付け替えた要求でも偽れない唯一の値なので、ループバックの検査はこれに
+頼っている。ダッシュボードを tailnet に公開すると、「機械の前」と「スマホ」を
+分けるのもこの値になる。どちらの答えも、同じ理由で同じところから来る。
 """
 
 import json
@@ -60,7 +59,7 @@ class OverTheTailnet(ReachFixture):
         self.assertEqual(self.of(PUBLISHED, OWNER), (None, ""))
 
     def test_publishing_without_naming_anyone_publishes_to_no_one(self):
-        # Fail closed. An empty list is not "everybody".
+        # 閉じる側に倒す。空の一覧は「全員」ではない。
         self.publish(host=PUBLISHED)
         self.assertEqual(self.of(PUBLISHED, OWNER), (None, ""))
         self.publish(host=PUBLISHED, users=[])

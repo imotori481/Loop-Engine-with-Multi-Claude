@@ -1,8 +1,7 @@
-"""Read objective runner state and append human decisions.
+"""ランナーの客観的な状態を読み、人間の判断を追記する。
 
-The dashboard deliberately does not infer whether work is good.  It reports
-facts already emitted by the runner and records what the human decided about a
-specific, immutable request.
+ダッシュボードは、作業の良し悪しをあえて推し量らない。ランナーがすでに出した
+事実を伝え、変わらない特定の要求に対して人間が何を決めたかを記録する。
 """
 
 from __future__ import annotations
@@ -42,23 +41,22 @@ def read_jsonl(path: Path) -> list[dict[str, Any]]:
     return records
 
 
-# What may be decided from somewhere other than this machine. Refusing work
-# needs nothing but judgement, and stopping a run is the one thing you want
-# reachable from a phone. Saying "I played it and it is good" is a different
-# act: the review exists precisely because no machine can check the screen, so
-# a device that cannot open the window must not be able to certify it.
+# この機械以外の場所から決めてよいもの。作業の差し戻しには判断しか要らない。
+# 走行の停止は、スマホから届いてほしい唯一の操作だ。「遊んでみて良かった」と
+# 言うのは別の行為になる。レビューがあるのは、どの機械も画面を確かめられない
+# からだ。窓を開けない端末に、それを保証させてはならない。
 REMOTE_DECISIONS = {
     "review": {"revise"},
     "escalation": {"respond", "stop"},
     "planner": {"respond", "stop"},
 }
 
-# Two different people are stuck, and they are not stuck for the same reason.
-# ESCALATION.md means the runner could not get a step past its criteria.
-# PLANNER_ESCALATION.md means the planner read the situation and concluded that
-# no revision it is allowed to make would help -- case (b) or (c), which
-# RUNNER_SPEC 6-2 reserves for the human. Answering one does not answer the
-# other, so they are separate requests with separate ids.
+# 詰まっているのは別々の2者で、詰まった理由も違う。
+# ESCALATION.md は、ランナーがステップを基準に通せなかったことを表す。
+# PLANNER_ESCALATION.md は、プランナーが状況を読み、許された改訂ではどれも
+# 役に立たないと結論したことを表す。これは (b) か (c) で、RUNNER_SPEC 6-2 が
+# 人間に残している判断だ。片方に答えても、もう片方に答えたことにはならない。
+# だから別々の要求にし、別々の ID を振る。
 ESCALATION_FILES = {
     "escalation": ("ESCALATION.md", "実装が停止し、人間の判断を待っています"),
     "planner": ("PLANNER_ESCALATION.md",
@@ -76,10 +74,10 @@ class DashboardState:
         self.project = project.resolve()
         self.data_dir = data_dir.resolve()
         self.decisions_file = self.data_dir / "decisions.jsonl"
-        # The server is threaded, so two decisions can arrive at once. Checking
-        # that a request is still pending and recording the answer have to be
-        # one indivisible act, or the second answer is written against a view
-        # of the world the first one already invalidated.
+        # サーバはスレッドで動くので、2つの判断が同時に届くことがある。
+        # 要求がまだ保留中かを確かめることと、答えを記録することは、分けられ
+        # ない1つの操作でなければならない。そうでないと、2つ目の答えが、
+        # 1つ目がすでに崩した状態に対して書かれる。
         self._lock = threading.Lock()
 
     def snapshot(self) -> dict[str, Any]:
@@ -182,9 +180,9 @@ class DashboardState:
             "request_id": request,
             "decision": decision,
             "note": note.strip(),
-            # Where the answer came from is part of the answer. An approval
-            # recorded from a phone would mean something different from one
-            # recorded at the desk, so the record says which it was.
+            # 答えがどこから来たかも、答えの一部だ。スマホから記録した承認と、
+            # 机の前で記録した承認は意味が違う。だから、どちらだったかを
+            # 記録に残す。
             "scope": scope,
             "user": user,
         }
@@ -192,15 +190,14 @@ class DashboardState:
         return record
 
     def _append(self, record: dict[str, Any]) -> None:
-        """One line, appended and flushed to the disk.
+        """1行を追記し、ディスクまで書き出す。
 
-        This used to read the whole file and write it back through a temporary
-        file, which made every decision a rewrite of every earlier one: a
-        crash mid-rewrite, or two writers racing, could destroy answers that
-        were already safe.  An append cannot touch what is already there, and
-        these records are the one thing here that no other system can
-        reconstruct -- the runner knows what the tests did, not what the human
-        concluded from playing the thing.
+        ファイル全体を読んで一時ファイル越しに書き戻す方式は使わない。それだと
+        判断のたびに以前の判断をすべて書き直すことになり、書き直しの途中で
+        落ちたり、2つの書き手が競合したりすると、すでに無事だった答えまで
+        壊れる。追記なら、すでにあるものには触れない。この記録は、ほかの
+        どの仕組みからも作り直せない唯一のものだ。ランナーはテストが何をしたかは
+        知っているが、人間が遊んでみて何を結論したかは知らない。
         """
         self.data_dir.mkdir(parents=True, exist_ok=True)
         with self.decisions_file.open("a", encoding="utf-8", newline="\n") as handle:

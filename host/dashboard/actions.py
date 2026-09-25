@@ -1,4 +1,4 @@
-"""Execute only human-configured, named artifact launchers."""
+"""人間が設定し、名前を付けた成果物の起動だけを実行する。"""
 
 from __future__ import annotations
 
@@ -26,9 +26,9 @@ class Launchers:
         if not isinstance(argv, list) or not argv or not all(isinstance(v, str) for v in argv):
             raise ValueError("launcher argv must be a non-empty string array")
         cwd = item.get("cwd")
-        # shell=False and an ID selected from this trusted host-side file are
-        # both load-bearing.  No plan, solver output, or HTTP value becomes a
-        # command line.
+        # shell=False と、信用できるホスト側のファイルから ID で選ぶことの
+        # 両方が要になっている。計画、ソルバーの出力、HTTP の値は、どれも
+        # コマンドラインにならない。
         process = subprocess.Popen(argv, cwd=cwd or None, shell=False)
         return process.pid
 
