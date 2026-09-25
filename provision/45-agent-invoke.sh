@@ -138,6 +138,13 @@ for who in solver planner critic; do
 LOOP_MODEL=
 EOF
   fi
+  if ! grep -q '^LOOP_EFFORT=' "/etc/loop/$who.env"; then
+    cat >> "/etc/loop/$who.env" <<'EOF'
+
+# effort。low / medium / high / xhigh / max のどれか。空なら既定。
+LOOP_EFFORT=
+EOF
+  fi
 done
 
 # A malformed drop-in makes sudo refuse to run at all, including the sudo that

@@ -49,10 +49,18 @@ if [ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
 fi
 unset ANTHROPIC_API_KEY_CONSOLE
 
-# モデル。critic.env の LOOP_MODEL を --model で渡す。空ならアカウントの既定。
-model_args=()
+# モデルと effort。critic.env の LOOP_MODEL を --model で、LOOP_EFFORT を
+# --effort で渡す。空ならアカウントの既定。effort の値が間違っていたら、claude を
+# 呼ぶ前に止める。
+role_args=()
 if [ -n "${LOOP_MODEL:-}" ]; then
-  model_args=(--model "$LOOP_MODEL")
+  role_args+=(--model "$LOOP_MODEL")
+fi
+if [ -n "${LOOP_EFFORT:-}" ]; then
+  case "$LOOP_EFFORT" in
+    low|medium|high|xhigh|max) role_args+=(--effort "$LOOP_EFFORT") ;;
+    *) echo "critic-run: bad LOOP_EFFORT in critic.env: $LOOP_EFFORT" >&2; exit 5 ;;
+  esac
 fi
 
 # A throwaway HOME for every invocation, exactly as planner-run does it. Here it
@@ -72,7 +80,7 @@ cd "$OUT"
 #     there is nothing here it should be revising.
 set +e
 timeout --kill-after=30 "$LIMIT" claude -p \
-  "${model_args[@]}" \
+  "${role_args[@]}" \
   --safe-mode \
   --setting-sources "" \
   --no-session-persistence \
