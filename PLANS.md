@@ -45,7 +45,7 @@
 | 完了 | trace に守りのテストを指摘させない | 壊れたセーブや知らない ID への耐性を試すテストを、毎回「遊んでいても届かない状態」と指摘する。run 8 では3回の批評すべてに残った。ブリーフの最後の問い（作り手が扱えるように作ったのに、ユーザーの操作では届かない状態はあるか）が、そう答えるよう誘っていた | Python。trace のブリーフのその問いに、対象は成果物自身の論理だと書き足す。読み込んだセーブ、書き換えられたストレージ、古い版のデータ、時計の変化など、外から来る入力は実在する入力で、それを試すテストは守りの確認だから指摘しない、と伝える。unittest でブリーフの文を確かめる | `runner/loop.py`（`brief_critique_trace`）、`runner/tests/test_critic.py` |
 | 未着手 | 環境が置いたファイルだけを確かめる条件を書かせない | run 8 の S10 で、プランナーが `index.html` の中身を確かめる受け入れ条件を書いた。`index.html` は環境が置き、スタブに置き換わらないので、RED_GATE で必ず通って R4 で止まる | 計画づくりのブリーフか環境の事実で、環境が置いたファイルの中身だけを確かめる条件は書くなと伝える。リンタで見つけられるかも検討する | `runner/loop.py`（`environment_facts` `BOOTSTRAP_RULES`） |
 | 未着手 | trace が「読むのに書かれないもの」を見逃さないようにする | 守りのテストを対象外にした説明を広く取りすぎると、読み込む処理はあるのに書き込む処理が無い、といった成果物自身の欠陥まで黙るおそれがある | trace のブリーフに、成果物が読むものを成果物自身もほかの何も書かないなら指摘する、と1文足す | `runner/loop.py`（`brief_critique_trace`） |
-| 未着手 | ドキュメントを Claude 単独構成に揃える | 役の表、資格情報の置き場、未決事項、tier の例を現構成に合わせる | 各ドキュメントを書き直す。箱の作り方に、実行する場所（Git Bash / PowerShell / 箱）、鍵の名前、公開鍵の流し込み、クローンでの配置を反映する。走行ログの置き場を `/srv/loop/logs/` に、run の退避を保守ユーザーの `sudo mv` に書き換える | `README.md`、`docs/ARCHITECTURE.md`、`docs/RUNNER_SPEC.md`（§4-4-1、§11-1）、`docs/LOCAL_SOLVER.md`、`provision/README.md`、`host/README.md`、`provision/70-local-solver.sh`、`.gitignore` |
+| 完了 | ドキュメントを Claude 単独構成に揃える | 役の表、資格情報の置き場、未決事項、tier の例を現構成に合わせる | 各ドキュメントを書き直す。箱の作り方に、実行する場所（Git Bash / PowerShell / 箱）、鍵の名前、公開鍵の流し込み、クローンでの配置を反映する。走行ログの置き場を `/srv/loop/logs/` に、run の退避を保守ユーザーの `sudo mv` に書き換える | `README.md`、`docs/ARCHITECTURE.md`、`docs/RUNNER_SPEC.md`（§4-4-1、§11-1）、`docs/LOCAL_SOLVER.md`、`provision/README.md`、`host/README.md`、`provision/70-local-solver.sh`、`.gitignore` |
 | 未着手 | 英語コメントの日本語化 | 日本人である私が読めるようにする | 英語のコメントを、意味を変えずに日本語へ書き直す | 英語コメントアウト全般 |
 
 ### 着手前に決めること

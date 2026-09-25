@@ -2,7 +2,7 @@
 # The local solver backend: an account for the model server, the two scripts,
 # and a place for the weights. Idempotent.
 #
-#     sudo ./70-local-solver.sh
+#     cd /tmp && sudo bash /opt/loop-engine/provision/70-local-solver.sh
 #
 # NOT run by provision.sh, for the same reason as 60-egress.sh: it is only
 # correct once you have decided to run a local model at all.
@@ -128,12 +128,15 @@ Next:
     sudo -u solver /srv/loop/bin/smoke-local
 
 Then, in plan/tasks.json:
-    "solver_tiers": ["local", "codex"],
+    "solver_tiers": ["local", "claude"],
     "policy": {"retry": "resample"},
     "limits": {"attempts": 8}
 
-WARNING about 60-egress.sh: with "codex" still in solver_tiers the solver needs
-its outbound API host. Tightening egress to loopback-only breaks the fallback
-tier, and it breaks it as a timeout rather than as an error. Tighten only once
-the tier list is local-only.
+solver_tiers is required: the default is ["claude"], and without it the local
+model is never called.
+
+WARNING about 60-egress.sh: with "claude" or "codex" still in solver_tiers the
+solver needs its outbound API host. Tightening egress to loopback-only breaks
+the fallback tier, and it breaks it as a timeout rather than as an error.
+Tighten only once the tier list is ["local"].
 EOF

@@ -1,7 +1,8 @@
 # LOCAL_SOLVER.md — ローカルソルバーの導入と、1本目の実験
 
-ソルバーを Codex からローカルモデル（Qwen3.5-9B / nonthinking）に差し替えるための手順書。
-**Claude を介さずに最後まで進める**ことを目的に書いてある。
+ソルバーの段にローカルモデル（Qwen3.5-9B / nonthinking）を足すための手順書。
+既定のソルバーは Claude Code（`claude`）で、ローカルモデルは計画の `solver_tiers` で
+名前を挙げたときだけ使う。**この文書だけで最後まで進められる**ように書いてある。
 
 設計の根拠は RUNNER_SPEC §4-4-1、判断の経緯は HANDOFF §5。ここは操作だけ。
 
@@ -77,9 +78,10 @@ sudo install -o root -g llm -m 0440 <model>.gguf /srv/loop/models/model.gguf
 ### 1-3. 配る
 
 ```bash
-cd /srv/loop/provision   # ホストから rsync 済みのもの
-sudo ./70-local-solver.sh
+cd /tmp && sudo bash /opt/loop-engine/provision/70-local-solver.sh
 ```
+
+`/opt/loop-engine` は箱の中のこのリポジトリのクローン（`provision/README.md` §2-6）。
 
 uid `llm` の作成、`/srv/loop/models` の権限、3本のスクリプトの設置まで。
 **sudoers は変更しない** — `solver-run` が持つ Runas(solver) の1つの許可で足りる。
@@ -94,7 +96,7 @@ sudo -u llm setsid nohup /srv/loop/bin/llm-serve >/srv/loop/models/serve.out 2>&
 
 VM が生きている間だけ生きる。**`wsl --shutdown` 厳禁**（README 3-2）。
 
-### 1-5. 配管を確かめる ← ここまで Claude 不要
+### 1-5. 配管を確かめる ← ここまで利用枠を使わない
 
 ```bash
 sudo -u solver /srv/loop/bin/smoke-local
@@ -114,19 +116,24 @@ sudo -u runner python3 /srv/loop/runner/loop.py reset S1     # 必要なら
 `plan/tasks.json` の最上位に足す:
 
 ```json
+"solver_tiers": ["local", "claude"],
 "policy":       {"retry": "resample"},
 "limits":       {"attempts": 8}
 ```
 
-`solver_tiers` は書かなくてよい ── **既定が `["local", "codex"]`**（RUNNER_SPEC §7 末尾）。
-ここに書くのは、この箱の既定と違う段構成を試すときだけ。
+`solver_tiers` は必ず書く ── **既定は `["claude"]`** で、書かなければローカルモデルは
+呼ばれない（RUNNER_SPEC §7 末尾）。`local` が試行を使い切ったステップだけを `claude` が
+引き継ぐ。ローカルだけで測るなら `["local"]` にする。
 
 `resample` と温度 0.7 は**対で意味を持つ**。温度 0 で `resample` すると8回とも同じ
 答えを引く。逆に `repair` にするなら温度は下げてよい。
 
 ```bash
-sudo -u runner python3 /srv/loop/runner/loop.py run --all
+sudo -u runner python3 -u /srv/loop/runner/loop.py run --all 2>&1 \
+  | sudo -u runner tee -a /srv/loop/logs/<名前>.log
 ```
+
+走行ログは `/srv/loop/logs/` に書く（`provision/README.md` §2-10）。
 
 ---
 
@@ -150,7 +157,7 @@ sudo -u runner python3 /srv/loop/runner/loop.py run --all
 
 **0 で返るのに何も書かれない / VERIFY が毎回同じ失敗**
 モデルが JSON を守れなかったか、許可外のパスを返した。`solver-local` が
-`wrote nothing` / `refused [...]` と標準出力に書いている。台帳ではなく `run.log` を見る。
+`wrote nothing` / `refused [...]` と標準出力に書いている。台帳ではなく `/srv/loop/logs/` の走行ログを見る。
 これは**設計どおり**の挙動 ── モデルの失敗は試行を1回消費するだけで、プランナーには届かない。
 何度も続くならステップが大きすぎる（次項）。
 
@@ -174,9 +181,9 @@ sudo -u runner python3 /srv/loop/runner/loop.py run --all
 GPU に載っていない。`nvidia-smi` と `--n-gpu-layers`。載せられないなら設計は変わらないが、
 `timeouts.solver` を大きく取り直し、1本の実時間の見積もりを作り直す。
 
-**codex 段に落ちた瞬間に固まる**
-`60-egress.sh` を loopback のみに締めた状態で `solver_tiers` に `codex` が残っている。
-締めるのは**ローカル単独運用に切り替えてから**。
+**上の段に落ちた瞬間に固まる**
+`60-egress.sh` を loopback のみに締めた状態で `solver_tiers` に `claude` か `codex` が残っている。
+締めるのは**ローカル単独運用（`["local"]`）に切り替えてから**。
 
 ---
 
@@ -231,10 +238,16 @@ R1（収集数の不一致）／R4（スタブで通る）／R5（赤が本物�
 描画し、RED_GATE と VERIFY は全部を走らせる。判断を含まない純粋な機構。
 ただし **IMPL 中の `tests/` は 0444 でソルバーから読める**（`loop.py` の `set_writable`）
 ので、いまのままでは要請であって剥奪ではない。本物にするには `tests/` を runner のみに
-する必要があり、代償として**ソルバーが自分で pytest を回して自己検証できなくなる**。
-弱いモデルほどそれは効く機能なので、代償のある判断。**1本目の目視で必要性を決める。**
+する必要がある。`claude` と `local` はもともと pytest を回せないので、自己検証を失う
+代償は `codex` 段にだけかかる。**1本目の目視で必要性を決める。**
 
 **位相ごとのバックエンド。** 上記の RED_GATE の読み方を参照。
 
 **egress の締め直し。** ローカル単独運用に切り替えたら `solver` は外向き通信が
 一切不要になる。この設計で初めてそこまで締められる（`lo` は既に許可されている）。
+
+---
+
+## 更新履歴
+
+- 2026/09/26: 既定のソルバー段を `claude` とし、`solver_tiers` を必ず書く手順に変更。配布と走行ログの場所を箱のクローン構成に合わせて変更

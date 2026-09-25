@@ -33,6 +33,22 @@ AI に実装させると、**「テストが通りました」が自己申告に
 | **solver** | 1002 | `src/` `tests/`（凍結まで） | `plan/` `.git/`（受け入れ条件を読めない） |
 | **critic** | 1004 | `critic/out/FINDINGS.json` | `plan/` `tests/` `src/` `planner/out/` |
 
+runner は普通のプログラム（`runner/loop.py`）です。残りの3役は、それぞれの uid で
+起動される Claude Code です。
+
+| 役 | 起動スクリプト | 許すツール | 資格情報 |
+|---|---|---|---|
+| planner | `planner-run` | `Read` `Write` `Edit` | `/etc/loop/planner.env` |
+| solver | `solver-run` → `solver-claude` | `Read` `Write` `Edit`。**`Bash` は禁止** | `/etc/loop/solver.env` |
+| critic | `critic-run` | `Read` `Write` | `/etc/loop/critic.env` |
+
+資格情報のファイルは、その役の uid だけが読めます。モデルと effort も同じファイルの
+`LOOP_MODEL` と `LOOP_EFFORT` で役ごとに決めます。
+
+**solver にコマンドを実行させないのは、テストを走らせる許可が、自分の書いたコードを
+動かす許可と同じだからです。** 合否を出すのは runner の VERIFY だけです。
+ソルバーのバックエンドは差し替えられます（`solver_tiers`。RUNNER_SPEC §4-4-1）。
+
 **critic だけは「読めないこと」が役の価値そのもの**です。計画を読める critic は
 「全基準を満たしている」と答え、テストを読める critic は「テストは通る」と答える ──
 どちらも真で、どちらも無価値。だから無知を権限で作っています。
@@ -260,3 +276,7 @@ REVIEW_GATE の不在は run 8 で3回顕在化しました ── 期待値リ�
 3. [RUNNER_SPEC.md](RUNNER_SPEC.md) ── 関門の判定条件とリンタ規則
 4. [HANDOFF.md](HANDOFF.md) ── 現在地と再開点
 5. [provision/README.md](../provision/README.md) ── 箱の作り方と落とし穴
+
+## 更新履歴
+
+- 2026/09/26: 3役の実体（Claude Code）、許すツール、資格情報の置き場を §2 に追加
