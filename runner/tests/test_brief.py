@@ -1,11 +1,10 @@
-"""What the planner is told about the machine it is planning for.
+"""プランナーが、計画を立てる相手の機械について何を伝えられるか。
 
-environment_facts gathers rather than states, because a written-down fact rots
-and a gathered one cannot. The display is the case where that matters most: a
-criterion like "the window opens" becomes a test that raises TclError, which is
-an honest red -- RED_GATE passes it -- and which no implementation can ever turn
-green. The step burns every attempt of every tier, then an escalation, and the
-cause appears in nothing the solver or the planner can see.
+environment_facts は書き写さずに集める。書き写した事実は古くなり、集めた事実は
+古くならないからだ。それが最も効くのは画面だ。「窓が開く」のような条件は
+TclError を投げるテストになる。それは正直な赤で、RED_GATE を通り、どの実装も
+緑にできない。ステップはすべての段の試行を使い、エスカレーションまで使い、
+その原因はソルバーにもプランナーにも見えるところに無い。
 
     python3 -m unittest discover -s runner/tests
 """

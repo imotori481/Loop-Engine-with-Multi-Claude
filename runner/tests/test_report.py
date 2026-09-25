@@ -1,12 +1,11 @@
-"""The report reader, checked directly.
+"""レポートを読む部分を、直接確かめる。
 
-parse_junit is where the gates' arithmetic lives: RED_GATE and VERIFY both do
-nothing but ask it questions. Until now nothing checked it, and the cost of that
-showed up twice on real runs -- R5 read the wrong attribute and rejected honest
-assertions, and `green` ignored skips, so a test that stopped running counted as
-a test that passed.
+関門の算術は parse_junit にある。RED_GATE も VERIFY も、それに問いを投げる
+だけだ。ここを確かめないと何が起きるかは、実際の走行で2度現れた。R5 が
+誤った属性を読んで正直なアサーションを拒み、`green` がスキップを無視して、
+走らなくなったテストを通ったテストと数えた。
 
-Standard library only, like the runner itself. Nothing here needs a venv:
+ランナーと同じく標準ライブラリだけを使う。venv は要らない:
 
     python3 -m unittest discover -s runner/tests
 """
@@ -59,9 +58,9 @@ class ReadingAReport(unittest.TestCase):
         self.assertFalse(run.green)
         self.assertEqual(run.failures, 1)
         self.assertEqual(run.failed_files, ["tests.test_models"])
-        # R5 reads the class off the body's last line, not off the message --
-        # pytest drops the "AssertionError: " prefix whenever the explanation
-        # spans lines, which is most assertions about attributes.
+        # R5 はクラスを message ではなく本文の最後の行から読む。説明が複数行に
+        # わたると pytest は "AssertionError: " の接頭辞を落とし、属性について
+        # のアサーションはたいていそうなる。
         self.assertEqual(run.failure_kinds, ["AssertionError"])
 
     def test_an_error_is_not_green(self) -> None:
@@ -72,30 +71,28 @@ class ReadingAReport(unittest.TestCase):
         self.assertEqual(run.passed_names, ["test_rate"])
 
     def test_a_skip_is_not_green(self) -> None:
-        # The hole this file was written for. pytest calls this run a success:
-        # no failures, no errors, exit code 0. One of the two tests never ran,
-        # so the suite proved half of what it claims to.
+        # このファイルを書いた理由の穴。pytest はこの走行を成功と呼ぶ。失敗も
+        # エラーも無く、終了コードは 0 だ。2件のうち1件は走っておらず、スイートは
+        # 主張の半分しか証明していない。
         run = self.parse(report(PASS + SKIP, tests=2, failures=0, errors=0, skipped=1))
         self.assertFalse(run.green)
         self.assertEqual(run.skipped, 1)
         self.assertEqual(run.skipped_names, ["tests.test_models::test_save"])
-        # A skipped test is not a passing test and must not be counted as one:
-        # RED_GATE's R4 asks whether anything already passes against the stub.
+        # スキップされたテストは通ったテストではなく、そう数えてはならない。
+        # RED_GATE の R4 は、スタブに対してすでに通るものがあるかを訊く。
         self.assertEqual(run.passed_names, ["test_rate"])
 
     def test_an_empty_suite_is_not_green(self) -> None:
-        # Nothing failed, because nothing ran. RED_GATE catches this at R1 by
-        # comparing against expected_tests; VERIFY has no expected count and
-        # relies on this.
+        # 何も走らなかったので、何も落ちなかった。RED_GATE は R1 で expected_tests
+        # と比べて捕まえる。VERIFY には期待する件数が無いので、これに頼る。
         run = self.parse(report("", tests=0, failures=0, errors=0, skipped=0))
         self.assertFalse(run.green)
         self.assertEqual(run.tests, 0)
 
 
 class WhenTheReportCannotBeRead(unittest.TestCase):
-    """Unreadable is an error, never an absence. A report that says nothing must
-    not be read as "nothing failed" -- that would pass a step on a run that
-    never happened."""
+    """読めないものはエラーで、無いものではない。何も言わないレポートを「何も
+    落ちなかった」と読んではならない。起きてもいない走行でステップが通る。"""
 
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
@@ -109,7 +106,7 @@ class WhenTheReportCannotBeRead(unittest.TestCase):
         self.assertEqual(run.tests, 0)
 
     def test_truncated_xml(self) -> None:
-        # What a killed pytest leaves behind.
+        # 殺された pytest が残すもの。
         self.path.write_text('<testsuites><testsuite tests="3"', encoding="utf-8")
         run = parse_junit(self.path)
         self.assertFalse(run.green)

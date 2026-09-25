@@ -1,9 +1,9 @@
-"""The fourth role: what it is told, and what the runner does with its answer.
+"""4つ目の役。何を伝えられ、ランナーはその答えをどう扱うか。
 
-The critic is the only part of this machine that has an opinion. Everything
-else counts, hashes or compares. So the things worth pinning down are the ones
-that would quietly turn an opinion into a rubber stamp: what reaches the brief,
-and what happens to an answer that cannot be read.
+この機械の中で意見を持つのはクリティックだけだ。ほかはすべて、数えるか、
+ハッシュを取るか、比べる。だから固定しておく価値があるのは、意見を黙って
+形だけの承認に変えてしまうものだ。ブリーフに何が届くかと、読めない答えが
+どうなるか。
 
     python3 -m unittest discover -s runner/tests
 """
@@ -28,10 +28,10 @@ TASKS = json.dumps({"language": "python", "steps": [{"id": "S1"}]}, ensure_ascii
 
 class WhatTheCriticIsTold(unittest.TestCase):
     def test_both_modes_exist_and_are_the_whole_list(self):
-        # Measured on run 7's plan: coverage found an unreachable feature, an
-        # unverified launch path and a criterion asserting against its own
-        # requirement; trace found that the initial state was a fixed point.
-        # The findings were disjoint, so neither mode is redundant.
+        # run 7 の計画で測った。coverage は届かない機能、確かめられていない起動の
+        # 経路、自分の要件に逆らって確かめる条件を見つけた。trace は初期状態が
+        # 不動点であることを見つけた。指摘は重ならなかったので、どちらのモードも
+        # 余計ではない。
         self.assertEqual(sorted(CRITIQUE_MODES), ["coverage", "trace"])
 
     def test_coverage_is_given_the_requirements_and_the_plan(self):
@@ -40,12 +40,11 @@ class WhatTheCriticIsTold(unittest.TestCase):
         self.assertIn('"id": "S1"', brief)
 
     def test_trace_is_not_given_the_requirements(self):
-        # This is the property the mode is FOR. On run 7 it derived the deadlock
-        # from the criteria alone, which is what lets it catch a product that
-        # cannot work even when the requirements never mentioned the missing
-        # piece -- run 7's requirements never mentioned a starting state. A
-        # tracer handed the requirements would grade against them instead, and
-        # this mode would collapse into the other one.
+        # これがこのモードの「目的」の性質だ。run 7 で、trace は条件だけから行き
+        # 詰まりを導いた。だから、欠けている部品について要件が何も言っていなくても、
+        # 動かない製品を捕まえられる。run 7 の要件は初期状態に一言も触れていな
+        # かった。要件を渡された trace はそれに照らして採点するようになり、この
+        # モードはもう片方と同じものになってしまう。
         brief = brief_critique_trace(TASKS)
         self.assertNotIn("開始直後から遊べること", brief)
         self.assertNotIn("セーブを消去", brief)
@@ -77,7 +76,7 @@ class WhatTheCriticIsTold(unittest.TestCase):
 
 
 class ReadingTheAnswer(unittest.TestCase):
-    """An unreadable critique has said nothing, and must never read as clean."""
+    """読めない批評は何も言っておらず、決して問題なしと読んではならない。"""
 
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
@@ -110,9 +109,9 @@ class ReadingTheAnswer(unittest.TestCase):
         self.assertEqual(read_findings(), [])
 
     def test_no_file_at_all_halts_rather_than_reading_as_clean(self):
-        # "the critic found nothing" and "the critic never ran" must not look
-        # alike. Same reason parse_junit refuses to read a broken report as
-        # zero failures.
+        # 「クリティックは何も見つけなかった」と「クリティックは走らなかった」は
+        # 同じに見えてはならない。parse_junit が壊れたレポートを失敗ゼロと読まない
+        # のと同じ理由だ。
         with self.assertRaises(loop.Halt):
             read_findings()
 
@@ -127,9 +126,9 @@ class ReadingTheAnswer(unittest.TestCase):
             read_findings()
 
     def test_a_stray_file_is_deleted_and_recorded(self):
-        # Same shape as the planner's B3: the runner owns the directory, so it
-        # does the deleting. Unlike B3 this cannot cost an attempt -- there is
-        # no retry loop here to spend.
+        # プランナーの B3 と同じ形。ディレクトリはランナーの所有なので、ランナーが
+        # 消す。B3 と違い、試行を使わせることはありえない。ここには使うための
+        # やり直しのループが無い。
         self.write(json.dumps({"findings": []}))
         (self.out / "notes.md").write_text("scratch", encoding="utf-8")
         read_findings()
@@ -149,28 +148,25 @@ class Reporting(unittest.TestCase):
 
 
 class TheRefineLoop(unittest.TestCase):
-    """Findings go back to the planner without a person in between.
+    """指摘は、人を挟まずにプランナーへ戻る。
 
-    A critique nobody routes is a report, and a report leaves the human inside
-    the cycle at exactly the point the machine was built to handle. The
-    findings are addressed to the planner anyway.
+    誰も回さない批評は報告で、報告は、機械が扱うために作られたちょうどその場所で、
+    人間を輪の中に残す。指摘の宛先は、どのみちプランナーだ。
     """
 
     def test_the_brief_says_the_criteria_are_still_open(self):
-        # This is the difference from `plan propose`. Nothing is built, nothing
-        # is green, so P5 does not bite and the acceptance criteria can still
-        # change -- which is why the critique happens before `plan apply` and
-        # not after.
+        # これが `plan propose` との違いだ。何も作られておらず、何も緑でないので
+        # P5 は効かず、受け入れ条件はまだ変えられる。だから批評は `plan apply` の
+        # 後ではなく前に行う。
         brief = loop.brief_plan_refine("要件", "{}", "1. something is wrong")
         self.assertIn("NOTHING HAS BEEN BUILT YET", brief)
         self.assertIn("still yours to change", brief)
         self.assertIn("something is wrong", brief)
 
     def test_the_brief_says_the_critic_may_be_wrong(self):
-        # The first production critique spent two of its five findings on a
-        # file the environment provides. A planner told to satisfy every
-        # finding would have contorted the plan to build something that was
-        # already there.
+        # 最初の本番の批評は、5件の指摘のうち2件を、環境が用意するファイルに
+        # 使った。すべての指摘を満たせと言われたプランナーは、もうあるものを
+        # 作るために計画をゆがめていただろう。
         brief = loop.brief_plan_refine("要件", "{}", "1. x")
         self.assertIn("could be wrong", brief)
         self.assertIn("already provides", brief)
