@@ -80,5 +80,26 @@ class ThePageBelongsToTypeScript(unittest.TestCase):
         self.assertIn('import { start } from "/src/main.ts"', facts)
 
 
+class WhatTheSolverCanDo(unittest.TestCase):
+    """テストのコマンドだけを見せると、プランナーは「走らせて確かめろ」と書く。"""
+
+    def facts(self, tiers: list[str]) -> str:
+        with patch.object(loop, "SOLVER_TIERS", tiers), \
+             patch.dict(os.environ, {"DISPLAY": ""}), \
+             patch("loop.run") as run:
+            run.return_value = SimpleNamespace(
+                returncode=0, stdout="Python 3.12.3", stderr="")
+            return loop.environment_facts()
+
+    def test_a_solver_without_commands_is_described_as_one(self):
+        for tiers in (["claude"], ["local"], ["local", "claude"]):
+            with self.subTest(tiers=tiers):
+                self.assertIn("The solver cannot run commands", self.facts(tiers))
+
+    def test_a_tier_that_can_run_commands_drops_the_warning(self):
+        self.assertNotIn("The solver cannot run commands",
+                         self.facts(["claude", "codex"]))
+
+
 if __name__ == "__main__":
     unittest.main()

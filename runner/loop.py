@@ -194,6 +194,11 @@ RETRY_MODES = ("repair", "resample")
 # 挙げたときだけ使う。
 SOLVER_TIERS = ["claude"]
 
+# コマンドを実行できるバックエンド。codex はサンドボックスの中でテストを
+# 走らせられる。claude は Bash を許していない（solver-claude）。local は
+# 1回の問い合わせでファイルを返すだけ（solver-local）。
+SOLVERS_THAT_RUN_COMMANDS = {"codex"}
+
 
 # --------------------------------------------------------------------------
 # small helpers
@@ -2312,6 +2317,22 @@ It is what a person opens, and it is already wired:
     argv, _ = test_argv(["<the step's files_test>"], STATE / "report.xml")
     command = " ".join(a.replace(str(PROJECT) + "/", "") for a in argv)
 
+    # ソルバーが何をできるかも、書き写さずに使うバックエンドから決める。
+    # テストのコマンドだけを見せると、プランナーは CONTEXT.md に「このコマンドで
+    # 確かめてから終えよ」と書く。claude と local はファイルの読み書きしか
+    # できないので、ソルバーは実行を試みて断られ、試行の一部をそれに使う。
+    if any(tier in SOLVERS_THAT_RUN_COMMANDS for tier in SOLVER_TIERS):
+        solver_tools = ""
+    else:
+        solver_tools = """
+The solver cannot run commands -- not the test command above, and not anything
+else. It reads files and writes files, and that is all it can do. The runner
+runs the tests after the solver has finished and hands the failures to the next
+attempt. So do not tell the solver, in CONTEXT.md or anywhere else, to run the
+tests, to check its work by running something, or to install anything: it will
+try, be refused, and spend part of its attempt on it.
+"""
+
     if typescript:
         runtime = f"Runtime: {version(Path('node'))}"
         toolkit = ("User interface: the DOM, via happy-dom. Every test file is "
@@ -2357,7 +2378,7 @@ Graphical display: {f"DISPLAY={display}" if display else "NONE. DISPLAY is not s
 {screen}
 The runner executes the tests itself, as:
     {command}
-
+{solver_tools}
 Everything under the project root, except plan/, .git/ and the frozen
 toolchain -- this is the whole of what exists today:
 
