@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
-"""Every question I would otherwise have to ask you, answered in one command.
+"""本来ならあんたに訊かなければならない質問に、1つのコマンドで全部答える。
 
     sudo -u solver /srv/loop/bin/smoke-local
 
-Run it as `solver`, not as yourself: the point is to test the path the runner
-actually uses, through the account that actually uses it. Each check prints
-PASS or FAIL, and every FAIL carries its own fix. The diagnostic block at the
-end is what to paste if a fix is not obvious -- it holds everything a second
-pair of eyes would ask for, so one paste replaces a conversation.
+自分ではなく `solver` として走らせる。ランナーが実際に使う経路を、実際に使う
+アカウントで確かめるのが目的だからだ。各検査は PASS か FAIL を出し、FAIL には
+必ず直し方が付く。直し方が分からなければ、末尾の診断のまとまりを貼る。別の人が
+訊きたくなることを全部含むので、1回貼れば会話の往復が要らない。
 
-Exit code is the number of the first check that failed, 0 if all passed.
+終了コードは最初に落ちた検査の番号。全部通れば 0。
 """
 
 from __future__ import annotations
@@ -44,7 +43,7 @@ def call(path: str, payload=None, timeout=120):
 def check(n: int, title: str, fn) -> bool:
     try:
         detail = fn()
-    except Exception as e:                      # noqa: BLE001 -- report, never raise
+    except Exception as e:                      # noqa: BLE001 -- 報告し、投げ直さない
         print(f"[{n}] FAIL  {title}\n      {type(e).__name__}: {e}")
         notes.append(f"check {n}: {type(e).__name__}: {e}")
         return False
@@ -123,7 +122,7 @@ def c5_constrained():
                                             "schema": schema}},
     }, timeout=300)
     text = body["choices"][0]["message"]["content"]
-    parsed = json.loads(text)          # raises if the constraint did not hold
+    parsed = json.loads(text)          # 制約が効いていなければ例外になる
     if not parsed.get("files"):
         raise RuntimeError("constrained output came back empty.")
     return f"{len(parsed['files'])} file(s)"
@@ -147,7 +146,7 @@ def c6_thinking_off():
 
 
 def c7_end_to_end():
-    """The whole path: a brief in the real format, through solver-local, onto disk."""
+    """経路の全体。本物の形のブリーフが、solver-local を通って、ディスクに書かれる。"""
     if not os.access(SOLVER_LOCAL, os.X_OK):
         raise RuntimeError(f"{SOLVER_LOCAL} is not executable by this account.\n"
                            "      Fix: sudo ./70-local-solver.sh")
@@ -174,7 +173,7 @@ def c7_end_to_end():
                                f"      Model said: {proc.stdout.strip()[-300:]}")
         body = written.read_text(encoding="utf-8")
         ns: dict = {}
-        exec(compile(body, "sample.py", "exec"), ns)   # noqa: S102 -- our own smoke file
+        exec(compile(body, "sample.py", "exec"), ns)   # noqa: S102 -- この smoke 自身のファイル
         if ns.get("add", lambda *_: None)(2, 3) != 5:
             raise RuntimeError("the file it wrote does not satisfy the test. Plumbing is\n"
                                "      fine; this is a statement about the model.")

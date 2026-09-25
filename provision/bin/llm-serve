@@ -1,33 +1,30 @@
 #!/usr/bin/env bash
-# The local inference server, as uid `llm`.
+# ローカルの推論サーバを、uid `llm` で動かす。
 #
 #     sudo -u llm /srv/loop/bin/llm-serve
 #
-# Its own account, which is neither solver nor runner nor planner. The solver
-# reaches it over loopback and cannot restart it, read its weights, or change
-# how it was started -- the same argument as everywhere else here: the fence is
-# the uid, not a promise about who calls what.
+# solver でも runner でも planner でもない、専用のアカウント。solver はループ
+# バックで届くが、再起動も、重みを読むことも、起動のしかたを変えることもできない。
+# ここのほかの場所と同じ理屈で、柵は uid であり、誰が何を呼ぶかの約束ではない。
 set -euo pipefail
 
 WEIGHTS="${LOOP_LLM_WEIGHTS:-/srv/loop/models/model.gguf}"
 PORT="${LOOP_LLM_PORT:-8080}"
-# 16384, and the number is measured rather than chosen -- twice, because the
-# first measurement was wrong about what a step needs.
+# 16384。選んだ値ではなく測った値だ。2回測った。1回目は、ステップに何が要るかの
+# 見積もりを誤っていた。
 #
-# This box has an RTX 2060 with 6144 MiB and the weights (IQ4_XS, 4.81 GB) take
-# most of it. 8192 was chosen on the estimate that a brief plus the files it may
-# write comes to 2-3k tokens. Run 8's S1 measured 5,997: two thousand of it is
-# the twelve frozen tests the implementation has to satisfy, and another
-# fifteen hundred is CONTEXT.md, which every step receives. The estimate was low
-# by half.
+# この箱の GPU は RTX 2060 で 6144 MiB、その大半を重み（IQ4_XS、4.81 GB）が使う。
+# 8192 は、ブリーフと書いてよいファイルで 2〜3k トークンという見積もりで選んだ。
+# run 8 の S1 は 5,997 だった。うち2千は実装が満たすべき凍結済みのテスト12件、
+# さらに千5百はどのステップも受け取る CONTEXT.md だ。見積もりは半分に過ぎなかった。
 #
-# Doubling cost 158 MiB, measured: 5,276 -> 5,434 of 6,144 used. The KV cache is
-# cheap here because it is quantised (--cache-type-k/v q8_0 below); without that
-# this would not have fit.
+# 倍にして増えたのは 158 MiB（実測、6,144 のうち 5,276 -> 5,434）。KV キャッシュを
+# 量子化している（下の --cache-type-k/v q8_0）ので安く済む。それが無ければ
+# 収まらなかった。
 CTX="${LOOP_LLM_CTX:-16384}"
-# All layers on the GPU when there is one. llama-server silently falls back to
-# CPU for what does not fit, which is the right behaviour but a slow surprise:
-# smoke-local reports the tokens per second so the fallback is visible.
+# GPU があれば全層を載せる。llama-server は収まらない分を黙って CPU に回す。
+# 振る舞いとしては正しいが、遅さで驚かされる。smoke-local が毎秒のトークン数を
+# 報告するので、回されたことが見える。
 NGL="${LOOP_LLM_NGL:-99}"
 
 [ -r "$WEIGHTS" ] || {
@@ -40,14 +37,13 @@ command -v llama-server >/dev/null || {
   exit 2
 }
 
-# --host 127.0.0.1   never a routable interface. Nothing outside this VM has any
-#                    business reaching a solver's model server.
-# --jinja            REQUIRED. Without it llama.cpp does not run the model's own
-#                    chat template, and `chat_template_kwargs` -- which is how
-#                    thinking gets turned OFF -- is silently ignored. A thinking
-#                    model with no way to stop thinking is the failure this flag
-#                    exists to prevent, and it fails quietly.
-# --alias local      the name solver-local sends as "model".
+# --host 127.0.0.1   外に出るインターフェイスには決して出さない。この VM の外の
+#                    何かが、ソルバーのモデルサーバに届く理由は無い。
+# --jinja            必須。無いと llama.cpp はモデル自身のチャットテンプレートを
+#                    走らせず、思考を切る手段である `chat_template_kwargs` が黙って
+#                    無視される。考えるのを止められない思考モデルは、このフラグが
+#                    防ぐための失敗で、しかも静かに起きる。
+# --alias local      solver-local が "model" として送る名前。
 exec llama-server \
   --model "$WEIGHTS" \
   --alias local \
@@ -59,7 +55,6 @@ exec llama-server \
   --cache-type-k q8_0 \
   --cache-type-v q8_0
 
-# No --log-file: /srv/loop/models is 2750 root:llm, so `llm` reads the
-# weights and cannot write beside them -- which is right, and means the
-# log has to go elsewhere. Under systemd that is the journal
-# (journalctl -u loop-llm).
+# --log-file は付けない。/srv/loop/models は 2750 root:llm なので、`llm` は重みを
+# 読めるが、その隣には書けない。それは正しく、ログは別の場所に行く必要がある。
+# systemd の下ではジャーナル（journalctl -u loop-llm）になる。

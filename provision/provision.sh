@@ -1,22 +1,22 @@
 #!/usr/bin/env bash
-# Provision the loop sandbox inside the WSL2 Ubuntu-24.04 distro.
-# Idempotent: safe to re-run.
+# WSL2 の Ubuntu-24.04 ディストロの中に、ループのサンドボックスを作る。
+# 冪等。何度流してもよい。
 #
 #   sudo ./provision.sh
 #
-# The distro's default (maintenance) user is assumed to be `maint`. If it is
-# named something else:  sudo ADMIN_USER=<name> ./provision.sh
+# ディストロの既定ユーザー（保守ユーザー）は `maint` を想定している。
+# 名前が違うときは:  sudo ADMIN_USER=<name> ./provision.sh
 #
-# Order matters. 15-authkeys must precede 50-lockdown (which is what grants
-# runner a login at all), and 40-perms must follow everything that creates
-# files under /srv/loop.
+# 順番に意味がある。15-authkeys は 50-lockdown より前に流す（runner に
+# ログインを許すのは 50-lockdown だから）。40-perms は /srv/loop の下に
+# ファイルを作るものすべての後に流す。
 set -euo pipefail
 cd "$(dirname "$0")"
 
 [ "$(id -u)" -eq 0 ] || { echo "run with sudo" >&2; exit 1; }
 
-# 05-isolation runs first: if wsl.conf never took effect there is no sandbox to
-# provision into, and every later step would succeed while meaning nothing.
+# 05-isolation を最初に流す。wsl.conf が効いていなければ、プロビジョニングする
+# サンドボックスが無い。その後のステップはすべて成功しつつ、何も意味しなくなる。
 for s in 05-isolation.sh 10-users.sh 15-authkeys.sh 20-layout.sh 25-runner.sh 30-python.sh 35-node.sh 40-perms.sh 45-agent-invoke.sh 50-lockdown.sh; do
   echo
   echo "=== $s ==="

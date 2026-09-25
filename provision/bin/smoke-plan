@@ -1,22 +1,19 @@
 #!/usr/bin/env bash
-# Does the guard on planner proposals actually hold?
+# プランナーの提案への検査は、本当に効いているか。
 #
 #     sudo /srv/loop/bin/smoke-plan
 #
-# Run as root, unlike the other smoke scripts, and for a reason worth stating:
-# to test the guard you have to write files into out/ AS THE PLANNER, and the
-# runner cannot do that -- its only sudo grant is the launcher. If this script
-# ran as runner it would be writing runner-owned files and testing a situation
-# that never occurs.
+# ほかの smoke と違い root で走らせる。理由は書いておく価値がある。検査を試すには
+# プランナーとして out/ にファイルを書く必要があり、runner にはそれができない。
+# runner の sudo の許可は起動スクリプトだけだからだ。runner で走らせると、
+# runner 所有のファイルを書き、決して起こらない状況を試すことになる。
 #
-# What is being checked is the one claim the whole planning side rests on: a
-# planner cannot weaken the acceptance criteria it is supposed to be held to.
-# Not "is instructed not to" -- cannot. Every case below is a way of trying.
+# 確かめるのは、計画の側全体が拠って立つ唯一の主張だ。プランナーは、自分が
+# 守らされる受け入れ条件を緩められない。「緩めるなと指示されている」ではなく、
+# 緩められない。下の各ケースは、どれもその試みの1つだ。
 #
-# Non-destructive: the one proposal that is meant to pass is byte-identical to
-# the plan already in place, so the plan never changes. It does leave a commit
-# behind, which contains the ledger entry and nothing else. That is accurate --
-# the apply really did happen.
+# 壊さない: 通るべき提案は、いまある計画とバイト単位で同じなので、計画は変わらない。
+# コミットは1つ残り、中身は台帳の記録だけだ。それは正確で、適用は実際に起きた。
 set -uo pipefail
 
 [ "$(id -u)" = "0" ] || { echo "run as root: sudo $0" >&2; exit 1; }
@@ -25,12 +22,11 @@ OUT=/srv/loop/planner/out
 TASKS=/srv/loop/project/plan/tasks.json
 ESC=/srv/loop/project/plan/ESCALATION.md
 LOOP="sudo -u runner python3 /srv/loop/runner/loop.py"
-cd /tmp   # /home/<anyone> is 0700, and sudo -u runner cannot cd into it
+cd /tmp   # /home/<誰か> は 0700 で、sudo -u runner はそこに cd できない
 
-# This smoke checks the guard on CHANGES to a plan, so it needs a plan to
-# change. On a fresh project there is none, and every case below would fail
-# while reading it -- which looks like the guard is broken when it is only
-# absent.
+# この smoke は計画の「変更」への検査を確かめるので、変更する計画が要る。新しい
+# プロジェクトには計画が無く、下の各ケースは計画を読む時点で落ちる。検査が
+# 無いだけなのに、壊れているように見える。
 if ! sudo -u runner test -f "$TASKS"; then
   echo "smoke-plan: cannot run -- there is no plan at $TASKS" >&2
   echo '            run: plan bootstrap -- then re-run this.' >&2
@@ -44,8 +40,8 @@ clear_out()   { find "$OUT" -mindepth 1 -delete; }
 as_planner()  { sudo -u planner tee "$OUT/$1" >/dev/null; }
 edit_tasks()  { sudo -u runner cat "$TASKS" | python3 -c "$1"; }
 
-# Every case states the exit code it expects. 0 applied, 2 refused, 3 the
-# planner handed the decision back to the human.
+# 各ケースは、期待する終了コードを書く。0 は適用、2 は拒否、3 はプランナーが
+# 判断を人間に返したことを表す。
 expect() {
   local want="$1" name="$2"
   shift 2
@@ -99,14 +95,13 @@ t["steps"][0]["expected_tests"]=1
 print(json.dumps(t,ensure_ascii=False,indent=2))' | as_planner tasks.json
 expect 2 "lowering expected_tests is refused (P3)" $LOOP plan apply
 
-# P4 can only be exercised against a plan that has review_gate on somewhere, and
-# the fixture plan has it off everywhere. So turn it on for the duration -- in
-# the plan on disk, which the guard reads as "old" -- and put it back.
+# P4 は、どこかで review_gate が有効な計画に対してしか試せない。計画はふつう
+# どこでも無効にしている。だから、試すあいだだけディスク上の計画（検査が「元」と
+# して読むもの）で有効にし、後で戻す。
 #
-# The backup stays inside plan/ rather than /tmp on purpose: plan/ is 0700
-# runner, and /tmp is readable by the solver. A smoke script that copies the
-# acceptance criteria somewhere the solver can read them would defeat the thing
-# it is testing.
+# 控えは /tmp ではなく、あえて plan/ の中に置く。plan/ は 0700 runner で、/tmp は
+# solver から読める。受け入れ条件を solver の読める場所に写す smoke は、試して
+# いるものそのものを壊してしまう。
 BACKUP="$TASKS.smoke-backup"
 restore_tasks() {
   if [ -e "$BACKUP" ]; then
@@ -117,10 +112,9 @@ restore_tasks() {
 trap restore_tasks EXIT
 
 sudo -u runner cp "$TASKS" "$BACKUP"
-# Read from the backup, not from $TASKS. `cat $TASKS | ... | tee $TASKS` is a
-# race: the shell sets up the whole pipeline at once, so tee can truncate the
-# file before cat has read it. It works most of the time, which is the worst
-# way for it to be wrong.
+# $TASKS ではなく控えから読む。`cat $TASKS | ... | tee $TASKS` は競合する。
+# シェルはパイプライン全体を一度に組むので、cat が読む前に tee がファイルを
+# 空にしうる。たいていは動く。それが最も悪い間違い方だ。
 sudo -u runner cat "$BACKUP" | python3 -c '
 import json,sys
 t=json.load(sys.stdin)
@@ -166,8 +160,8 @@ expect 2 "escalating and proposing at once is refused" $LOOP plan apply
 echo "--- and a proposal within the remit is applied ---"
 
 clear_out
-# Byte-identical on purpose: this exercises the accept path -- write, commit,
-# clear out/ -- without changing what the loop is measured against.
+# あえてバイト単位で同じにする。ループが測られる基準を変えずに、受け入れる経路
+# （書く、コミットする、out/ を片付ける）を試す。
 sudo -u runner cat "$TASKS" | as_planner tasks.json
 sudo install -o runner -g runner -m 600 /dev/null "$ESC"
 echo "smoke" | sudo -u runner tee -a "$ESC" >/dev/null

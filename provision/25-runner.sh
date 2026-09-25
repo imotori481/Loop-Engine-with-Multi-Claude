@@ -18,7 +18,7 @@ DEST=/srv/loop/runner
 install -d -o root -g root -m 755 "$DEST"
 install -o root -g root -m 644 "$SRC" "$DEST/loop.py"
 
-# ---- assertions, from the runner's point of view -----------------------
+# ---- 検査。runner の視点で確かめる ------------------------------------
 fail=0
 if ! sudo -u runner test -r "$DEST/loop.py"; then
   echo "FAIL: runner should be able to: test -r $DEST/loop.py"; fail=1

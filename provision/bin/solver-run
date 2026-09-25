@@ -1,30 +1,30 @@
 #!/usr/bin/env bash
-# Start the solver agent, non-interactively, on one brief.
+# ソルバーのエージェントを、1つのブリーフに対して非対話で起動する。
 #
-# Invoked by the runner as:
+# ランナーはこう呼ぶ:
 #     sudo -u solver /srv/loop/bin/solver-run <brief-file> <seconds> [backend]
 #
-# The runner has no sudo (10-users.sh asserts that). The single exception in
-# /etc/sudoers.d/91-runner-to-solver names this script and no other, and is
-# limited to Runas (solver) -- sideways, never up.
+# ランナーは sudo を持たない（10-users.sh が確かめる）。
+# /etc/sudoers.d/91-runner-to-solver の唯一の例外はこのスクリプトだけを名指しし、
+# Runas (solver) に限る。横への移動で、昇格ではない。
 set -euo pipefail
 
 BRIEF="${1:?usage: solver-run <brief-file>}"
 
-# Seconds before the agent is stopped. Enforced HERE rather than in the runner:
-# the runner belongs to a different uid and cannot signal this process at all,
-# so a ceiling applied only on that side would leave a hung agent running with
-# nothing able to end it. `timeout` exits 124 when it fires.
+# エージェントを止めるまでの秒数。ランナーではなくここで強制する。ランナーは
+# 別の uid で、このプロセスに信号をまったく送れない。上限をランナーの側だけで
+# 掛けると、固まったエージェントが、誰にも止められないまま動き続ける。
+# `timeout` は発動すると 124 で終わる。
 LIMIT="${2:-900}"
 [ -r "$BRIEF" ] || { echo "solver-run: cannot read brief: $BRIEF" >&2; exit 2; }
 
-# Which backend runs this brief. The runner passes a NAME and never a command:
-# the mapping from name to executable lives HERE, in a root-owned script the
-# runner cannot write. Adding a backend is therefore a deliberate act by someone
-# with sudo, not something a plan or a runner can ask for.
+# どのバックエンドがこのブリーフを走らせるか。ランナーが渡すのは名前だけで、
+# コマンドは渡さない。名前から実行ファイルへの対応はここ、ランナーが書けない
+# root 所有のスクリプトにある。だからバックエンドを足すのは sudo を持つ人の
+# 意図した行為で、計画やランナーが求められるものではない。
 #
-# The character class is the whole of the validation, and it has to be, because
-# the name goes into a path below.
+# 検証は文字の種類を見るだけで、それで足りなければならない。名前は下でパスに
+# 埋め込まれるからだ。
 # 名前を省略したときは claude（solver-claude）を使う。codex は名前を指定した
 # ときだけ使う任意のバックエンドにする。
 BACKEND="${3:-claude}"
@@ -32,43 +32,41 @@ case "$BACKEND" in
   ""|*[!a-z0-9]*) echo "solver-run: bad backend name: $BACKEND" >&2; exit 4 ;;
 esac
 
-# sudo's env_reset does not reliably hand HOME to the target user, and codex
-# resolves its credential directory from HOME. Without these two lines it looks
-# in the RUNNER's home, finds nothing, and reports "Not logged in" -- a failure
-# a long way from its cause. Set both explicitly rather than depending on a
-# sudo flag the runner would have to remember to pass.
+# sudo の env_reset は、HOME を相手のユーザーのものに確実には変えない。codex は
+# 資格情報の置き場を HOME から決める。これが無いと、ランナーのホームを探し、
+# 何も見つけず、"Not logged in" と報告する。原因から遠い失敗だ。ランナーが
+# 渡し忘れうる sudo のフラグに頼らず、ここで明示する。
 export HOME=/home/solver
 
-# Anything that is not codex is expected to be dropped in beside this script as
-# /srv/loop/bin/solver-<name>, root-owned and 0755, taking the same <brief>
-# <seconds> arguments and applying its own `timeout`. That is the entire
-# integration surface for a second solver -- a local model, say -- and it stops
-# here on purpose: the write fences, the one-brief channel and the account this
-# runs as are already correct for whatever executes, because they are properties
-# of the uid and the filesystem rather than of the agent.
+# codex 以外のバックエンドは、このスクリプトの隣に /srv/loop/bin/solver-<name>
+# として置く。root 所有の 0755 で、同じ <brief> <seconds> の引数を取り、自分で
+# `timeout` を掛ける。ソルバーを足すための接点はそれだけで（claude やローカル
+# モデルなど）、あえてここで止めてある。書き込みの柵、ブリーフ1つだけの経路、
+# 実行するアカウントは、何が動いても最初から正しい。どれもエージェントではなく、
+# uid とファイルシステムの性質だからだ。
 #
-# The reason there is a second backend at all: when the cheap one exhausts its
-# attempts, the alternative is an escalation, and an escalation spends a PLANNER
-# call. A second solver is the cheaper of the two things that can happen next.
+# 段を複数置ける理由: 先の段が試行を使い切ったとき、もう1つの道はエスカレーション
+# で、それはプランナーの呼び出しを1回使う。次の段のソルバーは、次に起こりうる
+# 2つのうち安いほうだ。
 if [ "$BACKEND" != codex ]; then
   helper="/srv/loop/bin/solver-$BACKEND"
   [ -x "$helper" ] || {
     echo "solver-run: no backend '$BACKEND' ($helper is not executable)" >&2
     exit 4
   }
-  # Into the working tree first, for the reason spelled out at the `cd` below:
-  # sudo hands down the RUNNER's cwd, whose home is 0700, and a process that
-  # cannot traverse its own working directory fails somewhere unrecognisable.
+  # 先に作業ツリーへ移る。理由は下の `cd` に書いたとおり。sudo はランナーの
+  # cwd をそのまま渡し、そのホームは 0700 だ。自分の作業ディレクトリをたどれない
+  # プロセスは、見当のつかない場所で失敗する。
   cd /srv/loop/project
   exec "$helper" "$BRIEF" "$LIMIT"
 fi
 
 export CODEX_HOME=/home/solver/.codex
 
-# The solver authenticates with its OWN ChatGPT login, stored under a home at
-# mode 700. No other account can read it, and -- the point of doing it this way
-# -- the solver cannot read anyone else's either. There is deliberately no
-# shared credential file: `sudo -u solver -H codex login --device-auth`.
+# codex のソルバーは、自分自身の ChatGPT ログインで認証する。それはモード 700 の
+# ホームの下にある。ほかのアカウントは読めず、そしてこうする狙いどおり、
+# ソルバーもほかの誰のものも読めない。共有の資格情報ファイルはあえて置かない:
+# `sudo -u solver -H codex login --device-auth`。
 if [ ! -r "$CODEX_HOME/auth.json" ]; then
   echo "solver-run: solver is not logged in. Run:" >&2
   echo "    sudo -u solver -H codex login --device-auth" >&2
@@ -76,32 +74,30 @@ if [ ! -r "$CODEX_HOME/auth.json" ]; then
   exit 3
 fi
 
-# Move into the working tree before starting the agent. `--cd` below tells codex
-# which directory to treat as the workspace, but it does NOT change the process's
-# own cwd -- sudo hands that down from the caller, and the caller is the runner,
-# whose home is 0700. The solver cannot even traverse it, so the sandbox fails
-# while setting itself up and reports the error against `src/`, a long way from
-# the actual cause.
+# エージェントを起動する前に作業ツリーへ移る。下の `--cd` は codex にどの
+# ディレクトリをワークスペースとみなすかを伝えるが、プロセス自身の cwd は
+# 変えない。cwd は sudo が呼び出し元から渡し、呼び出し元はホームが 0700 の
+# ランナーだ。ソルバーはそこをたどることすらできず、サンドボックスが準備の途中で
+# 失敗し、エラーを `src/` に対して報告する。本当の原因から遠い。
 cd /srv/loop/project
 
-# --ignore-user-config  auth still uses CODEX_HOME, but config.toml is not read.
-#                       This is what keeps the brief the solver's ONLY input
-#                       (RUNNER_SPEC section 5); without it the agent picks up
-#                       ambient configuration and "one step's worth of
-#                       information" becomes a claim rather than a fact.
-# --ignore-rules        same argument for user and project .rules files.
-# --ephemeral           no session files on disk, so the solver cannot resume a
-#                       previous step. BOOTSTRAP requires the solver to lose its
-#                       memory between steps; this is that requirement as a
-#                       mechanism instead of a promise.
+# --ignore-user-config  認証には CODEX_HOME を使うが、config.toml は読まない。
+#                       これでブリーフがソルバーの唯一の入力になる
+#                       （RUNNER_SPEC 5 章）。無いとエージェントは周りの設定を
+#                       拾い、「1ステップ分の情報」が事実ではなく主張になる。
+# --ignore-rules        ユーザーとプロジェクトの .rules ファイルについても同じ。
+# --ephemeral           セッションのファイルをディスクに残さないので、ソルバーは
+#                       前のステップを再開できない。BOOTSTRAP はステップ間で
+#                       ソルバーが記憶を失うことを求めている。これはその要求を
+#                       約束ではなく仕組みにしたもの。
 # --sandbox workspace-write
-#                       codex's own sandbox, a SECOND fence. The load-bearing
-#                       one is the filesystem (RUNNER_SPEC 1-2): src/ is
-#                       group-writable, plan/ and .runner/ are 700 runner. If
-#                       the two ever disagree the filesystem wins, because it is
-#                       the fence the solver cannot talk its way past.
+#                       codex 自身のサンドボックスで、2つ目の柵。要になるのは
+#                       ファイルシステムのほう（RUNNER_SPEC 1-2）で、src/ は
+#                       グループで書け、plan/ と .runner/ は 700 runner だ。2つが
+#                       食い違えばファイルシステムが勝つ。ソルバーが言葉で
+#                       すり抜けられない柵だからだ。
 #
-# The ceiling is applied here, not by the runner: see LIMIT at the top.
+# 上限時間はランナーではなくここで掛ける。先頭の LIMIT を参照。
 exec timeout --kill-after=30 "$LIMIT" codex exec \
   --cd /srv/loop/project \
   --sandbox workspace-write \

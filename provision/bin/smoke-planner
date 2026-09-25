@@ -1,15 +1,14 @@
 #!/usr/bin/env bash
-# Can the runner drive the planner, and is the planner actually fenced in?
+# ランナーはプランナーを動かせるか。プランナーは本当に柵の中にいるか。
 #
 #     sudo -u runner /srv/loop/bin/smoke-planner
 #
-# The second half matters more than the first. A planner that runs is easy; a
-# planner that cannot write the plan directly, and cannot touch the code that has
-# to satisfy it, is the point (BOOTSTRAP 1-1). Those are checked as facts about
-# the filesystem, not as promises.
+# 後半のほうが大事だ。動くプランナーは簡単に作れる。要点は、計画を直接書けず、
+# 計画を満たすべきコードにも触れられないプランナーであること（BOOTSTRAP 1-1）。
+# それを約束ではなく、ファイルシステムの事実として確かめる。
 #
-# What it may CHANGE about the plan is a separate question, checked by
-# smoke-plan: the guard in `loop.py plan apply`.
+# 計画の何を変えてよいかは別の問いで、smoke-plan が `loop.py plan apply` の
+# 検査として確かめる。
 set -euo pipefail
 
 [ "$(id -un)" = "runner" ] || { echo "run as runner: sudo -u runner $0" >&2; exit 1; }
@@ -56,18 +55,17 @@ else
   fi
 fi
 
-# The fence, checked as permissions rather than by attempting the access.
+# 柵は、実際に触ってみるのではなく、権限として確かめる。
 #
-# The obvious way to write this -- `sudo -u planner test -r ...` -- does not
-# work from here and is worse than useless: this script runs as runner, whose
-# only sudo grant is the launcher, so sudo refuses the command and the failure
-# reads exactly like a denied file. Every such check would "pass" even with the
-# fence wide open. Inspect the modes instead; runner can stat all of them.
-# What 0700 on plan/ buys is that the planner cannot WRITE tasks.json. It is not
-# hiding the acceptance criteria from it -- the planner is their author, and the
-# runner hands it the whole plan in the brief when it asks for a revision. The
-# separation in BOOTSTRAP 1-1 is between the account that writes the criteria and
-# the account that writes the code, and that is the next two checks.
+# 素直な書き方の `sudo -u planner test -r ...` は、ここでは使えないうえに有害だ。
+# このスクリプトは runner で動き、runner の sudo の許可は起動スクリプトだけ
+# なので、sudo はそのコマンドを拒み、その失敗はファイルを拒まれたのとまったく
+# 同じに見える。柵が全開でも、そうした検査はすべて「通る」。代わりにモードを
+# 見る。runner はそのすべてを stat できる。
+# plan/ の 0700 が買うのは、プランナーが tasks.json を「書けない」ことだ。受け入れ
+# 条件をプランナーから隠すためではない。プランナーは条件の書き手で、改訂を頼む
+# ときランナーは計画全体をブリーフで渡す。BOOTSTRAP 1-1 の分離は、条件を書く
+# アカウントとコードを書くアカウントのあいだにあり、それが次の2つの検査だ。
 planmode="$(stat -c '%U:%G %a' /srv/loop/project/plan)"
 if [ "$planmode" = "runner:runner 700" ]; then
   note "ok: plan/ is runner:runner 700 -- every change goes through the runner"

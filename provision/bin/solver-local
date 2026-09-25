@@ -1,43 +1,42 @@
 #!/usr/bin/env python3
-"""A solver backend that is one request, not an agent.
+"""エージェントではなく、1回の問い合わせで動くソルバーのバックエンド。
 
     solver-local <brief-file> <seconds>
 
-Invoked by solver-run when the runner names a backend other than codex. The cwd
-is already /srv/loop/project and the uid is already `solver`; both are set by
-solver-run, and neither is this script's business.
+ランナーが名前 `local` を渡すと、solver-run がこれを呼ぶ。cwd はすでに
+/srv/loop/project、uid はすでに `solver` になっている。どちらも solver-run が
+決めることで、このスクリプトは触らない。
 
-WHY THIS IS NOT AN AGENT CLI
-----------------------------
-Everything an agent harness usually provides -- deciding when it is done,
-checking whether the tests pass, trying again -- the runner already provides,
-and provides in a way that cannot be talked round. Running a second loop inside
-this one would duplicate all of it, and every duplicated part is somewhere a
-small model can fail WHERE THE RUNNER CANNOT SEE IT. So: one request, whole
-files back, exit. No tools, no navigation, no test running, no retry.
+なぜエージェントの CLI にしないか
+--------------------------------
+エージェントの仕組みがふつう担うこと、つまり終わりを決める、テストが通るかを
+確かめる、やり直す、はすべてランナーがすでに担っていて、言いくるめられない形で
+担っている。この中でもう1つループを回せば、それを全部重ねることになり、重ねた
+部分はどれも、小さなモデルが「ランナーから見えない場所で」失敗しうる場所になる。
+だから、1回問い合わせ、ファイルを丸ごと受け取り、終わる。ツールも、探索も、
+テストの実行も、やり直しも無い。
 
-Whole files rather than a diff, for the same reason. The most common failure of
-a small model editing code is a unified diff whose hunk headers do not apply;
-whole-file output has no such failure mode by construction. What keeps that safe
-is that the runner checks the paths afterwards (`assert_touched`) and the plan
-keeps `files_write` small.
+差分ではなくファイルを丸ごと受け取るのも同じ理由による。小さなモデルがコードを
+編集するとき最も多い失敗は、hunk の見出しが当てはまらない unified diff だ。
+ファイル丸ごとなら、その失敗は形の上で起こりえない。それを安全にしているのは、
+ランナーが後でパスを確かめること（`assert_touched`）と、計画が `files_write` を
+小さく保つことだ。
 
-WHAT COSTS WHAT (this is the load-bearing design decision here)
---------------------------------------------------------------
-A non-zero exit from this script becomes `Halt` in the runner, and a Halt
-becomes an ESCALATION, and an escalation spends a PLANNER call. So the exit code
-is not a report of how well things went -- it is a choice about who pays:
+何が何を費やすか（ここでの要の設計判断）
+----------------------------------------
+このスクリプトの非ゼロ終了はランナーで `Halt` になり、Halt はエスカレーションに
+なり、エスカレーションはプランナーの呼び出しを1回使う。だから終了コードは出来の
+報告ではなく、誰が払うかの選択だ:
 
-    model did something useless   -> exit 0. The attempt is spent, VERIFY fails,
-                                     the loop draws again. Cheap.
-    the machine is wrong          -> non-zero. Retrying cannot help, a human has
-                                     to look, and saying so immediately is the
-                                     cheapest thing available.
+    モデルが役に立たないことをした -> exit 0。試行を1回使い、VERIFY が落ち、
+                                     ループがもう一度引く。安い。
+    機械の側がおかしい             -> 非ゼロ。やり直しても直らず、人が見る必要が
+                                     ある。すぐにそう言うのが一番安い。
 
-Bad JSON, a path outside the allowlist, an empty file: those are the model being
-bad at its job, and they must NOT reach the planner. Server unreachable, brief
-in an unexpected shape, prompt longer than the context: those are the machine
-being wrong, and they must not be retried nine times in silence.
+壊れた JSON、許可リスト外のパス、空のファイルは、モデルが仕事を下手にこなした
+ということで、プランナーに届いてはならない。サーバに届かない、ブリーフの形が
+想定と違う、プロンプトがコンテキストより長い、は機械の側がおかしいということで、
+黙って9回やり直してはならない。
 """
 
 from __future__ import annotations
@@ -52,66 +51,62 @@ import urllib.request
 from pathlib import Path
 
 # --------------------------------------------------------------------------
-# The knobs. Everything you are likely to want to change is in this block.
+# 調整する値。変えたくなりそうなものは、すべてこのまとまりにある。
 # --------------------------------------------------------------------------
 
 ENDPOINT = os.environ.get("LOOP_LLM_ENDPOINT", "http://127.0.0.1:8080")
 MODEL = os.environ.get("LOOP_LLM_MODEL", "local")
 
-# Above zero on purpose, and this is not a style preference. `policy.retry:
-# "resample"` spends the attempt budget on INDEPENDENT DRAWS; at temperature 0
-# every draw is the same draw and the whole budget buys one answer. If you set
-# retry to "repair", low is fine again.
-# 0.7 made every retry a fresh draw rather than a second try. Run 8's S1 was
-# rejected nine times from the same brief, and at least five of those are
-# explained by sampling alone: two test files with an apostrophe inside a
-# single-quoted name, three different criteria that happened to pass against
-# the stub. One draw got twelve tests and twelve failures through RED_GATE
-# cleanly; the next draw from the same brief did not.
+# 0 にはしない。好みの問題ではない。`policy.retry: "resample"` は試行の予算を
+# 「独立した抽選」に使う。温度 0 では、どの抽選も同じ抽選になり、予算全部で
+# 答えを1つしか買えない。retry を "repair" にするなら、低くてよい。
 #
-# The variety is not wanted here. A test file has to be right once, and
-# policy.retry = "resample" already provides diversity where it is useful --
-# in IMPL attempts, where a second angle on a stuck implementation is the
-# point. Everything before IMPL is transcription, and transcription should be
-# boring.
+# ただし高くもしない。0.7 では、やり直しのたびに2度目の挑戦ではなく新しい抽選に
+# なった。run 8 の S1 は同じブリーフから9回拒否され、そのうち少なくとも5回は
+# 抽選だけで説明がつく。単一引用符で囲んだテスト名の中にアポストロフィがある
+# テストファイルが2回、たまたまスタブに対して通った条件が3回。ある抽選では
+# 12件のテストと12件の失敗が RED_GATE をきれいに通り、同じブリーフからの次の
+# 抽選は通らなかった。
+#
+# ここではばらつきは要らない。テストファイルは一度正しく書ければよい。
+# policy.retry = "resample" は、ばらつきが役に立つところ、つまり IMPL の試行で
+# すでにそれを与えている。行き詰まった実装に別の角度を与えることが、そこでの
+# 狙いだ。IMPL より前はすべて書き写しで、書き写しは退屈なほうがよい。
 TEMPERATURE = float(os.environ.get("LOOP_LLM_TEMPERATURE", "0.2"))
 TOP_P = float(os.environ.get("LOOP_LLM_TOP_P", "0.9"))
 
-# Must match what the server was started with (llm-serve passes --ctx-size).
-# Checked against the server's own report at startup, because the failure this
-# prevents is silent: a prompt over the limit comes back as a confidently wrong
-# answer written from half a brief, which looks exactly like a stupid model.
-# Must match llm-serve's default. Two numbers that have to agree and live in
-# two files is a poor arrangement, but the alternative -- asking the server
-# what it was started with -- is a request that can fail, on a path whose
-# job is to refuse before spending minutes on a prompt that will not fit.
+# サーバを起動したときの値（llm-serve が --ctx-size で渡す）、つまり llm-serve の
+# 既定と一致させる。これが防ぐ失敗は黙って起きる。上限を超えたプロンプトは、
+# ブリーフの半分から書かれた自信ありげな誤答として返り、出来の悪いモデルと
+# まったく同じに見える。一致させるべき2つの数が2つのファイルにあるのは良い
+# 配置ではない。しかし代わりにサーバへ起動時の値を訊くと、それ自体が失敗しうる
+# 問い合わせになる。この経路の仕事は、収まらないプロンプトに何分も使う前に
+# 断ることだ。
 CTX_TOKENS = int(os.environ.get("LOOP_LLM_CTX", "16384"))
-# Half the context was reserved for output, and the loop does not produce that
-# much: run 8's S1 writes two files whose whole content comes to about 960
-# tokens. Reserving 4096 against it meant a brief of 5051 tokens was refused
-# with 3000 tokens of the window standing empty.
+# 出力に予約するのは、ループが実際に出す量に合わせる。run 8 の S1 は2つの
+# ファイルを書き、中身は全部で約 960 トークンだった。4096 を予約していたときは、
+# 5051 トークンのブリーフが、窓に 3000 トークンの空きを残したまま断られた。
 #
-# 2560 is measured rather than chosen -- the largest whole-file answer any step
-# has produced so far, with room over it. Under-reserving is safe to be wrong
-# about: a cut-off answer is not valid JSON, so solver-local fails on the parse
-# and says so. Over-reserving fails the other way, by refusing work that would
-# have fit, and that failure looks like a model that cannot do the job.
+# 2560 は選んだ値ではなく測った値で、これまでのステップが出したファイル丸ごとの
+# 答えの最大に余裕を足したもの。少なく予約して外れても安全だ。途中で切れた答えは
+# 正しい JSON にならず、solver-local は読み取りで失敗し、そう言う。多く予約して
+# 外れると逆向きに失敗する。収まったはずの仕事を断り、その失敗は仕事のできない
+# モデルに見える。
 MAX_OUTPUT_TOKENS = int(os.environ.get("LOOP_LLM_MAX_OUTPUT", "2560"))
 
-# Rough, and deliberately pessimistic: code and Japanese both run under 3
-# characters per token. Only used to refuse before spending minutes on a
-# generation that was truncated before it started.
+# 大まかで、あえて悲観的な値。コードも日本語も、1トークンあたり3文字を下回る。
+# 始まる前から切り捨てが決まっている生成に何分も使う前に、断るためだけに使う。
 CHARS_PER_TOKEN = 2.6
 
-# The thinking channel is turned off in the CHAT TEMPLATE, not by asking the
-# model not to think. An instruction is a request and a 9B breaks requests; a
-# template that has no thinking channel cannot emit one. Same argument as the
-# rest of this system: take the ability away rather than detect the misuse.
-# llama.cpp passes this through to the Jinja template (Qwen3 reads it).
+# 思考の経路は、モデルに考えるなと頼むのではなく、チャットテンプレートで切る。
+# 指示は要請で、9B は要請を破る。思考の経路を持たないテンプレートは、それを
+# 出せない。このシステムのほかの部分と同じ理屈で、誤用を見つけるのではなく
+# できること自体を取り上げる。llama.cpp はこれを Jinja のテンプレートに渡す
+# （Qwen3 が読む）。
 CHAT_TEMPLATE_KWARGS = {"enable_thinking": False}
 
-# Exit codes. 0 and 124 are the two the runner interprets; the rest are for the
-# human reading them, and each one appears in LOCAL_SOLVER.md with its fix.
+# 終了コード。ランナーが意味を読むのは 0 と 124 の2つ。残りは読む人間のための
+# もので、どれも LOCAL_SOLVER.md に直し方と一緒に載っている。
 EXIT_OK = 0
 EXIT_USAGE = 2
 EXIT_BRIEF_SHAPE = 5
@@ -140,16 +135,15 @@ SCHEMA = {
     "additionalProperties": False,
 }
 
-# The language is taken from the paths the brief allows, because those are the
-# one thing here that cannot be wrong about it.
+# 言語は、ブリーフが許すパスから取る。ここで言語について間違えようのない、
+# 唯一のものだからだ。
 #
-# This line used to read "You write Python files." always. Run 8 handed the
-# model TypeScript contracts under that system prompt and then spent seven
-# escalations wondering why the local model was bad at TypeScript -- it wrote
-# functions with no `export`, which is exactly right in the language it had
-# been told it was writing, since a module-level def is importable there. The
-# question "is the small model weak at TypeScript" could not be asked, because
-# nothing had ever asked it for TypeScript.
+# この1行を常に "You write Python files." にしていたとき、run 8 はその
+# システムプロンプトのままモデルに TypeScript の契約を渡し、ローカルモデルが
+# なぜ TypeScript に弱いのかを考えてエスカレーションを7回使った。モデルは
+# `export` の無い関数を書いた。伝えられた言語では、それでまったく正しい。
+# モジュールの最上位の def は import できるからだ。「小さなモデルは TypeScript に
+# 弱いのか」という問いは立てられなかった。誰も TypeScript を頼んでいなかった。
 LANGUAGE_BY_SUFFIX = {
     ".py": ("Python", ""),
     ".ts": ("TypeScript", """
@@ -180,25 +174,23 @@ Rules:
 
 
 def die(code: int, message: str) -> None:
-    """Every non-zero exit says what happened and what to do about it.
+    """非ゼロで終わるときは、何が起きたかと、どうすればよいかを必ず言う。
 
-    The expensive failure in this project is not a broken run, it is a broken
-    run that needs three rounds of questions to identify. So no error here is
-    allowed to be only a symptom.
+    このプロジェクトで高くつく失敗は、壊れた走行ではなく、原因を突き止めるのに
+    3往復の質問が要る壊れた走行だ。だから、ここのエラーは症状だけで終わらせない。
     """
     print(f"solver-local: {message}", file=sys.stderr)
     sys.exit(code)
 
 
 def files_from_brief(brief: str) -> list[str]:
-    """The paths the brief allows, read from the one heading all three use.
+    """ブリーフが許すパスを、3つのブリーフが共通に使う見出しから読む。
 
-    TEST_WRITE, STUB and IMPL are different briefs that happen to agree on this
-    heading (`brief_test_write`, `brief_stub`, `brief_impl` in loop.py). That
-    agreement is load-bearing and undeclared, so if it ever stops holding this
-    refuses instead of quietly writing nothing -- a backend that silently does
-    nothing burns every attempt in the step and reports it as a model that could
-    not solve the problem.
+    TEST_WRITE、STUB、IMPL は別々のブリーフで、たまたまこの見出しで揃っている
+    （loop.py の `brief_test_write`、`brief_stub`、`brief_impl`）。この一致は要なのに
+    どこにも宣言されていない。だから、もし崩れたら、黙って何も書かないのではなく
+    断る。黙って何もしないバックエンドは、そのステップの試行を全部使い、問題を
+    解けなかったモデルとして報告される。
     """
     if FILES_HEADING not in brief:
         die(EXIT_BRIEF_SHAPE,
@@ -215,8 +207,8 @@ def files_from_brief(brief: str) -> list[str]:
             continue
         if line.startswith("#"):
             break
-        # The list is bare paths, one per line. Anything with a space in it is
-        # the prose that follows the list, not a path.
+        # 一覧は1行に1つずつの素のパス。空白を含むものは一覧の後に続く文で、
+        # パスではない。
         if " " in line:
             break
         paths.append(line)
@@ -228,12 +220,12 @@ def files_from_brief(brief: str) -> list[str]:
 
 
 def current_contents(paths: list[str]) -> str:
-    """What the allowed files hold right now.
+    """許されたファイルの、いまの中身。
 
-    Needed because this backend never reads the repository: it gets one request
-    and cannot go looking. codex could, which is why brief_impl does not carry
-    this. Reading it here rather than adding it to the brief keeps the brief
-    contract -- one step's worth of information, and nothing else -- unchanged.
+    このバックエンドはリポジトリを読みに行かないので要る。問い合わせは1回で、
+    探しに行けない。codex は探しに行けるので、brief_impl はこれを運ばない。
+    ブリーフに足すのではなくここで読むことで、ブリーフの約束（1ステップ分の
+    情報だけ）は変わらない。
     """
     parts = []
     for rel in paths:
@@ -277,10 +269,10 @@ def main() -> int:
     brief_path = Path(sys.argv[1])
     seconds = int(sys.argv[2]) if len(sys.argv) > 2 else 900
 
-    # This script is exec'd by solver-run WITHOUT a `timeout` wrapper, because
-    # solver-run's contract is that a backend applies its own ceiling. 124 is
-    # not an arbitrary code: call_solver reads it as "the solver hit its own
-    # timeout", which is a different sentence from "the solver crashed".
+    # solver-run はこのスクリプトを `timeout` で包まずに exec する。バックエンドが
+    # 自分で上限を掛けるのが solver-run との約束だからだ。124 は適当な番号では
+    # ない。call_solver はそれを「ソルバーが自分の時間切れに当たった」と読み、
+    # 「ソルバーが落ちた」とは別の意味になる。
     def out_of_time(_sig, _frm):
         die(EXIT_TIMEOUT,
             f"no answer within {seconds}s.\n"
@@ -305,10 +297,9 @@ def main() -> int:
     estimated = int((len(system) + len(user)) / CHARS_PER_TOKEN)
     room = CTX_TOKENS - MAX_OUTPUT_TOKENS
     if estimated > room:
-        # Refused rather than sent. Over the limit the server either errors or
-        # silently drops the front of the prompt, and the silent case produces a
-        # confident answer written from half a brief -- indistinguishable, from
-        # the outside, from a model that is simply bad.
+        # 送らずに断る。上限を超えると、サーバはエラーを返すか、黙ってプロンプトの
+        # 前を落とす。黙って落とすと、ブリーフの半分から書かれた自信ありげな答えが
+        # 返り、外からは単に出来の悪いモデルと区別がつかない。
         die(EXIT_CONTEXT,
             f"prompt is about {estimated} tokens and only {room} fit "
             f"(ctx {CTX_TOKENS} minus {MAX_OUTPUT_TOKENS} reserved for output).\n"
@@ -323,15 +314,14 @@ def main() -> int:
         "temperature": TEMPERATURE,
         "top_p": TOP_P,
         "max_tokens": MAX_OUTPUT_TOKENS,
-        # Constrained decoding, not a formatting request. The single largest
-        # reliability lever available for a model this size: a shape it cannot
-        # emit is a shape that never has to be parsed defensively.
+        # 書式の依頼ではなく、制約付きのデコード。この大きさのモデルで使える、
+        # 最も大きな信頼性の梃子だ。出せない形は、身構えて読み取る必要もない。
         "response_format": {"type": "json_schema",
                             "json_schema": {"name": "files", "strict": True,
                                             "schema": SCHEMA}},
         "chat_template_kwargs": CHAT_TEMPLATE_KWARGS,
-        # llama.cpp keeps the shared prefix of successive requests. Attempts on
-        # one step differ only in their tail, so this is most of the wall-clock.
+        # llama.cpp は続けて来た問い合わせの共通の前半を覚えておく。1つのステップの
+        # 試行は末尾しか違わないので、実時間の大半がこれで浮く。
         "cache_prompt": True,
     }, seconds=max(30, seconds - 15))
 
@@ -344,16 +334,16 @@ def main() -> int:
 
     text = ((body.get("choices") or [{}])[0].get("message") or {}).get("content") or ""
 
-    # -- from here down, nothing exits non-zero -----------------------------
-    # Everything below is the model being bad at its job, and the model being
-    # bad at its job must cost an ATTEMPT, not an escalation. Escalations are
-    # answered by the planner, and the planner is the expensive account.
+    # -- ここから下は、非ゼロで終わらない ------------------------------------
+    # ここから下はすべて、モデルが仕事を下手にこなした場合で、それは試行を1回
+    # 使うべきもので、エスカレーションにしてはならない。エスカレーションに
+    # 答えるのはプランナーで、プランナーは高くつくアカウントだ。
     print(f"[solver-local] {MODEL} temp={TEMPERATURE} prompt~{estimated}tok "
           f"used={used} out={len(text)}ch")
 
     if "<think>" in text:
-        # Not fatal, but worth saying loudly once: the template still has a
-        # thinking channel, so tokens are being spent on it every request.
+        # 致命的ではないが、一度ははっきり言う価値がある。テンプレートにまだ
+        # 思考の経路があり、問い合わせのたびにトークンをそこに使っている。
         print("[solver-local] WARNING: <think> in the output -- enable_thinking "
               "did not take effect. See LOCAL_SOLVER.md, 'thinking is still on'.",
               file=sys.stderr)
@@ -386,9 +376,8 @@ def main() -> int:
     print(f"[solver-local] wrote {written or 'nothing'}"
           + (f"; refused {refused}" if refused else ""))
     if refused and not written:
-        # Said plainly because it is the failure that looks like nothing
-        # happening: the step will burn its whole budget producing identical
-        # VERIFY failures, and the ledger will not say why.
+        # はっきり言う。何も起きていないように見える失敗だからだ。ステップは
+        # 同じ VERIFY の失敗を出し続けて予算を全部使い、台帳は理由を言わない。
         print("[solver-local] every path was outside the allowlist. The step will "
               "fail VERIFY unchanged.", file=sys.stderr)
     return EXIT_OK

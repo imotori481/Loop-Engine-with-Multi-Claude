@@ -1,32 +1,32 @@
 #!/usr/bin/env bash
-# The local solver backend: an account for the model server, the two scripts,
-# and a place for the weights. Idempotent.
+# ローカルのソルバーのバックエンド。モデルサーバ用のアカウント、スクリプト、
+# 重みの置き場を用意する。冪等。
 #
 #     cd /tmp && sudo bash /opt/loop-engine/provision/70-local-solver.sh
 #
-# NOT run by provision.sh, for the same reason as 60-egress.sh: it is only
-# correct once you have decided to run a local model at all.
+# 60-egress.sh と同じ理由で、provision.sh からは流さない。ローカルモデルを
+# 使うと決めたときにだけ正しい。
 #
-# No sudoers change is needed and none is made. solver-run already holds the one
-# Runas(solver) grant, and it exec's this backend as the SAME uid -- the runner
-# gains nothing it did not have, which is the property that made naming backends
-# rather than commands worth the extra file.
+# sudoers の変更は要らず、何も変えない。solver-run はすでに Runas(solver) の
+# 許可を1つ持ち、このバックエンドを同じ uid で exec する。ランナーは持って
+# いなかったものを何も得ない。コマンドではなくバックエンドの名前を渡す形に、
+# ファイルを1つ増やすだけの価値があったのは、この性質のためだ。
 set -euo pipefail
 cd "$(dirname "$0")"
 
 [ "$(id -u)" -eq 0 ] || { echo "run with sudo" >&2; exit 1; }
 
-# A fourth account, deliberately. The model server is neither the solver nor the
-# runner: the solver reaches it over loopback and cannot restart it, read the
-# weights, or change how it was started. Same reasoning as every other uid here
-# -- the fence is the account, not an agreement about who calls what.
+# あえて別のアカウントにする。モデルサーバは solver でも runner でもない。
+# solver はループバックで届くが、再起動も、重みを読むことも、起動のしかたを
+# 変えることもできない。ここのほかの uid と同じ考え方で、柵はアカウントであり、
+# 誰が何を呼ぶかの取り決めではない。
 if ! id -u llm >/dev/null 2>&1; then
   useradd --system --create-home --home-dir /home/llm --shell /usr/sbin/nologin llm
   chmod 700 /home/llm
   echo "created uid llm"
 fi
 
-# Weights and the server log. Root-owned; llm reads, nobody else needs to.
+# 重みとサーバのログ。root の所有で、llm が読む。ほかに読む必要のある者はいない。
 install -d -o root -g root -m 755 /srv/loop/models
 chown root:llm /srv/loop/models
 chmod 2750 /srv/loop/models
@@ -42,7 +42,7 @@ echo "  /srv/loop/bin/solver-local   (exec'd by solver-run when a plan names it)
 echo "  /srv/loop/bin/smoke-local    (run as solver)"
 
 # --------------------------------------------------------------------------
-# The one step this script will NOT do blind.
+# このスクリプトが確かめずには行わない唯一の手順。
 # --------------------------------------------------------------------------
 if ! command -v llama-server >/dev/null 2>&1; then
   cat <<'EOF'
@@ -87,7 +87,7 @@ EOF
 fi
 
 # --------------------------------------------------------------------------
-# Keeping the server up
+# サーバを動かし続ける
 # --------------------------------------------------------------------------
 if [ -d /run/systemd/system ]; then
   cat > /etc/systemd/system/loop-llm.service <<'EOF'
