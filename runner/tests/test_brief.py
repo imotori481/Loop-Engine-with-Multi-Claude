@@ -12,6 +12,7 @@ cause appears in nothing the solver or the planner can see.
 
 import os
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -42,6 +43,41 @@ class WhatTheMachineLooksLike(unittest.TestCase):
     def test_a_missing_toolkit_is_reported_rather_than_assumed(self):
         self.assertIn("tkinter does NOT import", self.facts(display="", tk_ok=False))
         self.assertIn("tkinter imports", self.facts(display="", tk_ok=True))
+
+
+class ThePageBelongsToTypeScript(unittest.TestCase):
+    """35-node.sh は言語に関係なく index.html と vitest.config.mjs を置く。
+
+    Python の計画にそれを見せると、クリティックは「人が開く index.html から
+    コードに届かない」と指摘し、プランナーはそれに答えられない。
+    """
+
+    def facts(self, language: str) -> str:
+        with tempfile.TemporaryDirectory() as temp:
+            project = Path(temp)
+            (project / "src").mkdir()
+            (project / "index.html").write_text(
+                '<script type="module">import { start } from "/src/main.ts";</script>',
+                encoding="utf-8")
+            (project / "vitest.config.mjs").write_text("export default {};",
+                                                       encoding="utf-8")
+            with patch.object(loop, "PROJECT", project), \
+                 patch.dict(loop.LANGUAGE, loop.LANGUAGES[language], clear=True), \
+                 patch.dict(os.environ, {"DISPLAY": ""}), \
+                 patch("loop.run") as run:
+                run.return_value = SimpleNamespace(
+                    returncode=0, stdout="v22.23.3", stderr="")
+                return loop.environment_facts()
+
+    def test_a_python_plan_is_not_told_about_the_page(self):
+        facts = self.facts("python")
+        self.assertNotIn("index.html", facts)
+        self.assertNotIn("vitest.config.mjs", facts)
+
+    def test_a_typescript_plan_is_told_the_page_is_already_wired(self):
+        facts = self.facts("typescript")
+        self.assertIn("It is what a person opens", facts)
+        self.assertIn('import { start } from "/src/main.ts"', facts)
 
 
 if __name__ == "__main__":

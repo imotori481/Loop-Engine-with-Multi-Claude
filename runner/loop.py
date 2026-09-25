@@ -2246,8 +2246,16 @@ def environment_facts() -> str:
         except (OSError, IndexError):
             return "(not installed)"
 
+    typescript = LANGUAGE["source_suffix"] == ".ts"
+
     skip = {".git", ".venv", ".runner", "plan", "__pycache__", ".pytest_cache",
             "node_modules"}
+    # index.html と vitest.config.mjs は、35-node.sh が言語に関係なく置く。
+    # 箱は計画の言語を知らないからだ。Python の計画に見せると、クリティックは
+    # 「人が開く index.html からこの計画のコードに届かない」と指摘し、
+    # プランナーはそれに答えられない。TypeScript のときだけ見せる。
+    if not typescript:
+        skip |= {"index.html", "vitest.config.mjs"}
     listing = []
     for child in sorted(PROJECT.rglob("*")):
         if any(part in skip for part in child.relative_to(PROJECT).parts):
@@ -2276,7 +2284,7 @@ It is what a person opens, and it is already wired:
 
 """
                  f"{page.read_text(encoding='utf-8')}"
-                 ) if page.is_file() else ""
+                 ) if typescript and page.is_file() else ""
 
     # Gathered rather than written down, like everything else here, and for the
     # same reason -- but this one has teeth. A criterion such as "the window
@@ -2285,7 +2293,6 @@ It is what a person opens, and it is already wired:
     # so the step spends every attempt of every tier and then an escalation, and
     # the cause is nowhere in what any of them can see.
     interpreter = PROJECT / ".venv" / "bin" / "python"
-    typescript = LANGUAGE["source_suffix"] == ".ts"
 
     def imports(module: str) -> bool:
         try:
