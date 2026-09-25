@@ -18,7 +18,12 @@ apt-get update -qq
 apt-get install -y -qq python3-venv python3-pip python3-tk git
 
 V=/srv/loop/project/.venv
-if [ ! -x "$V/bin/python" ]; then
+# python と pip の両方があって初めて作成済みとみなす。python3-venv が無い
+# 状態で venv を作ると、python だけ置いて失敗し、pip の無い venv が残る。
+# python の有無だけで判定すると、次の実行はそれを作成済みとみなし、下の
+# pip で止まる。片方しか無ければ、壊れているので消して作り直す。
+if [ ! -x "$V/bin/python" ] || [ ! -x "$V/bin/pip" ]; then
+  rm -rf "$V"
   sudo -u runner python3 -m venv "$V"
 fi
 sudo -u runner "$V/bin/pip" install -q --upgrade pip
