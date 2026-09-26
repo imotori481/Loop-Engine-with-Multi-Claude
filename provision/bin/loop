@@ -2,15 +2,7 @@
 # 箱の操作をまとめたコマンド。保守ユーザーが流す。25-runner.sh が
 # /usr/local/bin/loop に置く。
 #
-#   loop go <requirements.md> [--language <lang>]
-#                        要件を置き、計画づくりから全ステップまでを裏で流す
-#   loop continue        適用待ちの提案があれば適用し、全ステップを裏で流す
-#   loop status          今のプロジェクト、走っているか、人への問い、台帳の末尾
-#   loop now             いまの作業を JSON で出す（ホストのダッシュボードが読む）
-#   loop log             走行ログを追う。Ctrl-C で抜けても走行は続く
-#   loop stop            走行を止める
-#   loop project <args>  プロジェクトの一覧と切り替え（loop-project.sh）
-#   loop raw <args>      loop.py をそのまま呼ぶ（runner として、前面で）
+# コマンドの一覧は usage() を参照。
 #
 # 走行は systemd の一時ユニット loop-run で、runner として動く。`sudo ... &` で裏に
 # 回すと、SSH が切れたときに sudo が受けた SIGHUP を中のコマンドへ中継し、走行が
@@ -55,10 +47,11 @@ step() {
   python3 -u "$LOOP/runner/loop.py" "$@"
 }
 
-# 最後の行は `loop status` が読む。形を変えるときは cmd_status も合わせる。
+# 行頭の `=== loop ` は、`loop status` と `loop now` が結果の行を探す目印。
+# 変えるときは両方を合わせる。
 finish() {
   echo
-  echo "=== loop finished ($(date '+%F %T')): $2"
+  echo "=== loop 終了 ($(date '+%F %T')): $2"
   exit "$1"
 }
 
@@ -67,9 +60,9 @@ apply_pending() {
   step plan apply || rc=$?
   case "$rc" in
     0) ;;
-    2) finish 2 "the proposal was rejected; it is left in $LOOP/planner/out. Read the violations above" ;;
-    3) finish 3 "the planner escalated to you; read $PLAN/PLANNER_ESCALATION.md" ;;
-    *) finish "$rc" "plan apply failed (exit $rc)" ;;
+    2) finish 2 "提案が拒まれた。提案は $LOOP/planner/out に残っている。上の違反を読む" ;;
+    3) finish 3 "プランナーがあんたに判断を返した。$PLAN/PLANNER_ESCALATION.md を読む" ;;
+    *) finish "$rc" "plan apply が失敗した（終了コード $rc）" ;;
   esac
 }
 
@@ -77,30 +70,30 @@ run_all() {
   local rc=0
   step run --all || rc=$?
   case "$rc" in
-    0) finish 0 "all steps green" ;;
-    5) finish 5 "out of quota; when it resets, 'loop continue' (reset a half-done step first: loop raw reset <step-id>)" ;;
-    *) finish "$rc" "run --all stopped (exit $rc); see 'loop status'" ;;
+    0) finish 0 "全ステップが緑になった" ;;
+    5) finish 5 "利用枠が尽きた。枠が戻ったら 'loop continue'。途中のステップがあれば先に 'loop raw reset <ステップ>'" ;;
+    *) finish "$rc" "run --all が止まった（終了コード $rc）。'loop status' を見る" ;;
   esac
 }
 
 work() {
   local log="$1" mode="$2" language="${3:-python}" rc=0
   exec >>"$log" 2>&1
-  echo "=== loop $mode started ($(date '+%F %T')) project=$(project_name)"
+  echo "=== loop $mode 開始 ($(date '+%F %T')) プロジェクト=$(project_name)"
 
   if [ "$mode" = go ]; then
     step plan bootstrap --language "$language" || rc=$?
-    [ "$rc" -eq 0 ] || finish "$rc" "plan bootstrap failed (exit $rc)"
+    [ "$rc" -eq 0 ] || finish "$rc" "plan bootstrap が失敗した（終了コード $rc）"
     if [ -f "$LOOP/planner/out/ESCALATE.md" ]; then
-      finish 3 "the planner escalated instead of planning; read $LOOP/planner/out/ESCALATE.md"
+      finish 3 "プランナーが計画を書かずに判断を返した。$LOOP/planner/out/ESCALATE.md を読む"
     fi
 
     step plan refine || rc=$?
     case "$rc" in
       0) ;;
-      3) finish 3 "the planner escalated during refine; read $LOOP/project/.runner/refine-escalation.md" ;;
-      4) finish 4 "the critic still has findings; read them above, then 'loop continue' to apply the proposal as it is" ;;
-      *) finish "$rc" "plan refine failed (exit $rc)" ;;
+      3) finish 3 "plan refine の途中でプランナーが判断を返した。$LOOP/project/.runner/refine-escalation.md を読む" ;;
+      4) finish 4 "クリティックの指摘が残った。上の指摘を読み、このまま適用するなら 'loop continue'" ;;
+      *) finish "$rc" "plan refine が失敗した（終了コード $rc）" ;;
     esac
     apply_pending
   else
@@ -113,71 +106,71 @@ work() {
 
 start() {
   local mode="$1" language="${2:-}" log
-  running && die "a run is already in progress; 'loop log' to follow it, 'loop stop' to end it"
+  running && die "もう走っている。追うなら 'loop log'、止めるなら 'loop stop'"
   log="$LOGS/$(project_name)-$(date +%Y%m%d-%H%M%S).log"
   as_runner touch "$log"
   as_runner ln -sfn "$(basename "$log")" "$(latest_log)"
   sudo systemd-run --quiet --collect --unit="$UNIT" \
     --uid=runner --gid=runner --working-directory=/tmp \
     "$SELF" __work "$log" "$mode" ${language:+"$language"}
-  echo "started; log: $log"
-  echo "follow it with 'loop log', check it with 'loop status'"
+  echo "裏で走らせた。ログ: $log"
+  echo "追うなら 'loop log'、状態を見るなら 'loop status'"
 }
 
 cmd_go() {
   local requirements="" language="python"
   while [ $# -gt 0 ]; do
     case "$1" in
-      --language) [ $# -ge 2 ] || die "--language needs a value"; language="$2"; shift 2 ;;
-      -*) die "unknown option: $1" ;;
-      *) [ -z "$requirements" ] || die "one requirements file only"; requirements="$1"; shift ;;
+      --language) [ $# -ge 2 ] || die "--language に値が無い"; language="$2"; shift 2 ;;
+      -*) die "知らないオプション: $1" ;;
+      *) [ -z "$requirements" ] || die "要件のファイルは1つだけ渡す"; requirements="$1"; shift ;;
     esac
   done
-  [ -n "$requirements" ] || die "usage: loop go <requirements.md> [--language <lang>]"
-  [ -f "$requirements" ] || die "no such file: $requirements"
-  [ -d "$(dirname "$REQUIREMENTS")" ] || die "$(dirname "$REQUIREMENTS") does not exist; is the project built?"
-  running && die "a run is already in progress; 'loop stop' first"
+  [ -n "$requirements" ] || die "使い方: loop go <要件>.md [--language <言語>]"
+  [ -f "$requirements" ] || die "ファイルが無い: $requirements"
+  [ -d "$(dirname "$REQUIREMENTS")" ] || die "$(dirname "$REQUIREMENTS") が無い。プロジェクトは作ってある？"
+  running && die "もう走っている。先に 'loop stop'"
 
   sudo install -o root -g humanw -m 644 "$requirements" "$REQUIREMENTS"
-  echo "requirements placed at $REQUIREMENTS"
+  echo "要件を置いた: $REQUIREMENTS"
   start go "$language"
 }
 
 cmd_continue() {
   as_runner test -f "$PLAN/tasks.json" || as_runner test -f "$PENDING" \
-    || die "there is no plan yet; start with 'loop go <requirements.md>'"
+    || die "まだ計画が無い。'loop go <要件>.md' から始める"
   start continue
 }
 
 cmd_status() {
   local log last
-  echo "project:  $(project_name)"
+  echo "プロジェクト: $(project_name)"
   if running; then
-    echo "run:      in progress"
+    echo "走行:         走っている"
   else
-    echo "run:      not running"
+    echo "走行:         止まっている"
   fi
 
   log="$(latest_log)"
   if [ -e "$log" ]; then
-    echo "log:      $(readlink -f "$log")"
+    echo "ログ:         $(readlink -f "$log")"
     last="$(grep -E '^=== loop ' "$log" | tail -n 1 || true)"
-    [ -z "$last" ] || echo "last:     ${last#=== }"
+    [ -z "$last" ] || echo "最後:         ${last#=== }"
   fi
 
-  as_runner test -f "$PENDING" && echo "pending:  a proposal waits in $LOOP/planner/out ('loop continue' applies it)"
+  as_runner test -f "$PENDING" && echo "適用待ち:     $LOOP/planner/out に提案がある（'loop continue' で適用する）"
   local f
   for f in ESCALATION.md PLANNER_ESCALATION.md; do
     if as_runner test -f "$PLAN/$f"; then
       echo
-      echo "--- $PLAN/$f (first 20 lines)"
+      echo "--- $PLAN/$f（先頭20行）"
       as_runner head -n 20 "$PLAN/$f"
     fi
   done
 
   if as_runner test -f "$PLAN/ledger.jsonl"; then
     echo
-    echo "--- ledger (last 5 events)"
+    echo "--- 台帳（最後の5件）"
     as_runner tail -n 5 "$PLAN/ledger.jsonl"
   fi
 }
@@ -217,20 +210,32 @@ PY
 cmd_log() {
   local log
   log="$(latest_log)"
-  [ -e "$log" ] || die "no log yet for project '$(project_name)'"
+  [ -e "$log" ] || die "プロジェクト '$(project_name)' のログはまだ無い"
   tail -n 50 -F "$log"
 }
 
 cmd_stop() {
-  running || { echo "not running"; return 0; }
+  running || { echo "走っていない"; return 0; }
   sudo systemctl stop "$UNIT"
-  echo "stopped."
-  echo "a step that was in progress is left as it was; before 'loop continue', run:"
-  echo "    loop raw reset <step-id>"
+  echo "止めた。"
+  echo "途中のステップはそのまま残っている。'loop continue' の前に次を流す:"
+  echo "    loop raw reset <ステップ>"
 }
 
 usage() {
-  sed -n '5,13p' "$0" | sed 's/^# \{0,1\}//' >&2
+  cat >&2 <<'EOF'
+使い方: loop <コマンド>
+
+  go <要件>.md [--language <言語>]
+                    要件を置き、計画づくりから全ステップまでを裏で流す
+  continue          適用待ちの提案があれば適用し、全ステップを裏で流す
+  status            プロジェクト、走っているか、人への問い、台帳の末尾を出す
+  now               いまの作業を JSON で出す（ホストのダッシュボードが読む）
+  log               走行ログを追う。Ctrl-C で抜けても走行は続く
+  stop              走行を止める
+  project <引数>    プロジェクトの一覧と切り替え。'loop project' で使い方を出す
+  raw <引数>        loop.py をそのまま runner として前面で呼ぶ。'loop raw --help' で動詞の一覧
+EOF
   exit 2
 }
 

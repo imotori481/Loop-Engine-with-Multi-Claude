@@ -32,11 +32,11 @@ SLOTS=(project human/in planner/out planner/brief critic/out critic/brief brief)
 
 die() { echo "loop-project: $*" >&2; exit 1; }
 
-[ "$(id -u)" -eq 0 ] || die "run with sudo"
+[ "$(id -u)" -eq 0 ] || die "sudo で流す"
 
 valid_name() {
   [[ "$1" =~ ^[a-z0-9][a-z0-9._-]*$ ]] && [ "$1" != "CURRENT" ] \
-    || die "invalid project name: '$1' (lowercase letters, digits, . _ -)"
+    || die "プロジェクト名に使えない: '$1'（英小文字、数字、. _ - だけ）"
 }
 
 current() { [ -f "$CURRENT" ] && cat "$CURRENT" || true; }
@@ -67,17 +67,19 @@ ensure_root() {
 cmd_list() {
   local cur d name branch state
   cur="$(current)"
-  [ -d "$PROJECTS" ] || { echo "(no projects)"; return 0; }
+  [ -d "$PROJECTS" ] || { echo "（プロジェクトは無い。今の箱に名前を付けるなら 'loop project adopt <名前>'）"; return 0; }
+  # 状態の語はどれも3文字にそろえる。printf の幅はバイトで数えるので、字数が
+  # そろっていないと列がずれる。
   for d in "$PROJECTS"/*/; do
     [ -d "$d" ] || continue
     name="$(basename "$d")"
     branch="$(sudo -u runner git -C "$d/repo.git" symbolic-ref --short HEAD 2>/dev/null || echo '?')"
     if [ "$name" = "$cur" ]; then
-      state="active"
+      state="使用中"
     elif [ -d "$d/parked" ]; then
-      state="parked"
+      state="退避中"
     else
-      state="not built"
+      state="未構築"
     fi
     printf '%s %-24s %-10s %s\n' "$([ "$name" = "$cur" ] && echo '*' || echo ' ')" \
       "$name" "$state" "$branch"
@@ -89,18 +91,18 @@ cmd_list() {
 cmd_adopt() {
   local name="$1"
   valid_name "$name"
-  [ -z "$(current)" ] || die "already managed; the current project is '$(current)'"
+  [ -z "$(current)" ] || die "もう名前が付いている。今のプロジェクトは '$(current)'"
   [ -d "$LOOP/repo.git" ] && [ ! -L "$LOOP/repo.git" ] \
-    || die "$LOOP/repo.git is not a plain directory; nothing to adopt"
-  [ ! -e "$PROJECTS/$name" ] || die "$PROJECTS/$name already exists"
-  busy && die "a loop or an agent is running; wait for it to finish"
+    || die "$LOOP/repo.git が実体のディレクトリではない。名前を付けるものが無い"
+  [ ! -e "$PROJECTS/$name" ] || die "$PROJECTS/$name がもうある"
+  busy && die "ループかエージェントが走っている。終わるのを待つ"
 
   ensure_root
   install -d -o root -g root -m 755 "$PROJECTS/$name"
   mv "$LOOP/repo.git" "$PROJECTS/$name/repo.git"
   link_repo "$name"
   echo "$name" > "$CURRENT"
-  echo "adopted the current sandbox as '$name'"
+  echo "今の箱に '$name' という名前を付けた"
 }
 
 # 空の bare リポジトリを用意する。ホストはここに作業用ブランチを push し、その後で
@@ -109,10 +111,10 @@ cmd_adopt() {
 cmd_init() {
   local name="$1" branch="${2:-}"
   valid_name "$name"
-  [ ! -e "$PROJECTS/$name" ] || die "$PROJECTS/$name already exists"
+  [ ! -e "$PROJECTS/$name" ] || die "$PROJECTS/$name がもうある"
   if [ -n "$branch" ]; then
     git check-ref-format --branch "$branch" >/dev/null 2>&1 \
-      || die "invalid branch name: '$branch'"
+      || die "ブランチ名に使えない: '$branch'"
   fi
 
   ensure_root
@@ -122,15 +124,15 @@ cmd_init() {
   # 取り込むブランチの名前を控える。push される前に `use` が走ると、空のリポジトリ
   # から main の骨組みを作ってしまうので、`use` はこれを見て止まる。
   [ -z "$branch" ] || echo "$branch" > "$PROJECTS/$name/branch"
-  echo "initialized $PROJECTS/$name/repo.git (HEAD -> ${branch:-main})"
+  echo "$PROJECTS/$name/repo.git を作った（HEAD -> ${branch:-main}）"
   if [ -n "$branch" ]; then
-    echo "next: push '$branch' to it from the host, then run 'use $name'"
+    echo "次は、ホストから '$branch' をここへ push し、'loop project use $name' を流す"
   fi
 }
 
 park() {
   local name="$1" slot parked="$PROJECTS/$1/parked"
-  [ ! -e "$parked" ] || die "$parked already exists; refusing to overwrite it"
+  [ ! -e "$parked" ] || die "$parked がもうある。上書きしない"
   # root だけが入れる。退避中のプロジェクトの src/ や tests/ に、今のプロジェクトの
   # solver が solverw 経由で届かないようにする。
   install -d -o root -g root -m 700 "$parked"
@@ -144,7 +146,7 @@ unpark() {
   local name="$1" slot parked="$PROJECTS/$1/parked"
   for slot in "${SLOTS[@]}"; do
     [ -e "$parked/${slot//\//-}" ] || continue
-    [ ! -e "$LOOP/$slot" ] || die "$LOOP/$slot is in the way; refusing to overwrite it"
+    [ ! -e "$LOOP/$slot" ] || die "$LOOP/$slot が邪魔をしている。上書きしない"
     mv "$parked/${slot//\//-}" "$LOOP/$slot"
   done
   rmdir "$parked"
@@ -153,16 +155,16 @@ unpark() {
 cmd_use() {
   local name="$1" cur
   valid_name "$name"
-  [ -d "$PROJECTS/$name/repo.git" ] || die "no such project: '$name' (run 'init' first)"
+  [ -d "$PROJECTS/$name/repo.git" ] || die "プロジェクト '$name' は無い。先に 'loop project init $name'"
   if [ -e "$LOOP/repo.git" ] && [ ! -L "$LOOP/repo.git" ]; then
-    die "$LOOP/repo.git is a plain directory; run 'adopt <name>' first"
+    die "$LOOP/repo.git が実体のディレクトリのまま。先に 'loop project adopt <名前>'"
   fi
   cur="$(current)"
-  [ "$cur" != "$name" ] || { echo "'$name' is already the current project"; return 0; }
+  [ "$cur" != "$name" ] || { echo "'$name' はもう今のプロジェクトだ"; return 0; }
   if [ -z "$cur" ] && [ -e "$LOOP/project" ]; then
-    die "$LOOP/project exists but no project is current; run 'adopt <name>' first"
+    die "$LOOP/project はあるが、名前が付いていない。先に 'loop project adopt <名前>'"
   fi
-  busy && die "a loop or an agent is running; wait for it to finish"
+  busy && die "ループかエージェントが走っている。終わるのを待つ"
 
   # 作るときは、取り込むブランチが push 済みであることを先に確かめる。退避を
   # 始めてから止まると、どちらのプロジェクトも使えない状態が残る。
@@ -171,7 +173,7 @@ cmd_use() {
     branch="$(cat "$PROJECTS/$name/branch")"
     sudo -u runner git -C "$PROJECTS/$name/repo.git" rev-parse -q --verify \
       "refs/heads/$branch" >/dev/null \
-      || die "branch '$branch' has not been pushed to $PROJECTS/$name/repo.git yet"
+      || die "ブランチ '$branch' がまだ $PROJECTS/$name/repo.git に push されていない"
   fi
 
   [ -z "$cur" ] || park "$cur"
@@ -180,26 +182,27 @@ cmd_use() {
 
   if [ -d "$PROJECTS/$name/parked" ]; then
     unpark "$name"
-    echo "restored '$name'; checking the permission model"
+    echo "'$name' を戻した。権限を確かめる"
     ADMIN_USER="${ADMIN_USER:-maint}" bash "$HERE/40-perms.sh"
   else
-    echo "building '$name' for the first time"
+    echo "'$name' を初めて作る"
     ADMIN_USER="${ADMIN_USER:-maint}" bash "$HERE/provision.sh"
   fi
-  echo "current project: $name"
+  echo "今のプロジェクト: $name"
 }
 
 usage() {
   cat >&2 <<EOF
-usage: loop project <command>
-   or: sudo ADMIN_USER=<maintenance user> bash $HERE/loop-project.sh <command>
+使い方: loop project <コマンド>
+  または: sudo ADMIN_USER=<保守ユーザー> bash $HERE/loop-project.sh <コマンド>
 
-commands:
-  list                          list the projects; * marks the current one
-  current                       print the current project's name
-  init <name> [--branch <b>]    prepare an empty project (or one that receives branch <b>)
-  use <name>                    switch to a project, building it the first time
-  adopt <name>                  name the sandbox as it was before loop-project.sh
+  list                            プロジェクトの一覧。* が今のもの
+  current                         今のプロジェクトの名前
+  init <名前> [--branch <ブランチ>]
+                                  空のプロジェクトを用意する。--branch を付けると、
+                                  ホストから push されるそのブランチを受け入れる
+  use <名前>                      切り替える。初めてなら作る
+  adopt <名前>                    loop-project.sh より前に作った箱に名前を付ける
 EOF
   exit 2
 }
