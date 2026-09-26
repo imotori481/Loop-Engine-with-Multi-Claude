@@ -1560,6 +1560,12 @@ def escalate(step: dict, halt: Halt, attempt: int, run_: TestRun | None) -> None
     n = escalation_count(step["id"]) + 1          # 今回の分を含む
     cap = LIMITS["escalations"]
 
+    # R4 で止まったなら、スタブに対して通ったテストの数を残す。プランナーが消して
+    # よい条件の数は、この数から決まる（check_proposal を参照）。
+    r4_passing = len(run_.passed_names) \
+        if run_ is not None and halt.phase == "RED_GATE" and halt.reason.startswith("R4") \
+        else 0
+
     # RUNNER_SPEC 6-2 は、この制約をファイルそのものに書くことを求めている。読む者が
     # 規則を忘れていても成り立つようにだ。cmd_run_all でも強制しており、そちらは
     # 訊かない。
@@ -1574,6 +1580,12 @@ def escalate(step: dict, halt: Halt, attempt: int, run_: TestRun | None) -> None
 - This is escalation {n} of at most {cap} for this step. Permitted responses are
   (a) tighten the goal, or escalate. Rewriting the acceptance criteria is case
   (b) and is a decision for the human, not the planner (RUNNER_SPEC 6-2)."""
+        if r4_passing:
+            constraint += f"""
+- One exception, because this stopped at R4: you may DELETE up to {r4_passing}
+  acceptance entr{"y" if r4_passing == 1 else "ies"} of this step whose tests
+  cannot fail against any stub, and lower expected_tests by at most the same
+  number. Entries you keep must stay word for word."""
 
     ESCALATION.write_text(
         f"""# ESCALATION: step {step["id"]}
@@ -1598,8 +1610,9 @@ def escalate(step: dict, halt: Halt, attempt: int, run_: TestRun | None) -> None
 """,
         encoding="utf-8",
     )
+    extra = {"r4_passing": r4_passing} if r4_passing else {}
     ledger("ESCALATED", step=step["id"], phase=halt.phase, reason=halt.reason,
-           escalation_no=n)
+           escalation_no=n, **extra)
     print(f"\nESCALATION written to {ESCALATION}", file=sys.stderr)
 
 
@@ -2103,6 +2116,45 @@ def read_proposal() -> dict[str, str]:
     return proposal
 
 
+def removed_entries(old: list, new: list) -> int | None:
+    """new が old から項目を消しただけのものなら、消した数を返す。違えば None。
+
+    残った項目は、順番も中身も old のままでなければならない。書き換えや追加が
+    1つでもあれば、消しただけとは言えない。
+    """
+    kept = 0
+    for entry in old:
+        if kept < len(new) and canon(entry) == canon(new[kept]):
+            kept += 1
+    if kept != len(new):
+        return None
+    return len(old) - len(new)
+
+
+def r4_allowance() -> tuple[str, int] | None:
+    """いま開いているエスカレーションが R4 なら、(ステップ, 通ったテストの数)。
+
+    開いているかは ESCALATION.md の有無で決める。plan apply が答えると消え、
+    reset でも消える。台帳の最後の ESCALATED を見て、R4 で、通ったテストの数が
+    残っているときだけ返す。
+    """
+    if not ESCALATION.exists() or not LEDGER.exists():
+        return None
+    last = None
+    for line in LEDGER.read_text(encoding="utf-8").splitlines():
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if record.get("event") == "ESCALATED":
+            last = record
+    if not last or last.get("phase") != "RED_GATE" \
+            or not str(last.get("reason", "")).startswith("R4"):
+        return None
+    passing = int(last.get("r4_passing") or 0)
+    return (last.get("step"), passing) if passing > 0 else None
+
+
 def check_proposal(old: dict, new: dict) -> list[str]:
     """すでにあるステップについて、プランナーが変えてはならないものすべて。
 
@@ -2113,9 +2165,20 @@ def check_proposal(old: dict, new: dict) -> list[str]:
     だからだ。
 
     ステップを足すのは許す。計画はそうやって育つ。
+
+    例外は1つだけある。RED_GATE の R4（スタブに対して通るテスト）で止まった
+    ステップでは、条件を「消す」ことを許す。スタブに対して通るテストは、落ちうる
+    ことを一度も示しておらず、どの実装でも同じ結果になる。そういう条件は緩める
+    対象ではなく、最初から何も確かめていない。run 8 の S10 では、環境が置いた
+    index.html の中身を確かめる条件のために、人間が計画を手で直した。
+
+    許すのは消すことだけで、残す条件は一字も変えない。消せる数は R4 で通った
+    テストの数まで、expected_tests を下げられるのも消した数までにする。どれを
+    消したかまでは機械で確かめられないので、数で縛る。
     """
     problems: list[str] = []
     done = green_steps()
+    allowance = r4_allowance()
     old_steps = {s["id"]: s for s in old.get("steps", [])}
     new_steps = {s["id"]: s for s in new.get("steps", [])}
 
@@ -2126,17 +2189,34 @@ def check_proposal(old: dict, new: dict) -> list[str]:
                 f"P1: step {sid} was removed. Deleting a step deletes its acceptance "
                 f"criteria, which is case (c) and belongs to the human")
             continue
+        dropped = 0
         if canon(o.get("acceptance")) != canon(n.get("acceptance")):
-            problems.append(
-                f"P2: step {sid} has different acceptance criteria. That is case (b) "
-                f"and belongs to the human")
+            removed = removed_entries(o.get("acceptance") or [], n.get("acceptance") or [])
+            limit = allowance[1] if allowance and allowance[0] == sid else 0
+            if not limit:
+                problems.append(
+                    f"P2: step {sid} has different acceptance criteria. That is case (b) "
+                    f"and belongs to the human")
+            elif removed is None:
+                problems.append(
+                    f"P2: step {sid} rewrites or adds acceptance criteria. After R4 you "
+                    f"may only delete entries; the ones you keep must stay word for word")
+            elif removed > limit:
+                problems.append(
+                    f"P2: step {sid} deletes {removed} acceptance entries, but R4 found "
+                    f"only {limit} test(s) passing against the stub")
+            else:
+                dropped = removed
         # expected_tests は RED_GATE の R1 が照らす数なので、下げることは同じ条件に
         # 対してテストを減らせと頼むことになる。リンタの L7 は条件の数を下回ることを
-        # すでに禁じている。これは、少しでも下がることを禁じる。
-        if int(n.get("expected_tests", 0)) < int(o.get("expected_tests", 0)):
+        # すでに禁じている。これは、少しでも下がることを禁じる。R4 の例外で条件を
+        # 消したときだけ、消した数まで下げてよい。
+        if int(n.get("expected_tests", 0)) < int(o.get("expected_tests", 0)) - dropped:
             problems.append(
                 f"P3: step {sid} lowers expected_tests from {o.get('expected_tests')} "
-                f"to {n.get('expected_tests')}")
+                f"to {n.get('expected_tests')}"
+                + (f"; deleting {dropped} entr{'y' if dropped == 1 else 'ies'} allows "
+                   f"at most {int(o.get('expected_tests', 0)) - dropped}" if dropped else ""))
         if o.get("review_gate") and not n.get("review_gate"):
             problems.append(f"P4: step {sid} turns review_gate off")
         # すでに緑のステップは、いまでは過去となった定義に対して測られた。書き
@@ -2157,6 +2237,29 @@ def brief_plan_revise(step: dict | None, escalation: str, feedback: str = "") ->
     tasks = (PLAN / "tasks.json").read_text(encoding="utf-8")
     done = sorted(green_steps())
     focus = f"step {step['id']}" if step else "the plan"
+    # R4 で止まったときだけ、条件を消す手を伝える。check_proposal が許す範囲と
+    # 同じことを言う。
+    allowance = r4_allowance()
+    r4_section = "" if not allowance else f"""
+# When a test already passed against the stub (R4)
+
+Step {allowance[0]} stopped because {allowance[1]} test(s) passed against the stub,
+before anything was implemented. A test that passes there has never shown that
+it can fail. Usually the criterion behind it checks something no step's code
+decides: a file the environment provides, or what a tool such as a development
+server produces. No implementation can make that criterion fail, so the step
+stops at R4 every time, however the goal is written.
+
+For this step only, you may DELETE such acceptance entries:
+- at most {allowance[1]} of them, and only ones that cannot fail against any stub
+- keep every other entry word for word, in the same order
+- lower expected_tests by at most the number you delete
+- keep a "normal", a "boundary" and an "error" case (L6)
+
+If the criterion is about this step's own behaviour and the stub happened to
+satisfy it, do not delete it. Tighten the goal or the contract instead so that a
+stub cannot satisfy it, or escalate.
+"""
     return f"""You are the planner. Revise the plan so that {focus} can succeed.
 
 You do not write code and you cannot reach the repository. You write files into
@@ -2196,7 +2299,7 @@ That is: how the step is approached, and how it is described to the solver.
 - lowering `expected_tests`, or turning `review_gate` off
 - any change at all to a step that is already green
 - a plan that fails the linter (RUNNER_SPEC section 8)
-
+{r4_section}
 This is BOOTSTRAP 1-4. Case (a) -- the implementation is what is wrong, so
 tighten the goal -- is yours. Case (b) -- the acceptance criteria themselves are
 wrong or unreachable -- and case (c) -- the upstream design is wrong -- are
