@@ -8,7 +8,10 @@
 #
 #   /srv/loop/repo.git   bare リポジトリ。ランナーが GREEN と plan apply の
 #                        あとに push し、ホストが `runner` として SSH で引く。
-#   /srv/loop/project    ループが実際に回る作業ツリー
+#                        loop-project.sh で管理する箱では、今のプロジェクトの
+#                        /srv/loop/projects/<名前>/repo.git を指すリンク。
+#   /srv/loop/project    ループが実際に回る作業ツリー。bare の HEAD が指す
+#                        ブランチをチェックアウトする
 #   /srv/loop/brief      runner がステップごとのブリーフを書き、solver が読む。
 #                        runner から solver への唯一の経路で、これが
 #                        RUNNER_SPEC 5 を守っている。solver は plan/ を読まず、
@@ -78,26 +81,51 @@ sudo -u runner install -d -m 700 \
 #
 # 無いときだけでなく毎回書く。空のファイルだと、2つ目の仕事が黙って
 # 抜け落ちるからだ。
-sudo -u runner tee /srv/loop/project/conftest.py >/dev/null <<'PYEOF'
+#
+# 取り込んだリポジトリが自分の conftest.py を持っていれば、上書きせずに止まる。
+# 上書きすると、そのリポジトリのテストの前提を黙って壊す。runner 以外がコミット
+# したことのあるファイルは、そのリポジトリの持ち物だ。中身では比べない。比べると、
+# ここの雛形を直しただけで止まる。
+cd /srv/loop/project
+if sudo -u runner git log --format=%an -- conftest.py 2>/dev/null | grep -qvx 'loop runner'; then
+  echo "20-layout: the repository has its own conftest.py; refusing to overwrite it" >&2
+  exit 1
+fi
+sudo -u runner tee conftest.py >/dev/null <<'PYEOF'
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent / "src"))
 PYEOF
 
-# ホストがクローンできるよう、最初のコミットを置く。
-cd /srv/loop/project
+# 作業ツリーに置くが、コミットしないもの。無いと `git status` がこれらを紛れ込んだ
+# ファイルとして報告し、最初の走行が dirty で止まる。
+IGNORED=(.venv/ .runner/ __pycache__/ '*.pyc')
+
 if ! sudo -u runner git rev-parse HEAD >/dev/null 2>&1; then
+  # 空のリポジトリ。ホストがクローンできるよう、最初のコミットを置く。
   sudo -u runner touch src/.gitkeep tests/.gitkeep plan/.gitkeep
-  sudo -u runner tee .gitignore >/dev/null <<'EOF'
-.venv/
-.runner/
-__pycache__/
-*.pyc
-EOF
+  printf '%s\n' "${IGNORED[@]}" | sudo -u runner tee .gitignore >/dev/null
   sudo -u runner git add -A
   sudo -u runner git commit -q -m "chore: initial skeleton"
-  sudo -u runner git push -q origin main
+  sudo -u runner git push -q origin HEAD
+else
+  # 取り込んだブランチ。既存の .gitignore には足りない行だけを足す。コミットは
+  # 環境が置いた2つに絞り、ほかの変更は巻き込まない。変更が無ければ何もしない。
+  # 末尾に改行の無い .gitignore では、足した行が最後の行につながってしまう。
+  if [ -s .gitignore ] && [ -n "$(tail -c1 .gitignore)" ]; then
+    echo | sudo -u runner tee -a .gitignore >/dev/null
+  fi
+  for line in "${IGNORED[@]}"; do
+    grep -qxF "$line" .gitignore 2>/dev/null \
+      || printf '%s\n' "$line" | sudo -u runner tee -a .gitignore >/dev/null
+  done
+  sudo -u runner git add -- .gitignore conftest.py
+  if ! sudo -u runner git diff --cached --quiet -- .gitignore conftest.py; then
+    sudo -u runner git commit -q -m "chore: environment files from 20-layout.sh" \
+      -- .gitignore conftest.py
+    sudo -u runner git push -q origin HEAD
+  fi
 fi
 
 # ---- 検査。runner の視点で確かめる ------------------------------------

@@ -109,6 +109,15 @@ grep -qx '/node_modules' "$IGNORE" 2>/dev/null || \
 # グループ solverw を継ぎ、runner の umask 002 で 664 になる。つまり solver が
 # 書ける。柵を閉じるのを後のスクリプトに任せて、開いたまま残ったことが
 # 一度ある（20-layout.sh を参照）。
+#
+# 取り込んだリポジトリが同じ名前のファイルを持っていれば、上書きせずに止まる。
+# runner 以外がコミットしたことのあるファイルは、そのリポジトリの持ち物だ。
+for f in vitest.config.mjs index.html; do
+  if sudo -u runner git -C "$P" log --format=%an -- "$f" 2>/dev/null | grep -qvx 'loop runner'; then
+    echo "35-node: the repository has its own $f; refusing to overwrite it" >&2
+    exit 1
+  fi
+done
 sudo -u runner tee "$P/vitest.config.mjs" >/dev/null <<'EOF'
 // happy-dom gives every test file a document without a display. This is the
 // whole reason the Node track exists: a UI that can be clicked by a machine.
@@ -162,7 +171,7 @@ sudo -u runner git -C "$P" add -- "${ENV_FILES[@]}"
 if ! sudo -u runner git -C "$P" diff --cached --quiet -- "${ENV_FILES[@]}"; then
   sudo -u runner git -C "$P" commit -q -m "chore: environment files from 35-node.sh" \
     -- "${ENV_FILES[@]}"
-  sudo -u runner git -C "$P" push -q origin main
+  sudo -u runner git -C "$P" push -q origin HEAD
 fi
 
 # ---- 検査。solver の視点で確かめる ------------------------------------

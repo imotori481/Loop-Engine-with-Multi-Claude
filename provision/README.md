@@ -333,19 +333,56 @@ $L run --all 2>&1 | sudo -u runner tee -a /srv/loop/logs/<名前>.log
 書けない。`tee` も `sudo -u runner` で起こす ── パイプの先は保守ユーザーとして動くので、
 そのままでは `Permission denied` になる。
 
-### 2-11. run を退避する（箱）
+### 2-11. プロジェクトを切り替える（箱）
 
-次の題材に移る前に、今の run を別名に移す。`/srv/loop` は root 所有なので、
-改名は保守ユーザーが `sudo` で行う。runner にはできない。
+箱には複数のプロジェクトを置ける。走るのは一度に1つだけで、`loop-project.sh` で切り替える。
+`/srv/loop` は root 所有なので、保守ユーザーが `sudo` で流す。runner にはできない。
 
 ```bash
-sudo mv /srv/loop/project  /srv/loop/project.<名前>
-sudo mv /srv/loop/repo.git /srv/loop/repo.<名前>.git
-cd /tmp && sudo ADMIN_USER=<保守ユーザー> bash /opt/loop-engine/provision/provision.sh
+P="sudo ADMIN_USER=<保守ユーザー> bash /opt/loop-engine/provision/loop-project.sh"
+cd /tmp
+$P list                              # プロジェクトの一覧。* が今のもの
+$P current                           # 今のプロジェクトの名前
+$P init <名前>                        # 空のプロジェクトを用意する
+$P init <名前> --branch <ブランチ>     # 既存リポジトリのブランチを受け入れる用意をする
+$P use <名前>                         # 切り替える
 ```
 
-プロビジョニングが空の `project` と `repo.git` を作り直す。ホストの `loop-pull.cmd` は
-`repo.<名前>.git` も含めて全部引く（`host/README.md`）。
+置き場は次のとおり。
+
+| パス | 中身 |
+|---|---|
+| `/srv/loop/projects/<名前>/repo.git` | そのプロジェクトの bare リポジトリ。ホストはここから引き、ここへ push する |
+| `/srv/loop/projects/<名前>/parked/` | 使っていないあいだの作業場所。root だけが入れる |
+| `/srv/loop/projects/CURRENT` | 今のプロジェクトの名前 |
+| `/srv/loop/repo.git` | 今のプロジェクトの bare を指すリンク |
+| `/srv/loop/project` | 今のプロジェクトの作業ツリー（実体） |
+
+`use` は次の順で動く。
+
+1. runner の `loop.py` と、solver・planner・critic のプロセスが無いことを確かめる。あれば止まる
+2. 今のプロジェクトの作業場所を `parked/` に `mv` で退避する。対象は `project`、`human/in`、`planner/out`、`planner/brief`、`critic/out`、`critic/brief`、`brief`。`plan apply` を待つ提案と要件も一緒に動く
+3. `/srv/loop/repo.git` を切り替え先に向け直す
+4. 切り替え先に退避分があれば戻し、`40-perms.sh` で権限を確かめる。無ければ `provision.sh` で作る。作業ツリーは bare の HEAD が指すブランチになる
+
+`init --branch` で用意したプロジェクトは、そのブランチが push されるまで `use` できない。
+取り込みの手順はホスト側で行う（`host/README.md`）。
+
+作業ツリーの実体は常に `/srv/loop/project` に置く。ランナー、provision、sudoers はこのパスを
+名指ししており、venv の実行ファイルも絶対パスで持っているからだ。
+
+`loop-project.sh` を使う前に作った箱は、最初に今の状態へ名前を付ける。
+
+```bash
+$P adopt <名前>
+```
+
+`/srv/loop/repo.git` の実体が `projects/<名前>/repo.git` に移り、元の場所はリンクになる。
+
+取り込んだブランチに環境のファイルを置くとき、そのリポジトリが自分の `conftest.py`、
+`index.html`、`vitest.config.mjs` を持っていれば、プロビジョニングは上書きせずに止まる。
+runner 以外がコミットしたことのあるファイルを、そのリポジトリの持ち物とみなす。
+`.gitignore` が `node_modules/` を全階層で無視している場合も `35-node.sh` が止まる（§3-20）。
 
 ### 2-12. スナップショット（PowerShell）
 
@@ -783,6 +820,7 @@ VirtualBox 構成の手順は `c4374f4` から拾える。
 
 ## 更新履歴
 
+- 2026/09/26: §2-11 を、`loop-project.sh` でプロジェクトを切り替える手順に置き換え
 - 2026/09/26: 2回目以降のプロビジョニングで runner の公開鍵の流し込みを不要にした
 - 2026/09/26: 開発サーバで開けることを確かめる `smoke-page` を §2-8 に追加
 - 2026/09/26: 手順を、実行する場所の明記、鍵の名前 `loop-dev` / `loop-runner`、公開鍵の流し込み、`/opt/loop-engine` からのプロビジョニング、Claude の資格情報、走行ログと run の退避に合わせて書き換え
