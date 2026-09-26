@@ -155,7 +155,7 @@ TypeScript では happy-dom が画面の無い DOM を作るので、ボタン�
 │   ├── LOCAL_SOLVER.md   # ローカルモデルをソルバーに据える手順と失敗表
 │   ├── COMMANDS.md       # よく使うコマンド
 │   └── HANDOFF.md        # 進捗と引き継ぎ
-├── requirements/         # 通し実行に使った要件
+├── requirements/         # 通し実行に使った要件（local/ は手元用で、コミットしない）
 ├── runner/
 │   ├── loop.py           # ランナー本体（関門の適用、状態遷移、台帳）
 │   └── tests/            # ランナー自身のテスト

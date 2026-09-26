@@ -24,6 +24,10 @@ loop-runner.pub
 __pycache__/
 *.pyc
 
+# 手元だけで使う要件。対象のリポジトリの非公開の事情を書くことがあるので、コミットしない。
+# requirements/ の直下にあるものは、走行の記録として README と PLANS.md が参照する。
+requirements/local/
+
 # Host dashboard runtime state and machine-local launcher configuration.
 host/dashboard/.state/
 host/dashboard/config.json
