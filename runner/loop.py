@@ -517,9 +517,20 @@ ANNOTATION = re.compile(r"(?:->|:)\s*([A-Za-z_][\w.]*)\s*([\[<]?)")
 # ステップに渡すものの形を述べなければならず、型の構文を持たない言語では
 # できない。vitest は .ts を esbuild で変換し、別のビルド手順も tsc も無い。
 # 型は「読まれる」ためにある。契約を書くプランナーと、それを読むソルバーが読む。
+#
+# 振る舞いの分岐は拡張子ではなく `name` で見る。データで済む差は項目にする。
+# `environment_files` は、その言語のために箱が根に置くファイルだ。箱は計画の
+# 言語を知らずに全部を置くので、ほかの言語の計画には見せない（environment_facts）。
 LANGUAGES = {
     "python": {
+        "name": "python",
         "label": "Python",
+        "test_runner": PYTEST,
+        "wiring": "conftest.py",
+        "environment_files": frozenset(),
+        "naming_note": "",
+        "provides_pattern": re.compile(r"(?:def|class)\s+([A-Za-z_]\w*)"),
+        "red_kinds": RED_KINDS,
         "source_suffix": ".py",
         "test_suffixes": (".py",),
         # パッケージのディレクトリは __init__ で自分を名乗る。ほかのものは名乗らない。
@@ -542,7 +553,20 @@ prefix does not appear in imports. Say this in CONTEXT.md; the solver has no
 other way to learn it.""",
     },
     "typescript": {
+        "name": "typescript",
         "label": "TypeScript",
+        "test_runner": VITEST,
+        "wiring": "vitest.config.mjs",
+        "environment_files": frozenset({"index.html", "vitest.config.mjs"}),
+        "naming_note": """
+Name your tests with DOUBLE quotes or backticks, never single quotes. The
+criteria above are prose and contain apostrophes ("the result's resource"),
+and one of those inside a single-quoted name ends the string: the file stops
+compiling and not one of your tests runs.
+""",
+        "provides_pattern": re.compile(
+            r"(?:function|class|interface|type|enum|const|let)\s+([A-Za-z_]\w*)"),
+        "red_kinds": RED_KINDS,
         "source_suffix": ".ts",
         "test_suffixes": (".ts",),
         "index_name": "index",
@@ -653,17 +677,18 @@ def test_argv(files_test: list[str], xml_path: Path) -> tuple[list[str], dict[st
     走らせる部分と分けてあるので、テストは実行せずに何が実行されるかを確かめ
     られる。agent_command があるのと同じ理由だ。
     """
-    if LANGUAGE["source_suffix"] == ".ts":
+    if LANGUAGE["name"] == "typescript":
         # `watch` ではなく `run`。vitest の既定は対話的で、永遠に止まったランナーは
         # 終わらないステップとまったく同じに見える。
         # 実行ファイルは npx ではなく、凍結したツールチェーンから絶対パスで取る。
         # npx は取ってくることも厭わないからだ。
-        return ([str(VITEST), "run", *files_test,
+        return ([str(LANGUAGE["test_runner"]), "run", *files_test,
                  "--reporter=junit", f"--outputFile={xml_path}"],
                 {"CI": "1", "NO_COLOR": "1"})
     # バイトコードは作らない。.pyc は書いた者の所有になり、tests/ の下に solver
     # 所有のものがあると、ランナーはそこのモードを当て直せなくなる。
-    return ([str(PYTEST), *files_test, *PYTEST_ARGS, "--junitxml", str(xml_path)],
+    return ([str(LANGUAGE["test_runner"]), *files_test, *PYTEST_ARGS,
+             "--junitxml", str(xml_path)],
             {"PYTHONDONTWRITEBYTECODE": "1"})
 
 
@@ -1069,16 +1094,9 @@ def naming_note() -> str:
     ファイルはコンパイルできず、vitest はそれをファイル名を持つ合成の失敗テスト
     1件として報告した。ランナーは「1件、期待は12件」と見て、構文エラーを
     プランナーに送るところだった。報告の側も直してあるが、ブリーフで取り除ける
-    罠は取り除いたほうがよい。
+    罠は取り除いたほうがよい。文はその罠を持つ言語の `naming_note` にある。
     """
-    if LANGUAGE["source_suffix"] != ".ts":
-        return ""
-    return """
-Name your tests with DOUBLE quotes or backticks, never single quotes. The
-criteria above are prose and contain apostrophes ("the result's resource"),
-and one of those inside a single-quoted name ends the string: the file stops
-compiling and not one of your tests runs.
-"""
+    return LANGUAGE["naming_note"]
 
 
 # --------------------------------------------------------------------------
@@ -1298,7 +1316,7 @@ def generate_stub(step: dict, requires: list[str]) -> dict[str, str] | None:
     ならずに済むのは None のおかげだ。見慣れないものは、前から扱っていた経路に
     戻す。
     """
-    if LANGUAGE["source_suffix"] != ".ts":
+    if LANGUAGE["name"] != "typescript":
         return None   # Python はいまも頼む。まだこれを要したことが無い
 
     declarations = parse_contracts(step["contracts"]["provides"])
@@ -1625,9 +1643,9 @@ def escalate(step: dict, halt: Halt, attempt: int, run_: TestRun | None) -> None
 # 計画のリンタ（RUNNER_SPEC 8 章）
 # --------------------------------------------------------------------------
 
-# 契約の行が宣言するものの名前。言語ごとの形を持ち、そうでなければならない
-# 理由は、L3 が名前を比べるからだ。「このステップが依存するものの中に、求める
-# ものを提供するものはあるか」。
+# 契約の行が宣言するものの名前。言語ごとの形（LANGUAGES の `provides_pattern`）を
+# 持ち、そうでなければならない理由は、L3 が名前を比べるからだ。「このステップが
+# 依存するものの中に、求めるものを提供するものはあるか」。
 #
 # Python では def と class の両方を見る。データモデルを導入するステップは
 # `class GameState(...)` を提供し、`def` だけを照合すると、後のステップの
@@ -1643,11 +1661,6 @@ def escalate(step: dict, halt: Halt, attempt: int, run_: TestRun | None) -> None
 #
 # Python の文法で書いた規則が、有料の試行を使わせたのは、L14 の語彙、L15 の
 # 名前の境界に続いて3度目だ。規則は一度も誤っていなかった。誤っていたのは表現だ。
-PROVIDES_PATTERNS = {
-    ".py": re.compile(r"(?:def|class)" + chr(92) + r"s+([A-Za-z_]" + chr(92) + r"w*)"),
-    ".ts": re.compile(
-        r"(?:function|class|interface|type|enum|const|let)" + chr(92) + r"s+([A-Za-z_]" + chr(92) + r"w*)"),
-}
 
 
 def declared_name(line: str) -> str:
@@ -1657,8 +1670,7 @@ def declared_name(line: str) -> str:
     中身だ。合わない行を `provides` から捨てて `requires` には残すと、規則が
     厳しくなるのではなく、答えようのないものになる。
     """
-    pattern = PROVIDES_PATTERNS.get(LANGUAGE["source_suffix"])
-    match = pattern.search(line) if pattern else None
+    match = LANGUAGE["provides_pattern"].search(line)
     return match.group(1) if match else line.strip()
 # L8 の「具体的」: 数、引用符で囲んだリテラル、例外の型。形容詞だけでできた
 # 受け入れ条件は、2人が同じように書けるテストにならない。
@@ -2542,16 +2554,17 @@ def environment_facts() -> str:
         except (OSError, IndexError):
             return "(not installed)"
 
-    typescript = LANGUAGE["source_suffix"] == ".ts"
+    typescript = LANGUAGE["name"] == "typescript"
 
     skip = {".git", ".venv", ".runner", "plan", "__pycache__", ".pytest_cache",
             "node_modules"}
-    # index.html と vitest.config.mjs は、35-node.sh が言語に関係なく置く。
-    # 箱は計画の言語を知らないからだ。Python の計画に見せると、クリティックは
-    # 「人が開く index.html からこの計画のコードに届かない」と指摘し、
-    # プランナーはそれに答えられない。TypeScript のときだけ見せる。
-    if not typescript:
-        skip |= {"index.html", "vitest.config.mjs"}
+    # 箱は計画の言語を知らないので、すべての言語の環境のファイルを根に置く。
+    # ほかの言語のものを見せると、クリティックは的外れな指摘を出す。Python の計画に
+    # index.html を見せると「人が開く index.html からこの計画のコードに届かない」と
+    # 指摘し、プランナーはそれに答えられない。計画の言語のものだけを見せる。
+    for other in LANGUAGES.values():
+        if other["name"] != LANGUAGE["name"]:
+            skip |= other["environment_files"]
     listing = []
     for child in sorted(PROJECT.rglob("*")):
         if any(part in skip for part in child.relative_to(PROJECT).parts):
@@ -2587,8 +2600,7 @@ write a criterion about the text of index.html.
 
     # テストが何に届くかを決めるファイル。言語ごとに名前は違うが仕事は同じで、
     # どちらでもプランナーに見せる必要がある。import のパスに逆らう計画は負ける。
-    wiring = PROJECT / ("vitest.config.mjs" if LANGUAGE["source_suffix"] == ".ts"
-                        else "conftest.py")
+    wiring = PROJECT / LANGUAGE["wiring"]
     wiring_text = wiring.read_text(encoding="utf-8") if wiring.exists() else "(none)"
 
     # 起動のつなぎを、説明ではなく全文で見せる。文章の説明は、それに向けて書く
@@ -2695,7 +2707,7 @@ A human checks the screen afterwards; the runner never can.
 
 Language: {LANGUAGE["label"]}
 {runtime}
-Test runner: {version(VITEST if typescript else PYTEST)}
+Test runner: {version(LANGUAGE["test_runner"])}
 
 Graphical display: {f"DISPLAY={display}" if display else "NONE. DISPLAY is not set"}
 {toolkit}
@@ -3874,7 +3886,7 @@ def run_step(step_id: str, unvalidated: bool = False) -> int:
                 "R4: some tests already pass against the stub, so they never "
                 "demonstrated the behaviour they claim to check",
                 "passing: " + ", ".join(red.passed_names))
-        bad = sorted({k for k in red.failure_kinds if not RED_KINDS.match(k)})
+        bad = sorted({k for k in red.failure_kinds if not LANGUAGE["red_kinds"].match(k)})
         if bad:                                                            # R5
             raise Halt("RED_GATE",
                        "R5: failures are not assertions -- the calls themselves are broken",
