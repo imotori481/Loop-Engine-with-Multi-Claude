@@ -1,4 +1,4 @@
-"""Completion facts must survive the final push, not wait for another step."""
+"""完了の事実は、次のステップを待たずに、最後の push で届かなければならない。"""
 
 import sys
 import unittest
@@ -62,8 +62,8 @@ class RunCheckpoint(unittest.TestCase):
 
 
 class DurableCompletion(unittest.TestCase):
-    """"Recorded" has to mean "in a commit", or the gap between writing the
-    record and committing it becomes a state nothing can leave."""
+    """「記録した」は「コミットにある」を意味しなければならない。そうでないと、
+    記録を書いてからコミットするまでの隙間が、抜け出せない状態になる。"""
 
     @patch("loop.run")
     def test_the_committed_ledger_is_what_is_searched(self, run):
@@ -86,8 +86,7 @@ class DurableCompletion(unittest.TestCase):
             self, recorded, written, ledger, run, publish):
         loop.complete_run({"S1"}, {"steps": [{"id": "S1"}]})
 
-        # The record is already in the file; saying it twice would report the
-        # run as having completed twice.
+        # 記録はすでにファイルにある。2回書くと、走行が2回完了したと報告する。
         ledger.assert_not_called()
         self.assertEqual([args.args[0][:2] for args in run.call_args_list],
                          [["git", "add"], ["git", "commit"]])

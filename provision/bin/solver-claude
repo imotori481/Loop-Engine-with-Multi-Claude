@@ -39,6 +39,20 @@ if [ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
 fi
 unset ANTHROPIC_API_KEY_CONSOLE
 
+# モデルと effort。solver.env の LOOP_MODEL を --model で、LOOP_EFFORT を
+# --effort で渡す。空ならアカウントの既定。effort の値が間違っていたら、claude を
+# 呼ぶ前に止める。
+role_args=()
+if [ -n "${LOOP_MODEL:-}" ]; then
+  role_args+=(--model "$LOOP_MODEL")
+fi
+if [ -n "${LOOP_EFFORT:-}" ]; then
+  case "$LOOP_EFFORT" in
+    low|medium|high|xhigh|max) role_args+=(--effort "$LOOP_EFFORT") ;;
+    *) echo "solver-claude: bad LOOP_EFFORT in solver.env: $LOOP_EFFORT" >&2; exit 5 ;;
+  esac
+fi
+
 # 呼び出しごとに使い捨ての HOME を作る。前のステップの記憶を次へ持ち越させない。
 # BOOTSTRAP はステップ間でソルバーが記憶を失うことを求めている。codex の
 # --ephemeral と同じ役割を、置き場を無くすことで果たす。
@@ -51,6 +65,9 @@ trap 'rm -rf "$HOME"' EXIT
 # --allowedTools "Read Write Edit"
 #     ファイルを読んで書くだけ。書ける場所は src/ と tests/ で、それを決めるのは
 #     このフラグではなくファイルシステムの権限（40-perms.sh）。
+# --output-format json
+#     結果の文と、使ったモデル・トークン数・所要時間を1つの JSON で返す。
+#     ランナーが消費量を台帳に残し、結果の文だけを取り出す。
 # --disallowedTools "Bash"
 #     許可リストに無い時点で -p では拒否される。上の理由を読み手に示すために
 #     明示する。
@@ -59,6 +76,8 @@ trap 'rm -rf "$HOME"' EXIT
 # `timeout` は 124 で終わる。
 set +e
 timeout --kill-after=30 "$LIMIT" claude -p \
+  "${role_args[@]}" \
+  --output-format json \
   --safe-mode \
   --setting-sources "" \
   --no-session-persistence \

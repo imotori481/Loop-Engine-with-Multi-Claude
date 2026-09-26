@@ -63,7 +63,7 @@ tailscale serve --bg --https=8443 http://127.0.0.1:8443
 ```powershell
 $user = "$env:USERDOMAIN\$env:USERNAME"
 $action = New-ScheduledTaskAction -Execute "C:\Windows\System32\wscript.exe" `
-  -Argument '"C:\dev\roop-engin\roop\host\wsl-keepalive.vbs"'
+  -Argument '"<このリポジトリ>\host\wsl-keepalive.vbs"'
 $trigger = New-ScheduledTaskTrigger -AtLogOn -User $user
 $settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) `
   -MultipleInstances IgnoreNew -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
@@ -107,28 +107,39 @@ Get-CimInstance Win32_Process -Filter "Name='wsl.exe' or Name='wscript.exe'" |
 
 ### `~/.ssh/config`
 
-```
+Git Bash で追記する。鍵は `provision/README.md` §2-1 で作った `loop-dev` と `loop-runner`。
+`<保守ユーザー>` と `<you>` は実際の名前に置き換える。
+
+```bash
+cat >> ~/.ssh/config <<'EOF'
 Host loop-dev
     HostName 127.0.0.1
     Port 2222
-    User maint
-    IdentityFile C:\Users\<you>\.ssh\id_ed25519
+    User <保守ユーザー>
+    IdentityFile C:\Users\<you>\.ssh\loop-dev
     IdentitiesOnly yes
     # WSL は再作成でホスト鍵が変わるため、未知なら自動受け入れ
     StrictHostKeyChecking accept-new
     ServerAliveInterval 30
     ServerAliveCountMax 6
-```
 
-`runner` へ push するための別エントリ（git 経路専用、鍵も別）:
-
-```
 Host loop-runner
     HostName 127.0.0.1
     Port 2222
     User runner
-    IdentityFile C:\Users\<you>\.ssh\loop-runner_ed25519
+    IdentityFile C:\Users\<you>\.ssh\loop-runner
     IdentitiesOnly yes
+EOF
+```
+
+`loop-dev` は保守ユーザーでの対話と VS Code Remote-SSH に使う。`loop-runner` は
+`repo*.git` を引くためだけに使う（git 経路専用、鍵も別）。`runner` はプロビジョニングで
+作られるので、`loop-runner` はプロビジョニングが終わるまで通らない。
+
+成果物は `loop-pull.cmd` を使わずに直接クローンしてもよい:
+
+```bash
+git clone loop-runner:/srv/loop/repo.git <置き場所>
 ```
 
 ### ホスト側のミラー（バックアップ）
@@ -138,7 +149,7 @@ Host loop-runner
 | 段 | どこへ | 何から守るか |
 |---|---|---|
 | 1 | `project` → `/srv/loop/repo.git` | `reset` / `clean`。**同じ VHDX の中**なので、それ以上は守らない |
-| 2 | `repo.git` → `C:\dev\roop-engin\project`、過去run → `runs\run-NNN` | **VHDX の消失**。ここで初めて別のディスクに乗る |
+| 2 | `repo.git` → `<MIRRORROOT>\project`、過去run → `runs\run-NNN` | **VHDX の消失**。ここで初めて別のディスクに乗る |
 | 3 | ミラー → GitHub など | ホストの故障。やるなら**鍵はホストだけが持つ** |
 
 段1 はランナーが自動でやる（`loop.py` の `publish()`、GREEN と `plan apply` の直後）。
@@ -149,10 +160,12 @@ Host loop-runner
 状態でライブを作り直さない。成功済みの独立アーカイブは巻き戻さないが、部分成功を
 「done」と表示してはならない。
 
+```text
+/srv/loop/repo.runN.git  ->  <MIRRORROOT>\runs\run-NNN  （不変。ff のみ）
+/srv/loop/repo.git       ->  <MIRRORROOT>\project        （現行。毎回作り直す）
 ```
-/srv/loop/repo.runN.git  ->  C:\dev\roop-engin\runs\run-NNN  （不変。ff のみ）
-/srv/loop/repo.git       ->  C:\dev\roop-engin\project        （現行。毎回作り直す）
-```
+
+`<MIRRORROOT>` は `loop-pull.cmd` 冒頭の `set "MIRRORROOT=..."` で決まる。使う前に自分の置き場所に書き換える。
 
 **run ごとにディレクトリを分けるのは整頓ではなく保存のため。** どの run も
 `step-S1`…`step-S11` という同じタグ名を作るので、1つのクローンに引くと `--force` で
@@ -160,9 +173,9 @@ Host loop-runner
 1つも残らない**。到達不能なオブジェクトは `git gc` が消し、gc は普通のコマンドの中で
 勝手に走る。**誰も見ていない時点でバックアップが消える。**
 
-サンドボックス側の名前は既存の運用記録との対応を保つため `project.run5` /
-`repo.run5.git` のまま。ホスト側は `runs\run-005` にまとめ、ライブ成果物だけを
-`project` に置く。run番号の対応は変わらず、各保存先は独立したGitリポジトリである。
+サンドボックス側の退避は、保守ユーザーが `sudo mv` で `project.<名前>` /
+`repo.<名前>.git` に改名する（`provision/README.md` §2-11）。ホスト側は `runs\` の下に
+まとめ、ライブ成果物だけを `project` に置く。各保存先は独立したGitリポジトリである。
 
 `project`（現行 run）は毎回 `reset --hard` と `clean` で作り直す。run ごとに
 `repo.git` は新しい root コミットから始まるので ff できないため。
@@ -177,3 +190,7 @@ Host loop-runner
 
 `C:\Users\<you>\.wslconfig`。必須項目は `provision/README.md` §2-2。
 **変更の反映には `wsl --shutdown` が必要**で、それは keepalive を殺すので必ずセットで扱う。
+
+## 更新履歴
+
+- 2026/09/26: `~/.ssh/config` の鍵の名前を `loop-dev` / `loop-runner` に、keepalive とミラーのパスを置き換え前提の書き方に変更

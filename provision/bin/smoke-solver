@@ -1,18 +1,18 @@
 #!/usr/bin/env bash
-# The first experiment: can the runner drive the solver at all?
+# 最初の実験。ランナーはそもそもソルバーを動かせるか。
 #
 #     sudo -u runner /srv/loop/bin/smoke-solver
 #
-# Nothing downstream matters until this passes, so it is deliberately the
-# smallest possible round trip: runner writes a brief, solver is started as a
-# separate uid, solver writes one file into src/.
+# これが通るまで、その先は何も意味を持たない。だから、あえて最小の往復にする。
+# runner がブリーフを書き、solver を別の uid で起動し、solver が src/ に
+# ファイルを1つ書く。
 #
-# What this proves, in order:
-#   1. the sudoers Runas exception works and reaches the launcher
-#   2. the agent authenticates from /etc/loop/solver.env, not from a human login
-#   3. the agent runs to completion with no terminal attached
-#   4. the file it produced is owned by solver -- i.e. it really was the solver
-#      that wrote it, not the runner
+# 確かめること（順に）:
+#   1. sudoers の Runas の例外が効き、起動スクリプトに届く
+#   2. エージェントが人のログインではなく /etc/loop/solver.env で認証する
+#   3. エージェントが端末なしで最後まで動く
+#   4. できたファイルが solver の所有である。つまり、書いたのは本当に solver で、
+#      runner ではない
 set -euo pipefail
 
 [ "$(id -un)" = "runner" ] || { echo "run as runner: sudo -u runner $0" >&2; exit 1; }
@@ -56,10 +56,10 @@ else
   fi
 fi
 
-# The solver must still be shut out of the plan. Checked by inspecting the mode
-# rather than by trying it as solver: the sudoers exception names solver-run and
-# nothing else, so `sudo -u solver test ...` would be refused here and prove
-# nothing either way.
+# solver は、計画から締め出されたままでなければならない。solver として試すの
+# ではなく、モードを見て確かめる。sudoers の例外は solver-run だけを名指しして
+# いるので、ここで `sudo -u solver test ...` は拒否され、どちらの結果も何も
+# 証明しない。
 planmode="$(stat -c '%U:%G %a' /srv/loop/project/plan)"
 if [ "$planmode" = "runner:runner 700" ]; then
   note "ok: plan/ still runner:runner 700"

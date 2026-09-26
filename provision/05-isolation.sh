@@ -1,37 +1,37 @@
 #!/usr/bin/env bash
-# WSL-specific isolation checks.
+# WSL 固有の隔離の検査。
 #
-# A VirtualBox guest is isolated from the host by default. A WSL2 distro is NOT:
-# out of the box it mounts every Windows drive under /mnt, can execute Windows
-# binaries, and bridges a display/audio/clipboard channel to the Windows side.
-# The isolation comes entirely from /etc/wsl.conf and .wslconfig, and a config
-# that was written but never applied looks exactly like a config that works.
+# VirtualBox のゲストは既定でホストから隔離されている。WSL2 のディストロは
+# 違う。何もしなければ Windows のドライブを全部 /mnt の下にマウントし、Windows
+# の実行ファイルを起動でき、Windows 側と画面・音声・クリップボードの経路で
+# つながる。隔離はすべて /etc/wsl.conf と .wslconfig から来ていて、書いたが
+# 反映されていない設定は、効いている設定とまったく同じに見える。
 #
-# `wsl --terminate` does not reload those files; only `wsl --shutdown` does (and
-# that kills the keepalive task -- README 3-2). So "I edited wsl.conf" is not
-# evidence. These assertions are.
+# `wsl --terminate` ではこれらのファイルは読み直されない。読み直すのは
+# `wsl --shutdown` だけで、それは keepalive タスクを殺す（README 3-2）。だから
+# 「wsl.conf を書いた」は証拠にならない。証拠になるのは下の検査だ。
 #
-# Escape hatch: ALLOW_WSLG=1 accepts the WSLg channel as a known, deliberate
-# exception. Nothing else can be waived.
+# 抜け道: ALLOW_WSLG=1 を付けると、WSLg の経路を分かったうえでの例外として
+# 受け入れる。ほかの検査は免除できない。
 set -euo pipefail
 
 fail=0
 bad()  { echo "FAIL: $*" >&2; fail=1; }
 info() { echo "  note: $*"; }
 
-# Only meaningful under WSL. On another hypervisor the file layout differs and
-# these checks would be misleading rather than wrong.
+# WSL の上でだけ意味がある。別のハイパーバイザではファイルの配置が違い、
+# これらの検査は誤りというより誤解を招くものになる。
 if ! grep -qi microsoft /proc/sys/kernel/osrelease; then
   echo "05-isolation: not running under WSL, skipping"
   exit 0
 fi
 
-# 1. No Windows filesystem reachable. This is the load-bearing check: with no
-#    Windows path mounted there is no file for the solver to read and no .exe
-#    for it to run. Checked against the live mount table, not against wsl.conf.
+# 1. Windows のファイルシステムに届かないこと。これが要の検査だ。Windows の
+#    パスが1つもマウントされていなければ、solver が読める Windows のファイルも、
+#    起動できる .exe も無い。wsl.conf ではなく、いまのマウント表で確かめる。
 #
-#    /usr/lib/wsl/* is excluded: WSL always mounts the GPU driver store there
-#    read-only (fmask/dmask 222), and it cannot be turned off.
+#    /usr/lib/wsl/* は除く。WSL はそこに GPU ドライバの置き場を必ず読み取り専用
+#    （fmask/dmask 222）でマウントし、切ることはできない。
 mounts="$(awk '$3=="drvfs" || ($3=="9p" && $2 !~ /^\/usr\/lib\/wsl\//) {print "  "$2" ("$3")"}' \
           /proc/self/mounts || true)"
 if [ -n "$mounts" ]; then
@@ -39,8 +39,8 @@ if [ -n "$mounts" ]; then
   printf '%s\n' "$mounts" >&2
 fi
 
-# /mnt/c usually survives as an empty leftover directory after automount is
-# turned off. Empty is fine; populated means something is mounted there now.
+# automount を切っても、/mnt/c はたいてい空のディレクトリとして残る。空なら
+# 問題ない。中身があれば、いま何かがそこにマウントされている。
 if [ -d /mnt/c ] && [ -n "$(ls -A /mnt/c 2>/dev/null || true)" ]; then
   bad "/mnt/c is populated -- automount is on, or someone mounted it by hand"
 fi
@@ -49,28 +49,26 @@ case ":${PATH}:" in
   *:/mnt/c/*) bad "Windows paths are still on PATH (appendWindowsPath)" ;;
 esac
 
-# 2. Interop. Note what this does NOT check: the WSLInterop binfmt handler stays
-#    registered even with `[interop] enabled=false`, so its presence proves
-#    nothing. What actually happens with interop off is that /init cannot reach
-#    the Windows side and exec fails with
+# 2. interop。これが確かめないものに注意する。WSLInterop の binfmt ハンドラは
+#    `[interop] enabled=false` でも登録されたまま残るので、あっても何の証明にも
+#    ならない。interop を切ると実際には /init が Windows 側に届かず、exec が
 #        WSL ERROR: UtilAcceptVsock:273: accept4 failed 110
-#    Verified by hand on 2026-08-17 by mounting C: as root and running cmd.exe.
-#    Since a running exec test needs a Windows path -- which check 1 already
-#    forbids -- interop is reported, not asserted.
+#    で失敗する。2026-08-17 に root で C: をマウントし、cmd.exe を実行して手で
+#    確かめた。実行して確かめるには Windows のパスが要り、それは検査1がすでに
+#    禁じている。だから interop は報告するだけで、合否には使わない。
 if [ -e /proc/sys/fs/binfmt_misc/WSLInterop ] || [ -e /proc/sys/fs/binfmt_misc/WSLInterop-late ]; then
   info "WSLInterop binfmt handler is registered (normal even when interop=false;"
   info "      not evidence either way -- check 1 is what keeps .exe unreachable)"
 fi
 
-# 3. WSLg. This one is easy to miss: when it is on, /mnt/wslg carries
-#    world-accessible sockets to a compositor and a PulseAudio server running on
-#    the WINDOWS side -- a live host channel (display, audio, clipboard) open to
-#    every user in the distro, solver included. Nothing in wsl.conf turns it off;
-#    it takes `guiApplications=false` in .wslconfig on the Windows side.
+# 3. WSLg。見落としやすい。有効だと /mnt/wslg に、WINDOWS 側で動くコンポジタと
+#    PulseAudio サーバへの、誰でも使えるソケットが置かれる。ホストへの生きた
+#    経路（画面、音声、クリップボード）が、solver を含むディストロの全員に
+#    開いている。wsl.conf にはこれを切る設定が無く、Windows 側の .wslconfig に
+#    `guiApplications=false` を書く必要がある。
 #
-#    Checked by looking for the channel, not the directory: /mnt/wslg survives as
-#    an empty scaffold (just run/user/<uid>) after WSLg is disabled, so its mere
-#    existence would be a false positive.
+#    ディレクトリではなく経路そのものを探す。WSLg を切っても /mnt/wslg は空の
+#    骨組み（run/user/<uid> だけ）として残るので、有無で判定すると誤検知する。
 wslg_sockets="$(find /mnt/wslg /tmp/.X11-unix -type s 2>/dev/null | head -5 || true)"
 wslg_mounts="$(awk '$2 ~ /^\/mnt\/wslg/ {print "  "$2" ("$3")"}' /proc/self/mounts || true)"
 if [ -n "$wslg_sockets$wslg_mounts" ]; then
@@ -89,20 +87,20 @@ if [ -n "$wslg_sockets$wslg_mounts" ]; then
   fi
 fi
 
-# 4. systemd is up. Without it sshd is unmanaged and 50-lockdown.sh's
-#    verification via `systemctl restart ssh` / `sshd -T` is meaningless.
+# 4. systemd が動いていること。無いと sshd は管理されず、50-lockdown.sh が
+#    `systemctl restart ssh` と `sshd -T` で行う検証が意味を失う。
 state="$(systemctl is-system-running 2>/dev/null || true)"
 case "$state" in
   running|degraded) ;;
   *) bad "systemd is not running (state: ${state:-none}); set [boot] systemd=true" ;;
 esac
 
-# 5. NAT, not mirrored networking. Under mirrored mode the distro reaches
-#    services listening on the Windows host's localhost, which quietly widens
-#    the sandbox. loopback0 is the tell-tale interface of mirrored mode.
-# (captured into a variable rather than piped into `grep -q`: under pipefail
-#  grep -q exits at the first hit, ip dies of SIGPIPE, and the check "fails"
-#  while being correct -- README 3-10)
+# 5. mirrored ではなく NAT であること。mirrored だとディストロから Windows
+#    ホストの localhost で listen しているサービスに届き、サンドボックスが
+#    黙って広がる。loopback0 は mirrored のときにだけ現れるインターフェイスだ。
+# （`grep -q` にパイプせず、変数に取ってから見る。pipefail の下では grep -q が
+#  最初の一致で終わり、ip が SIGPIPE で死に、正しいのに検査が「失敗」する。
+#  README 3-10）
 links="$(ip -o link show 2>/dev/null || true)"
 case "$links" in
   *" loopback0:"*) bad "mirrored networking detected (loopback0 present); use networkingMode=NAT" ;;

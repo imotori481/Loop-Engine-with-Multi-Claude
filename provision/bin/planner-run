@@ -1,18 +1,18 @@
 #!/usr/bin/env bash
-# Start the planner agent, non-interactively, on one brief.
+# プランナーのエージェントを、1つのブリーフに対して非対話で起動する。
 #
-# Invoked by the runner as:
+# ランナーはこう呼ぶ:
 #     sudo -u planner /srv/loop/bin/planner-run <brief-file> [seconds]
 #
-# Same shape as solver-run, and for the same reason: the runner has no sudo, and
-# the single exception in /etc/sudoers.d/92-runner-to-planner names this script
-# and no other, limited to Runas (planner) -- sideways, never up.
+# 形も理由も solver-run と同じ。ランナーは sudo を持たず、
+# /etc/sudoers.d/92-runner-to-planner の唯一の例外はこのスクリプトだけを名指しし、
+# Runas (planner) に限る。横への移動で、昇格ではない。
 #
-# What the planner may touch is decided by the filesystem, not by this script.
-# `plan/` is 0700 runner, so the planner cannot read tasks.json and cannot write
-# it. It writes a PROPOSAL into /srv/loop/planner/out and the runner applies it
-# only after checking what changed. "The planner may not weaken the acceptance
-# criteria" is therefore not a rule anyone has to keep.
+# プランナーが何に触れてよいかは、このスクリプトではなくファイルシステムが
+# 決める。`plan/` は 0700 runner なので、プランナーは tasks.json を読むことも
+# 書くこともできない。/srv/loop/planner/out に「提案」を書き、ランナーは何が
+# 変わったかを確かめてから適用する。だから「プランナーは受け入れ条件を緩めては
+# ならない」は、誰かが守る必要のある規則ではない。
 set -euo pipefail
 
 BRIEF="${1:?usage: planner-run <brief-file> [seconds]}"
@@ -21,11 +21,10 @@ LIMIT="${2:-900}"
 
 OUT=/srv/loop/planner/out
 
-# Credentials. CLAUDE_CODE_OAUTH_TOKEN is a subscription token from
-# `claude setup-token`; ANTHROPIC_API_KEY_CONSOLE is metered Console credit kept
-# as a fallback. Exactly one is exported, so which one paid for a run is never
-# ambiguous -- and an exhausted subscription window degrades to billing rather
-# than to a confusing auth error.
+# 資格情報。CLAUDE_CODE_OAUTH_TOKEN は `claude setup-token` で作るサブスクリプション
+# のトークン。ANTHROPIC_API_KEY_CONSOLE は予備に置く従量課金の Console クレジット。
+# export するのはちょうど1つなので、どちらが代金を払ったかが曖昧にならない。
+# トークンが無いときは、分かりにくい認証エラーではなく課金に切り替わる。
 if [ -r /etc/loop/planner.env ]; then
   set -a
   . /etc/loop/planner.env
@@ -43,33 +42,50 @@ if [ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
 fi
 unset ANTHROPIC_API_KEY_CONSOLE
 
-# A throwaway HOME for every invocation. Claude Code writes config, policy and
-# backup state into HOME, and with a fresh one each time nothing can carry from
-# one planning call to the next. `--bare` would have covered this in one flag,
-# but --bare refuses OAuth -- and OAuth is exactly what a subscription token is
-# (measured 2026-08-18). Auditing what gets left behind would work; having
-# nowhere for it to be left behind is better.
+# モデルと effort。planner.env の LOOP_MODEL を --model で、LOOP_EFFORT を
+# --effort で渡す。空ならアカウントの既定。effort の値が間違っていたら、claude を
+# 呼ぶ前に止める。claude 側で落ちると、ランナーはそれをエスカレーションと扱う。
+role_args=()
+if [ -n "${LOOP_MODEL:-}" ]; then
+  role_args+=(--model "$LOOP_MODEL")
+fi
+if [ -n "${LOOP_EFFORT:-}" ]; then
+  case "$LOOP_EFFORT" in
+    low|medium|high|xhigh|max) role_args+=(--effort "$LOOP_EFFORT") ;;
+    *) echo "planner-run: bad LOOP_EFFORT in planner.env: $LOOP_EFFORT" >&2; exit 5 ;;
+  esac
+fi
+
+# 呼び出しごとに使い捨ての HOME を作る。Claude Code は設定、ポリシー、
+# バックアップの状態を HOME に書く。毎回新しくすれば、ある計画の呼び出しから次へ
+# 何も持ち越せない。`--bare` なら1つのフラグで済むが、--bare は OAuth を拒む。
+# サブスクリプションのトークンはまさに OAuth だ（2026-08-18 に実測）。残された
+# ものを監査する手もあるが、残す場所そのものが無いほうがよい。
 HOME="$(mktemp -d)"
 export HOME
 trap 'rm -rf "$HOME"' EXIT
 
 cd "$OUT"
 
-# --safe-mode            CLAUDE.md, skills, plugins, hooks, MCP servers and
-#                        custom commands are all off, while auth, model and the
-#                        built-in tools keep working. This is what keeps the
-#                        brief the planner's only input (RUNNER_SPEC section 5).
-# --setting-sources ""   and no user/project/local settings files either.
+# --safe-mode            CLAUDE.md、スキル、プラグイン、フック、MCP サーバ、
+#                        独自コマンドをすべて切る。認証、モデル、組み込みの
+#                        ツールは動く。これでブリーフがプランナーの唯一の
+#                        入力になる（RUNNER_SPEC 5 章）。
+# --setting-sources ""   ユーザー、プロジェクト、ローカルの設定ファイルも読まない。
 # --no-session-persistence
-#                        no transcript to resume from, so a planning call cannot
-#                        continue a previous one.
-# --allowedTools         it reads its brief on stdin and writes one proposal
-#                        here; nothing else is pre-approved.
+#                        再開できる記録を残さない。計画の呼び出しが前の呼び出しの
+#                        続きになることはない。
+# --output-format json   結果の文と消費量を1つの JSON で返す。ランナーが
+#                        消費量を台帳に残し、結果の文だけを取り出す。
+# --allowedTools         標準入力でブリーフを読み、ここに提案を1つ書く。
+#                        ほかに前もって許すものは無い。
 #
-# The ceiling is applied here rather than by the runner, which belongs to a
-# different uid and cannot signal this process at all. `timeout` exits 124.
+# 上限時間はランナーではなくここで掛ける。ランナーは別の uid で、このプロセスに
+# 信号を送れない。`timeout` は 124 で終わる。
 set +e
 timeout --kill-after=30 "$LIMIT" claude -p \
+  "${role_args[@]}" \
+  --output-format json \
   --safe-mode \
   --setting-sources "" \
   --no-session-persistence \

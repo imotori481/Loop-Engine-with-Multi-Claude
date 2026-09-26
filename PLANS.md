@@ -11,24 +11,46 @@
 
 ## 目標達成に向けての具体的な作業
 
-上から順に着手する。
+未着手の行は上から順に着手する。
 
-| 作業内容 | 目的 | 操作ファイル |
-|---|---|---|
-| Claude Code のソルバーバックエンド `solver-claude` を作る | `solver-run` が名前 `claude` で呼べる実体を置く。形は `planner-run` に揃える（使い捨て HOME、`--safe-mode`、`--setting-sources ""`、`--no-session-persistence`、内側の `timeout`）。ツールは `Read Write Edit` だけを許し、Bash は許さない。テストの判定はランナーの VERIFY だけが行う | `provision/bin/solver-claude`（新規） |
-| ソルバーの資格情報ファイルを作る | `/etc/loop/solver.env`（`root:solver 0640`）に `CLAUDE_CODE_OAUTH_TOKEN` を置く。未認証の報告を codex ログインから token の有無に替える | `provision/45-agent-invoke.sh` |
-| `solver-claude` を配置する | `/srv/loop/bin/solver-claude` を root 所有 0755 で install する。ランナーは名前しか渡せないので、実体の追加はここでしかできない | `provision/45-agent-invoke.sh` |
-| 資格情報の柵を検査する | solver が `planner.env` `critic.env` を読めないこと、planner と critic が `solver.env` を読めないことを、各役の視点で assert する | `provision/40-perms.sh`、`provision/45-agent-invoke.sh` |
-| `solver-run` の既定バックエンドを `claude` にする | 名前省略時に codex へ落ちない。codex 分岐は任意のバックエンドとして残す | `provision/bin/solver-run` |
-| ランナーの既定 tier を `["claude"]` にする | 計画が `solver_tiers` を書かないときに Claude だけで回る | `runner/loop.py`（`SOLVER_TIERS`）、`runner/tests/test_attempts.py` |
-| 利用上限への到達を失敗と区別する | 3役が同じサブスクリプションの枠を共有する。上限到達が Halt → エスカレーションに化け、エスカレーションがさらにプランナー呼び出しで枠を使う連鎖を止める。launcher は専用の終了コードを返し、ランナーは待ってから同じ呼び出しをやり直す | `provision/bin/solver-claude`、`planner-run`、`critic-run`、`runner/loop.py`（`call_solver` `call_planner` `call_critic`） |
-| 役ごとにモデルを指定する | 各 `*.env` の `LOOP_MODEL` を `--model` で渡す。呼び出し回数が最も多いソルバーに軽いモデルを割り当てられる | `provision/bin/*-run`、`provision/bin/solver-claude`、`provision/45-agent-invoke.sh` |
-| 消費量を台帳に残す | `--output-format json` の usage を `ledger` に記録し、どの役が枠を使ったかを run 後に読める | `provision/bin/*-run`、`runner/loop.py` |
-| smoke を Claude ソルバーで通す | Runas、認証、非対話実行、書いたファイルの所有者が solver であることを確認する | `provision/bin/smoke-solver`、`provision/bin/smoke-pytest`、`provision/bin/smoke-dom` |
-| fixture で実走する | 3ステップの最小計画で、関門が Claude ソルバーの出力を正しく裁くことを確かめる | `plan/fixture/` |
-| run 8 の計画を Claude ソルバーで回す | run 5（Codex）、run 6（ローカル 9B）と同じ物差しで比較する | `docs/HANDOFF.md` |
-| ドキュメントを Claude 単独構成に揃える | 役の表、資格情報の置き場、未決事項、tier の例を現構成に合わせる | `README.md`、`docs/ARCHITECTURE.md`、`docs/RUNNER_SPEC.md`（§4-4-1、§11-1）、`docs/LOCAL_SOLVER.md`、`provision/README.md`、`provision/70-local-solver.sh`、`.gitignore` |
-| 英語コメントの日本語化 | 日本人である私が読めるようにする | 英語コメントアウト全般 |
+| 状態 | 作業内容 | 目的 | 実装方法 | 操作ファイル |
+|---|---|---|---|---|
+| 完了 | Claude Code のソルバーバックエンド `solver-claude` を作る | `solver-run` が名前 `claude` で呼べる実体を置く。テストの判定はランナーの VERIFY だけが行う | bash。`claude -p` を `planner-run` と同じ形で起動する（使い捨て HOME、`--safe-mode`、`--setting-sources ""`、`--no-session-persistence`、`timeout`）。`--allowedTools "Read Write Edit"`、`--disallowedTools "Bash"` | `provision/bin/solver-claude` |
+| 完了 | ソルバーの資格情報ファイルを作る | ソルバーの資格情報を、solver だけが読める場所に置く | `claude setup-token` で発行したトークンを `CLAUDE_CODE_OAUTH_TOKEN` に書く。ファイルはヒアドキュメントで作り、`chown root:solver`、`chmod 640`。未認証の判定は `grep` でトークン行の有無を見る | `provision/45-agent-invoke.sh` |
+| 完了 | `solver-claude` を配置する | ランナーは名前しか渡せないので、実体の追加はここでしかできない | `install -o root -g root -m 755` で `/srv/loop/bin/` に置く | `provision/45-agent-invoke.sh` |
+| 完了 | 資格情報の柵を検査する | 3役の `.env` が互いに読めないことを確かめる | `sudo -u <役> test -r` を役 × ファイルの全組み合わせで回す。`.env` を作るのが 45 なので、検査も 45 で行う | `provision/45-agent-invoke.sh` |
+| 完了 | `solver-run` の既定バックエンドを `claude` にする | 名前省略時に codex へ落ちない | 既定値 `${3:-codex}` を `${3:-claude}` に変更。codex 分岐は任意のバックエンドとして残す | `provision/bin/solver-run` |
+| 完了 | ランナーの既定 tier を `["claude"]` にする | 計画が `solver_tiers` を書かないときに Claude だけで回る | `SOLVER_TIERS` の既定値を変更。unittest で既定値を固定 | `runner/loop.py`（`SOLVER_TIERS`）、`runner/tests/test_attempts.py` |
+| 完了 | 役ごとにモデルと effort を指定する | 呼び出し回数の多い役と、判断の重い役で、モデルと考える量を分ける | `.env` の `LOOP_MODEL` と `LOOP_EFFORT` を bash 配列に積み、`--model` と `--effort` で渡す。effort の値は `case` で検査する。`.env` に行が無ければ 45 が追記する | `provision/bin/planner-run`、`critic-run`、`solver-claude`、`provision/45-agent-invoke.sh` |
+| 完了 | ランナー本体を配置する | runner が自分の関門のコードを書き換えられないようにする | `install -o root -g root -m 644` で `/srv/loop/runner/loop.py` に置く。runner から書けないことと、`ast.parse` で構文が壊れていないことを assert する | `provision/25-runner.sh`、`provision/provision.sh` |
+| 完了 | npm のピア依存解決の失敗を避ける | npm 10.9 が vitest の任意のピア依存を解決する途中で落ちる | `npm install` に `--legacy-peer-deps` を付けて自動解決を切る | `provision/35-node.sh` |
+| 完了 | `plan refine` で改訂前の計画を残す | 改訂の失敗やプランナーのエスカレーションで、リンタを通っていた計画が消えない | Python。改訂前の提案を dict に控え、失敗時とエスカレーション時に `restore_proposal` で `out/` へ書き戻す。エスカレーションの本文は `.runner/refine-escalation.md` に残す。`unittest.mock` でテスト | `runner/loop.py`（`cmd_plan_refine` `restore_proposal`）、`runner/tests/test_refine.py` |
+| 完了 | 要件から計画を作って実走する | 3役すべて Claude Code のまま、要件から緑まで届くことを確かめる。結果は 8/8 が1回目の試行で緑、テスト52件 | fixture と同じ題材の要件を書き、`plan bootstrap` → `plan refine --mode coverage` → `plan apply` → `run --all`。プランナー `claude-opus-5-5`、ソルバーとクリティック `claude-sonnet-5`、effort はすべて `medium` | ── |
+| 一部完了 | smoke を Claude ソルバーで通す | 別 uid での起動、認証、非対話実行、書いたファイルの所有者を確かめる | smoke-solver、smoke-planner、smoke-critic、smoke-dom を箱で実行して通過。smoke-pytest は下の行で書き換える | `provision/bin/smoke-*` |
+| 完了 | 批評が走らなかったときに clean と表示しない | 要件が `/srv/loop/human/in/REQUIREMENTS.md` に無いと、coverage が黙って飛ばされ、指摘ゼロとして扱われる | Python。飛ばしたモードを台帳（`CRITIQUE_SKIPPED`）と画面に出す。走ったモードが無ければ `no_critique_ran` が終了コード 1 で止める。`unittest.mock` でテスト | `runner/loop.py`（`run_critique` `no_critique_ran` `cmd_plan_refine` `cmd_critique`）、`runner/tests/test_refine.py` |
+| 完了 | 35-node.sh が作ったファイルをコミットする | `.gitignore`、`index.html`、`vitest.config.mjs` が未コミットのまま残り、最初の `run --all` が dirty で止まる | bash。3つを書いた直後に、runner として `git add`、`git commit`、`git push` する。対象はこの3つだけに絞り、変更が無ければ何もしない。20-layout.sh の最初のコミットと同じ形 | `provision/35-node.sh` |
+| 完了 | `/srv/loop` を root 所有にする | 親ディレクトリが runner 所有なので、runner は `bin/` や `runner/` を改名して差し替えられる。sudoers はパスで許可しているので、偽の `solver-run` を他の uid で実行できる | bash。`/srv/loop` を `root:root 755` にする。`repo.git/` と `project/` は無いときだけ root が runner 所有の空ディレクトリを作り、runner が `git init --bare` と `git clone` で中身を作る。走行ログ用に `logs/` を runner に渡す。runner が `/srv/loop` に書けないことと、渡した場所に書けることを assert する | `provision/20-layout.sh` |
+| 完了 | `index.html` を TypeScript の計画にだけ見せる | Python の計画でも「環境の事実」としてクリティックに渡り、クリティックはこれを根拠に的外れな指摘を出す | Python。箱は計画の言語を知らないので、置く側（35-node.sh）は変えない。`environment_facts` が、TypeScript のときだけ `index.html` の説明を出し、Python のときはディレクトリの一覧からも `index.html` と `vitest.config.mjs` を外す。unittest で両方の言語を確かめる | `runner/loop.py`（`environment_facts`）、`runner/tests/test_brief.py` |
+| 完了 | smoke-pytest を書き換える | ソルバーに pytest を実行させる smoke は、Bash を許さない方針では必ず失敗する | bash。ソルバーに pytest の実行を頼み、実行の痕跡（ソルバー所有の `tests/__pycache__` と `.pytest_cache`）が無いことを確かめる。レポートは手書きできるので証拠にしない。痕跡が無いのにレポートがあれば、手書きとして失敗にする。テストファイルが書き換えられていないことと、ソルバーのプロセスが残っていないことも確かめる | `provision/bin/smoke-pytest` |
+| 完了 | venv の判定に pip の有無を加える | `python` だけある壊れた venv を「作成済み」とみなし、`pip` が見つからず止まる | bash。判定を `bin/python` と `bin/pip` の両方の有無にする。片方しか無ければ `rm -rf` で消して、runner が作り直す | `provision/30-python.sh` |
+| 完了 | L8 違反を減らす | 2回の計画づくりで2回とも L8 に引っかかり、プランナーの呼び出しが1回ずつ増えた。違反はどれも境界のケースで、`[]` `{}` `None` のような具体的な値が、判定の正規表現に入っていなかった | Python。`CONCRETE` に空のコレクション（`[]` `{}` `()`）と `True` `False` `None` を足す。TypeScript の小文字の定数は、英語の単語と見分けがつかないので足さない。ブリーフの L8 の説明も合わせる。unittest で受理と拒否の両方を確かめる | `runner/loop.py`（`CONCRETE` `BOOTSTRAP_RULES`）、`runner/tests/test_linter.py` |
+| 完了 | プランナーにソルバーの道具を伝える | CONTEXT.md に「テストを走らせてから終える」と書かれる。ソルバーは Bash を持たないので、実行を試みて断られる | Python。`environment_facts` が、使うバックエンド（`SOLVER_TIERS`）にコマンドを実行できるもの（`SOLVERS_THAT_RUN_COMMANDS`、今は codex だけ）が無ければ、「ソルバーはコマンドを実行できない。CONTEXT.md にテストを走らせろと書くな」と伝える。unittest でバックエンドの組み合わせごとに確かめる | `runner/loop.py`（`SOLVERS_THAT_RUN_COMMANDS` `environment_facts`）、`runner/tests/test_brief.py` |
+| 完了 | 利用上限への到達を失敗と区別する | 3役が同じサブスクリプションの枠を共有する。上限到達が Halt → エスカレーションに化け、エスカレーションがさらにプランナー呼び出しで枠を使う連鎖を止める | Python。Claude Code のエラーのドキュメントにある文面（`You've hit your ... limit`、`Request rejected (429)`、`Repeated 529 Overloaded` など）を正規表現で見分ける。3役の呼び出しを `run_agent` で包み、該当すれば 15分待って同じ呼び出しをやり直す（最大24回）。待ち切ったら Halt ではない `QuotaExhausted` で、エスカレーションせずに終了コード 5 で止まる。文面は実物では未確認。unittest で確かめる | `runner/loop.py`（`QUOTA_PATTERNS` `QUOTA` `run_agent` `call_solver` `call_planner` `call_critic` `main`）、`runner/tests/test_quota.py` |
+| 完了 | 消費量を台帳に残す | どの役が枠を使ったかを run 後に読める | bash と Python。3役の起動スクリプトに `--output-format json` を付ける。ランナーの `run_agent` が JSON を読み、使ったモデル・`usage`・推定費用・所要時間・ターン数を台帳の `USAGE` に書く。呼び出し側には結果の文だけを返すので、呼び出し側は変えない。JSON でない出力はそのまま通す。unittest で確かめる | `provision/bin/planner-run`、`critic-run`、`solver-claude`、`runner/loop.py`（`unwrap_result` `record_usage` `run_agent`）、`runner/tests/test_quota.py` |
+| 完了 | run 8 の計画を Claude ソルバーで回す | run 5（Codex）、run 6（ローカル 9B）と同じ物差しで比較する | `requirements/IDLE_GAME.md` を TypeScript で `plan bootstrap` → `plan refine` → `plan apply` → `run --all`。計画づくりはプランナー6回・クリティック6回。結果は 10/10 緑、全ステップ 1 attempt、60件パス。S10 は環境を確かめる条件2件を人間が外した。人の目では遊べることを確認し、数値の並びが読みにくい | `docs/HANDOFF.md`、`README.md` |
+| 完了 | メソッドを持つ interface のスタブを正しく書く | Claude で回した run 8 の S1 で、ランナーが書いた TypeScript のスタブがコンパイルできず、テストの書き直しが6回続けて落ちた。interface を「名前: 型」の正規表現で読み、メソッドの引数をフィールドと取り違えていた | Python。interface の中身を括弧の外の区切りだけで分け（`split_top`）、メソッドは関数の型に直す（`interface_fields`）。関数の型のスタブは、呼べる関数にする（`split_function_type` `sentinel_for`）。unittest で S1 と同じ形を確かめる。コンパイルの確認は箱の実走で行う | `runner/loop.py`（`split_top` `split_function_type` `interface_fields` `sentinel_for` `ts_type_values`）、`runner/tests/test_language.py` |
+| 完了 | エラー本文の色コードを取り除く | vitest は JUnit の XML に書くとき ESC だけを落とし、`[38;5;249m` の切れ端を残す。ソルバーは1文字ごとに色コードが挟まった本文を渡されていた | Python。`ANSI` の正規表現に、ESC の無い形（数字を必須にする）を足す。unittest で確かめる | `runner/loop.py`（`ANSI`）、`runner/tests/test_language.py` |
+| 完了 | 改訂で CONTEXT.md と SYSTEM_SPEC.md を失わない | `plan refine` の改訂で、プランナーは変える `tasks.json` だけを書き、B1（最初の計画には3ファイルが要る）に落ちる。run 8 で2回起き、プランナーの呼び出しを2回無駄にした。改訂のブリーフは2ファイルを「変えるときだけ書け」と伝えていて、ランナーの判定と食い違っていた | Python。ブリーフに合わせてランナーを直す。`plan_with_retry` に `keep` を足し、プランナーが書かなかったファイルを改訂前の控えから補う（台帳に `PLAN_CARRIED`）。`tasks.json` とエスカレーションには補わない。unittest で確かめる | `runner/loop.py`（`plan_with_retry` `cmd_plan_refine`）、`runner/tests/test_refine.py` |
+| 完了 | `USAGE` の画面表示を短くする | 台帳の1行がそのまま画面に出て、1回の呼び出しで数行を占める | Python。`ledger` に、画面に出す文を別に渡す引数 `echo` を足す。`record_usage` は、台帳には `usage` を丸ごと書き、画面には役・段階・モデル・入出力トークン・秒数・推定費用の1行だけを出す。入力トークンはキャッシュの読み書きを足した数。unittest で画面と台帳の両方を確かめる | `runner/loop.py`（`ledger` `record_usage`）、`runner/tests/test_quota.py` |
+| 完了 | trace に守りのテストを指摘させない | 壊れたセーブや知らない ID への耐性を試すテストを、毎回「遊んでいても届かない状態」と指摘する。run 8 では3回の批評すべてに残った。ブリーフの最後の問い（作り手が扱えるように作ったのに、ユーザーの操作では届かない状態はあるか）が、そう答えるよう誘っていた | Python。trace のブリーフのその問いに、対象は成果物自身の論理だと書き足す。読み込んだセーブ、書き換えられたストレージ、古い版のデータ、時計の変化など、外から来る入力は実在する入力で、それを試すテストは守りの確認だから指摘しない、と伝える。unittest でブリーフの文を確かめる | `runner/loop.py`（`brief_critique_trace`）、`runner/tests/test_critic.py` |
+| 完了 | 環境が置いたファイルだけを確かめる条件を書かせない | run 8 の S10 で、プランナーが `index.html` の中身を確かめる受け入れ条件を書いた。`index.html` は環境が置き、スタブに置き換わらないので、RED_GATE で必ず通って R4 で止まる | 環境の事実に、根に実際に置かれたファイルの名前を列挙し、その中身だけを確かめる条件は R4 で必ず止まると書き足す。`index.html` があれば `start` を呼んで確かめる例を添える。リンタは、ファイル名に触れる正当な条件と見分けられないので使わない | `runner/loop.py`（`environment_facts`）、`runner/tests/test_brief.py` |
+| 完了 | trace が「読むのに書かれないもの」を見逃さないようにする | 守りのテストを対象外にした説明を広く取りすぎると、読み込む処理はあるのに書き込む処理が無い、といった成果物自身の欠陥まで黙るおそれがある | trace のブリーフに、対象外は守りだけで読まれるものではないと書き、読むものをどのステップも書かず、外から来るとも計画に書かれていなければ指摘させる | `runner/loop.py`（`brief_critique_trace`）、`runner/tests/test_critic.py` |
+| 完了 | ドキュメントを Claude 単独構成に揃える | 役の表、資格情報の置き場、未決事項、tier の例を現構成に合わせる | 各ドキュメントを書き直す。箱の作り方に、実行する場所（Git Bash / PowerShell / 箱）、鍵の名前、公開鍵の流し込み、クローンでの配置を反映する。走行ログの置き場を `/srv/loop/logs/` に、run の退避を保守ユーザーの `sudo mv` に書き換える | `README.md`、`docs/ARCHITECTURE.md`、`docs/RUNNER_SPEC.md`（§4-4-1、§11-1）、`docs/LOCAL_SOLVER.md`、`provision/README.md`、`host/README.md`、`provision/70-local-solver.sh`、`.gitignore` |
+| 完了 | ソルバーの時間切れを試行の失敗として数える | run 8 の S10 で、2回目の実装のソルバーが制限時間内に終わらず、残りの試行を使わずにエスカレーションした。エスカレーションの上限を使い切り、人間で止まった | Python。solver-run の終了コード 124 を、Halt の下位クラス `SolverTimeout` で投げる。IMPL のループだけがそれを受け止め、`absorb_timeout` で片付けて次の試行へ進む（引き取り、凍結の照合、経路許可、書きかけの破棄、台帳に `SOLVER_TIMEOUT`、次のブリーフに時間切れを伝える）。試行を使い切ったときの理由に時間切れの回数を書く。TEST_WRITE と STUB の時間切れと、runner 側の上限に当たった場合は今までどおり止める。unittest でループの流れまで確かめる | `runner/loop.py`（`SolverTimeout` `call_solver` `absorb_timeout` `run_step`）、`runner/tests/test_timeout.py`、`docs/RUNNER_SPEC.md`（§4-4-1） |
+| 完了 | 開発サーバの振る舞いを確かめる条件を書かせない | run 8 の S10 で、Vite が `index.html` を変換した結果を確かめる条件が書かれた。変換結果は Vite が決め、どの実装でも変えられない。ソルバーは直せない1件のために時間切れまで考えた | Python。TypeScript で `index.html` があるとき、環境の事実の `index.html` の説明に段落を足す。開発サーバで開けることは環境の仕事で箱の検査が確かめる、要件にあっても `start` を export するステップで満たされる、開発サーバを起動する・`index.html` を変換する・サーバの応答を確かめる条件は書かない、と伝える。unittest でブリーフの文を確かめる | `runner/loop.py`（`environment_facts`）、`runner/tests/test_brief.py` |
+| 完了 | 開発サーバで開けることを箱が確かめる | 上の行で計画から外す要件を、代わりに誰かが確かめる | bash と Node。`smoke-page` を新しく作る。本物の `index.html` と仮の `src/main.ts` を作業場所に置き、Vite の API（`createServer`、`transformIndexHtml`、`transformRequest`）で、ページのモジュールスクリプトが `/src/main.ts` を読むことと、`/src/main.ts` が `start` を export するモジュールとして配られることを確かめる。Vite はインラインのスクリプトを `html-proxy` に切り出すので、見るのは切り出されたモジュールの中身。キャッシュは作業場所に向け、凍結したツールチェーンに書かない。35-node.sh が置いて毎回流す。手元の WSL に箱と同じ版（vitest 4.1.11、Vite 8.3.1）を入れ、正しいページで通り、壊れたページで落ちることを確かめた | `provision/bin/smoke-page`、`provision/35-node.sh`、`provision/README.md` |
+| 完了 | R4 で空と分かった条件をプランナーが外せるようにする | 適用済みの条件は P2 と P3 でプランナーに変えられず、スタブに対して通ってしまう条件（R4）も必ず人間で止まる。run 8 の S10 では、環境のファイルを確かめる条件のために人間が計画を手で直した | Python。`escalate` が R4 のとき、スタブに対して通ったテストの数を台帳の `ESCALATED` に `r4_passing` として残し、ESCALATION.md の制約に例外を書く。`r4_allowance` が、開いているエスカレーション（ESCALATION.md がある）の最後の `ESCALATED` が R4 なら、そのステップと数を返す。`check_proposal` はそのステップに限り、条件を消すこと（`removed_entries` で、残りが順番も中身も同じかを見る）を数まで許し、`expected_tests` を消した数まで下げることを許す。改訂のブリーフにこの手を伝える。unittest で、許す場合と拒む場合（書き換え、追加、並べ替え、数の超過、別のステップ、R4 以外の停止、答え済みのエスカレーション）を確かめる | `runner/loop.py`（`escalate` `removed_entries` `r4_allowance` `check_proposal` `brief_plan_revise`）、`runner/tests/test_r4.py`、`docs/RUNNER_SPEC.md`（§6-5） |
+| 完了 | 英語コメントの日本語化 | 日本人である私が読めるようにする | 英語のコメントと docstring を、意味を変えずに日本語へ書き直す。AI に渡すブリーフの本文、画面に出すメッセージ、ASCII のみと決めた `.cmd` と `.vbs`、走行の記録である `plan/fixture` の計画は英語のまま残す | 英語コメントアウト全般 |
 
 ### 着手前に決めること
 
@@ -40,5 +62,7 @@
 
 ## 更新履歴
 
+- 2026/09/25: 作業の表に実装方法の列を追加
+- 2026/09/25: 作業の表に状態の列を追加し、実走で見つかった作業を追加
 - 2026/09/24: ソルバーのツールを Read Write Edit に決定
 - 2026/09/23: 具体的な作業の表と着手前に決めることを追加

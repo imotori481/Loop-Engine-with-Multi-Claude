@@ -1,25 +1,35 @@
 #!/usr/bin/env bash
-# Install the host's public key for `runner`. Must run BEFORE 50-lockdown.sh,
-# which is what actually lets `runner` log in at all (the base sshd drop-in
-# only allows the maintenance user) -- and which turns password auth off for
-# good measure.
+# ホストの公開鍵を `runner` に入れる。50-lockdown.sh より前に流すこと。
+# `runner` にログインを許すのは 50-lockdown.sh で（元の sshd の drop-in は
+# 保守ユーザーしか許さない）、念のためパスワード認証も切る。
 #
-# The key is a separate one from the maintenance user's: this key exists only
-# so the planner's working clone on Windows can push to /srv/loop/repo.git.
+# この鍵は保守ユーザーの鍵とは別のもの。ホストが /srv/loop/repo.git を
+# 引くためだけにある。
 #
-# Expects the public key at /tmp/loop-provision/loop-runner_ed25519.pub
-# (copied in with scp -- there is no /mnt/c in this distro, see README 2-5)
+# 公開鍵は /tmp/loop-provision/loop-runner_ed25519.pub に置いておく
+# （このディストロには /mnt/c が無いので、wsl の標準入力で流し込む。README 2-7）
 set -euo pipefail
 
 PUB=/tmp/loop-provision/loop-runner_ed25519.pub
-[ -f "$PUB" ] || { echo "FATAL: $PUB not found" >&2; exit 1; }
+KEYS=/home/runner/.ssh/authorized_keys
 
-install -d -o runner -g runner -m 700 /home/runner/.ssh
-install -o runner -g runner -m 600 /dev/null /home/runner/.ssh/authorized_keys
-cat "$PUB" > /home/runner/.ssh/authorized_keys
-chown runner:runner /home/runner/.ssh/authorized_keys
+# /tmp は VM の再起動で消える。2回目以降のプロビジョニングで流し込み直しを
+# 求めないよう、流し込んだ鍵が無くても、すでに入っている鍵があればそれを残す。
+# 新しい鍵を流し込んだときだけ置き換える。
+if [ -f "$PUB" ]; then
+  install -d -o runner -g runner -m 700 /home/runner/.ssh
+  install -o runner -g runner -m 600 /dev/null "$KEYS"
+  cat "$PUB" > "$KEYS"
+  chown runner:runner "$KEYS"
+  note="installed from $PUB"
+elif [ -s "$KEYS" ]; then
+  note="no new key at $PUB; kept the one already installed"
+else
+  echo "FATAL: $PUB not found, and runner has no key yet" >&2
+  exit 1
+fi
 
-# solver gets no key and no .ssh directory at all.
+# solver には鍵も .ssh ディレクトリも与えない。
 rm -rf /home/solver/.ssh
 
-echo "15-authkeys: ok"
+echo "15-authkeys: ok ($note)"

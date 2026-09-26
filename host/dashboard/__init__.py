@@ -1,1 +1,1 @@
-"""Host-side operator dashboard for Loop Engine."""
+"""Loop Engine の、ホスト側で動く運用者向けダッシュボード。"""

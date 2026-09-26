@@ -81,9 +81,9 @@ class Decisions(DashboardFixture):
         self.assertEqual(json.loads(lines[0])["kind"], "old")
 
     def test_a_phone_may_refuse_the_work_but_may_not_certify_it(self):
-        # The review exists because no machine can look at the screen. A device
-        # that cannot open the window must not be able to say the window is
-        # fine -- but saying "not good enough" costs nothing to allow.
+        # レビューがあるのは、どの機械も画面を見られないからだ。窓を開けない
+        # 端末に、窓が大丈夫だと言わせてはならない。ただし「まだ足りない」と
+        # 言わせても、失うものは無い。
         self.ledger({"event": "ALL_GREEN", "steps": ["S1", "S2"]})
         request = self.state.snapshot()["pending"][0]
         with self.assertRaisesRegex(ValueError, "machine that can run the result"):
@@ -116,12 +116,12 @@ class Decisions(DashboardFixture):
 
 
 class TwoKindsOfStuck(DashboardFixture):
-    """The runner being stuck and the planner declining are different requests.
+    """ランナーが詰まったことと、プランナーが断ったことは別の要求だ。
 
-    Both end at the same person, which is exactly why they must not be merged:
-    answering "the runner could not pass this step" says nothing about "no
-    revision I am allowed to make would help", and the second is the one that
-    means the criteria or the design have to change.
+    どちらも同じ人に届く。だからこそ1つにまとめてはならない。「ランナーが
+    このステップを通せなかった」に答えても、「許された改訂ではどれも役に
+    立たない」には答えていない。基準か設計を変えなければならないのは、
+    後者のほうだ。
     """
 
     def planner_escalation(self, text="# ESCALATE -- unreachable criterion"):
@@ -147,8 +147,8 @@ class TwoKindsOfStuck(DashboardFixture):
         self.assertEqual([item["kind"] for item in remaining], ["planner"])
 
     def test_a_phone_may_answer_or_stop_the_planners_refusal(self):
-        # Same reasoning as an escalation: this is judgement about criteria, not
-        # a claim about what appeared on a screen.
+        # エスカレーションと同じ理由による。これは基準についての判断で、
+        # 画面に何が出たかの主張ではない。
         self.planner_escalation()
         request = self.state.snapshot()["pending"][0]
         record = self.state.decide("planner", request["id"], "respond", "要件を書き直す",

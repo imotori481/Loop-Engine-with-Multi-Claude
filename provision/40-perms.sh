@@ -1,84 +1,82 @@
 #!/usr/bin/env bash
-# The permission model. This is the primary enforcement mechanism for
-# RUNNER_SPEC 1-3 (test freeze) and the files_write allowlist -- everything
-# else in the runner is a tripwire on top of this.
+# 権限モデル。RUNNER_SPEC 1-3（テストの凍結）と files_write の許可リストを
+# 強制する主な仕組みで、ランナーのほかの検査はすべてこの上に重ねた
+# トリップワイヤだ。
 #
-# The script ends by asserting the model from solver's point of view. A
-# permission model nobody tested is a permission model that does not exist.
+# 最後に solver の視点でモデルを確かめる。誰も試していない権限モデルは、
+# 存在しないのと同じだ。
 set -euo pipefail
 P=/srv/loop/project
 ADMIN_USER="${ADMIN_USER:-maint}"
 
 chown -R runner:runner "$P"
 
-# The working tree root is group-writable, which is not the obvious choice.
-# Codex's apply_patch writes through the workspace root, so a read-only root
-# makes every edit fail -- with an error naming the target file, a long way from
-# the actual cause.
+# 作業ツリーの根はグループで書ける。すぐには思いつかない選択だ。Codex の
+# apply_patch はワークスペースの根を経由して書くので、根が読み取り専用だと
+# 編集がすべて失敗する。しかもエラーは対象のファイル名で出て、本当の原因から
+# 遠い。
 #
-# Writable alone would be a hole: unlink and rename are governed by the
-# DIRECTORY's write bit, not the file's, so a solver that cannot modify
-# conftest.py could still delete it and put its own there. Test collection is
-# exactly what FREEZE exists to protect, so that would quietly undo it.
+# 書けるだけでは穴になる。unlink と rename はファイルではなくディレクトリの
+# 書き込みビットで決まるので、conftest.py を変更できない solver でも、それを
+# 消して自分のものを置ける。テストの収集はまさに FREEZE が守るもので、それを
+# 黙って無効にしてしまう。
 #
-# The sticky bit closes that: with it, only a file's owner may remove or rename
-# it. The solver can create new files at the root (which codex needs) and cannot
-# touch anything runner owns. Asserted at the bottom of this script.
+# スティッキービットがそれを塞ぐ。付いていれば、ファイルを消したり改名したり
+# できるのは所有者だけになる。solver は根に新しいファイルを作れる（codex に
+# 必要）が、runner の持ち物には触れない。このスクリプトの末尾で確かめる。
 chgrp solverw "$P"
-# 3770, not 3775. The trailing 5 gave every account on the box read and traverse
-# on the workspace, and from there src/ and tests/ were readable by anyone at
-# all -- the planner, which BOOTSTRAP 1-1 keeps away from the code that
-# satisfies its criteria, and the critic, whose entire worth is not having read
-# the tests. Nothing needed `other` here: the solver reaches this through
-# solverw and the runner owns it. Found by the critic's own fence assertion on
-# the first run of it.
+# 3775 ではなく 3770。末尾の 5 は、箱のすべてのアカウントにワークスペースの
+# 読み取りと通過を許し、そこから src/ と tests/ が誰にでも読めた。BOOTSTRAP 1-1
+# が基準を満たすコードから遠ざけている planner にも、テストを読んでいないことが
+# 価値のすべてである critic にもだ。ここで `other` を要するものは無い。solver は
+# solverw 経由で届き、runner は所有者だ。critic 用の柵の検査が、初回で見つけた。
 chmod 3770 "$P"      # setgid + sticky + rwxrwx---
 
-# The setgid bit has a second effect that is easy to miss and expensive to
-# leave: a file the RUNNER creates at the root inherits group solverw too, and
-# runner's umask is 002, so it lands 664 -- writable by the solver.
+# setgid ビットには、見落としやすく、放置すると高くつく2つ目の効果がある。
+# RUNNER が根に作ったファイルもグループ solverw を継ぐ。runner の umask は 002
+# なので 664 になり、solver が書ける。
 #
-# The files that live there are not work, they are the fence. conftest.py
-# decides what pytest can import; vitest.config.mjs decides what the DOM tests
-# run against; .gitignore decides what `git status` reports as a stray file,
-# which is the whole of assert_touched(). A solver that can rewrite any of them
-# can undo FREEZE without touching a single file FREEZE hashes.
+# 根にあるファイルは作業物ではなく、柵そのものだ。conftest.py は pytest が何を
+# import できるかを決める。vitest.config.mjs は DOM のテストが何に対して走るかを
+# 決める。.gitignore は `git status` が何を紛れ込んだファイルとして報告するか、
+# つまり assert_touched() の全部を決める。どれか1つでも書き換えられる solver は、
+# FREEZE がハッシュを取るファイルに1つも触れずに FREEZE を無効にできる。
 #
-# conftest.py is group runner today only because 20-layout.sh happens to run
-# BEFORE the root becomes setgid. Re-running that script afterwards would flip
-# it -- the same accident that once left plan/ readable through ten whole
-# steps. So the rule is stated here rather than relied on.
+# conftest.py がいまグループ runner なのは、たまたま 20-layout.sh が根を setgid
+# にする前に走るからにすぎない。後からそのスクリプトを流し直せば入れ替わる。
+# 10ステップのあいだ plan/ を読める状態にしたのと同じ事故だ。だから、頼らずに
+# ここで規則として書く。
 find "$P" -maxdepth 1 -type f -user runner -exec chgrp runner {} + -exec chmod 644 {} +
 
-# Private to runner: git history, the plan, and the freeze manifests.
-# solver must not be able to read tasks.json (RUNNER_SPEC 5) or learn which
-# files are being hashed.
+# runner だけのもの: git の履歴、計画、凍結のマニフェスト。solver は tasks.json
+# を読めてはならず（RUNNER_SPEC 5）、どのファイルのハッシュを取っているかも
+# 知ってはならない。
 chmod 700 "$P/.git" "$P/plan" "$P/.runner"
 
-# solver-writable. setgid so files created by solver keep group solverw and
-# stay manageable by runner.
+# solver が書ける場所。setgid にして、solver が作ったファイルがグループ solverw を
+# 保ち、runner が扱えるようにする。
 chown -R runner:solverw "$P/src" "$P/tests"
 chmod 2770 "$P/src" "$P/tests"
 
-# Interpreter and libraries: readable and executable, never writable.
+# インタプリタとライブラリ。読めて実行できるが、書けない。
 chmod -R go-w "$P/.venv"
 
 chown runner:solverw /srv/loop/brief
-chmod 2750 /srv/loop/brief   # setgid: briefs must land in group solverw
+chmod 2750 /srv/loop/brief   # setgid: ブリーフはグループ solverw にならなければならない
 
-# ---- assertions (from solver's perspective) ----------------------------
+# ---- 検査。solver の視点で確かめる ------------------------------------
 fail=0
 chk_can()    { if sudo -u solver "$@" >/dev/null 2>&1; then :;       else echo "FAIL: solver should be able to: $*"; fail=1; fi; }
 chk_cannot() { if sudo -u solver "$@" >/dev/null 2>&1; then echo "FAIL: solver should NOT be able to: $*"; fail=1; fi; }
 
-# The workspace root: solver may add, but may not remove what runner owns.
-# A disposable runner-owned file stands in for conftest.py / pytest.ini.
+# ワークスペースの根: solver は足せるが、runner の持ち物は消せない。
+# conftest.py や pytest.ini の代わりに、使い捨ての runner 所有ファイルを置く。
 sudo -u runner touch "$P/.perm-probe-runner"
 chmod 644 "$P/.perm-probe-runner"
 
 chk_can    touch "$P/.perm-probe-solver"                       # codex apply_patch
-chk_cannot rm -f "$P/.perm-probe-runner"                       # sticky bit
-chk_cannot mv "$P/.perm-probe-runner" "$P/.perm-probe-moved"   # sticky bit
+chk_cannot rm -f "$P/.perm-probe-runner"                       # スティッキービット
+chk_cannot mv "$P/.perm-probe-runner" "$P/.perm-probe-moved"   # スティッキービット
 rm -f "$P/.perm-probe-runner" "$P/.perm-probe-solver" "$P/.perm-probe-moved"
 
 chk_can    test -w "$P/src"
@@ -87,8 +85,8 @@ chk_can    test -x "$P/.venv/bin/python"
 chk_can    test -r /srv/loop/brief
 
 chk_cannot test -w "$P/.venv/bin/python"
-# The fence files at the root. Rewriting any of these defeats the freeze from
-# outside the set of files the freeze watches.
+# 根にある柵のファイル。どれかを書き換えれば、凍結が見張るファイルの外から
+# 凍結を無効にできる。
 chk_cannot test -w "$P/conftest.py"
 chk_cannot test -w "$P/.gitignore"
 [ -e "$P/vitest.config.mjs" ] && chk_cannot test -w "$P/vitest.config.mjs"
@@ -98,9 +96,9 @@ chk_cannot ls "$P/.runner"
 chk_cannot test -w /srv/loop/brief
 chk_cannot ls /home/runner
 
-# Accounts that are not in solverw must not reach the code at all. The planner
-# writes the criteria and must not see the code satisfying them (BOOTSTRAP 1-1);
-# the critic must not see the tests it would otherwise grade against.
+# solverw にいないアカウントは、コードにまったく届いてはならない。planner は
+# 基準を書くので、それを満たすコードを見てはならない（BOOTSTRAP 1-1）。critic は、
+# 見れば判定の拠り所にしてしまうテストを見てはならない。
 for stranger in planner critic; do
   id -u "$stranger" >/dev/null 2>&1 || continue
   for target in "$P" "$P/src" "$P/tests"; do
@@ -110,8 +108,8 @@ for stranger in planner critic; do
     fi
   done
 done
-# The maintenance user's home holds the human's ssh keys and the agent CLI
-# credentials. solver reaching it would hand it the git channel and a login.
+# 保守ユーザーのホームには、人間の ssh 鍵とエージェント CLI の資格情報がある。
+# solver が届けば、git の経路とログインを渡すことになる。
 chk_cannot ls "/home/$ADMIN_USER"
 
 if [ "$fail" -eq 0 ]; then

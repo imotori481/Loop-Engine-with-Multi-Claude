@@ -1,12 +1,11 @@
-"""L14 -- a contract states the shape of what it hands over.
+"""計画のリンタ。中心は L14（契約は渡すものの形を述べる）。
 
-The rule exists because of one real step. `def buy_max_affordable(...) -> tuple`
-passed every other rule, went out to the solver, and could not be built: the
-arity is not in the signature, the stub returned a one-element tuple, and the
-test's `result, count = ...` died unpacking it. RED_GATE called that a broken
-call rather than a red test, correctly, and neither the solver (which sees only
-the signature during STUB) nor the planner (P5 will not let it edit a green
-step) could repair it afterwards.
+L14 は実際の1つのステップのためにある。`def buy_max_affordable(...) -> tuple` は
+ほかのすべての規則を通り、ソルバーに渡され、作れなかった。要素の数が署名に無く、
+スタブは要素1つのタプルを返し、テストの `result, count = ...` は分解で死んだ。
+RED_GATE はそれを赤いテストではなく壊れた呼び出しと正しく判定し、ソルバー
+（STUB のあいだ署名しか見ない）もプランナー（P5 が緑のステップの編集を許さない）も、
+後からそれを直せなかった。
 
     python3 -m unittest discover -s runner/tests
 """
@@ -21,12 +20,12 @@ from loop import validate_plan  # noqa: E402
 
 
 def step(sid, kind, provides, requires=(), depends=(), annotate=True):
-    """One step that satisfies every rule, so a test can break exactly one.
+    """すべての規則を満たすステップ1つ。テストがちょうど1つだけ壊せるようにする。
 
-    `annotate` appends the module each signature lives in (L15). It is on by
-    default because most of these tests are about something else and would
-    otherwise all report L15 as well; the L15 tests below turn it off and say
-    where things live themselves.
+    `annotate` は、各署名の置き場のモジュールを書き足す（L15）。既定で有効に
+    するのは、ここのテストの大半がほかのことについてのもので、そうしないと
+    すべてが L15 も報告してしまうからだ。下の L15 のテストはこれを切り、置き場を
+    自分で書く。
     """
     module = f"pkg.{sid.lower()}"
     if annotate:
@@ -53,8 +52,8 @@ def step(sid, kind, provides, requires=(), depends=(), annotate=True):
 
 
 def plan(*provides):
-    """The smallest plan that satisfies every other rule, so anything the
-    linter reports is L14 and nothing else."""
+    """ほかのすべての規則を満たす最小の計画。リンタが報告するものは L14 だけに
+    なる。"""
     first, second = provides
     return {
         "version": 1,
@@ -77,7 +76,7 @@ class TheShapeMustBeStated(unittest.TestCase):
              "def catalog() -> list[str]"]), [])
 
     def test_a_bare_return_type_is_rejected(self) -> None:
-        # The step this rule was written for.
+        # この規則を書くきっかけになったステップ。
         problems = self.problems(
             ["def new_game() -> GameState"],
             ["def buy_max_affordable(state: GameState) -> tuple"])
@@ -86,7 +85,7 @@ class TheShapeMustBeStated(unittest.TestCase):
         self.assertIn("tuple", problems[0])
 
     def test_a_bare_parameter_type_is_rejected(self) -> None:
-        # A caller cannot build an argument it has no description of, either.
+        # 呼び出し側も、説明の無い引数は組み立てられない。
         problems = self.problems(
             ["def new_game() -> GameState"],
             ["def production_rate(catalog: dict) -> float"])
@@ -108,25 +107,25 @@ class TheShapeMustBeStated(unittest.TestCase):
         self.assertIn("dict, list", problems[0])
 
     def test_a_named_type_is_never_a_bare_container(self) -> None:
-        # -> Purchase is the preferred answer, not a grudging exception.
+        # -> Purchase は渋々認める例外ではなく、勧める答えだ。
         self.assertEqual(self.problems(
             ["class Purchase(state: GameState, bought: int)",
              "def new_game() -> GameState"],
             ["def buy_max_affordable(state: GameState) -> Purchase"]), [])
 
     def test_prose_beside_a_signature_is_not_read_as_a_type(self) -> None:
-        # provides lines carry a trailing note about where the symbol lives, and
-        # a plan may well say "list" in it. Only annotated positions count.
+        # provides の行は末尾に置き場の注記を持ち、計画はそこで "list" と言う
+        # ことがある。数えるのは型を注釈した位置だけだ。
         self.assertEqual(self.problems(
             ["def new_game() -> GameState  -- defined in pkg.core, returns a dict of counts"],
             ["def save(state: GameState) -> dict[str, float]"]), [])
 
 
 class TheContractSaysWhereItLives(unittest.TestCase):
-    """L15. The brief for writing tests carries `provides` and not the goal, so a
-    contract that does not name its module leaves the import path to a guess --
-    which cost step S1 of run 4 an escalation on `from incgame.game import ...`,
-    a module belonging to a step eight places later."""
+    """L15。テストを書くためのブリーフは goal ではなく `provides` を運ぶので、
+    モジュールを名指ししない契約は import のパスを推測に任せる。run 4 の S1 は
+    それで、8つ後のステップのモジュールを指す `from incgame.game import ...` の
+    ためにエスカレーションを1回使った。"""
 
     def test_a_contract_without_a_module_is_rejected(self) -> None:
         first = step("S1", "skeleton", ["def new_game() -> GameState"])
@@ -149,7 +148,7 @@ class TheContractSaysWhereItLives(unittest.TestCase):
         self.assertEqual(validate_plan({"version": 1, "steps": [first, second]}), [])
 
     def test_naming_a_module_the_step_does_not_write_is_rejected(self) -> None:
-        # The exact mistake: pointing at a module that belongs to another step.
+        # まさにその誤り。別のステップのモジュールを指している。
         first = step("S1", "skeleton", ["def new_game() -> GameState  # defined in incgame.game"])
         first["files_write"] = ["src/incgame/engine.py"]
         second = step("S2", "integration", ["def save(s: GameState) -> dict[str, float]  -- in incgame.io"],
@@ -171,11 +170,11 @@ class TheContractSaysWhereItLives(unittest.TestCase):
 
 
 class TheExpectedResultIsAValue(unittest.TestCase):
-    """L8, measured on the `then` alone and against a NUMBER rather than a digit.
+    """L8。`then` だけを見て、数字ではなく数で測る。
 
-    Both halves were wrong at once, and together they let through the criterion
-    that stopped run 4: `then: s2 == p.state exactly` passed because `given`
-    contained 0.0 and because the "2" in `s2` counted as a concrete value."""
+    `given` とつなげて見ることと、数字で数えることは、2つとも同時に誤りで、
+    合わさって run 4 を止めた条件を通してしまう。`then: s2 == p.state exactly` は、
+    `given` に 0.0 があり、`s2` の "2" が具体的な値と数えられたので通った。"""
 
     def plan_with(self, then: str):
         first = step("S1", "skeleton", ["def new_game() -> GameState  # in incgame.engine"])
@@ -204,11 +203,26 @@ class TheExpectedResultIsAValue(unittest.TestCase):
     def test_an_exception_type_is_a_concrete_result(self) -> None:
         self.assertEqual(self.plan_with("raises InsufficientFundsError"), [])
 
+    def test_an_empty_collection_or_a_python_constant_is_a_concrete_result(self) -> None:
+        # 境界のケースの答えとして一番よく出る形。数えないと、プランナーは
+        # len(...) == 0 のように言い換えるか、書き直しで呼び出しを1回使う。
+        for then in ("returns exactly []", "returns exactly {}", "returns exactly ()",
+                     "returns None", "returns True", "returns False"):
+            with self.subTest(then=then):
+                self.assertEqual(self.plan_with(then), [])
+
+    def test_words_that_only_describe_emptiness_are_still_rejected(self) -> None:
+        for then in ("returns an empty list", "the result is true for every input"):
+            with self.subTest(then=then):
+                problems = self.plan_with(then)
+                self.assertEqual(len(problems), 1)
+                self.assertIn("L8", problems[0])
+
 
 class RulesThatAreGone(unittest.TestCase):
     def test_l9_is_retired(self) -> None:
-        # L13 requires the first step to be a skeleton, which satisfies L9 by
-        # construction. A rule that cannot fail is not a rule; it is text.
+        # L13 は最初のステップを skeleton にすることを求め、それは作りの上で L9 を
+        # 満たす。落ちえない規則は規則ではなく、ただの文章だ。
         source = (Path(__file__).resolve().parents[1] / "loop.py").read_text(encoding="utf-8")
         self.assertNotIn('problems.append("L9', source)
 

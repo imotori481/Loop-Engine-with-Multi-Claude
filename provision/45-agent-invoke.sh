@@ -1,17 +1,16 @@
 #!/usr/bin/env bash
-# How the runner starts the three agents. Idempotent.
+# ランナーが3つのエージェントを起動する仕組み。冪等。
 #
-# The runner owns the repository and drives the loop, but has no sudo -- and
-# 10-users.sh asserts that, because a runner that can become root can undo every
-# gate it is supposed to enforce. Yet it still has to start processes as
-# DIFFERENT uids, or the write fences (RUNNER_SPEC 1-2) have nobody to apply to.
+# ランナーはリポジトリを所有してループを回すが、sudo を持たない。10-users.sh は
+# それを確かめる。root になれるランナーは、強制するはずの関門をすべて外せる
+# からだ。それでも、別の uid でプロセスを起こす必要がある。そうしないと、
+# 書き込みの柵（RUNNER_SPEC 1-2）を当てる相手がいない。
 #
-# So: one narrow exception per agent. Runas is limited to (solver), (planner) or
-# (critic) and the command list to a single root-owned launcher each. That is
-# sideways movement, not escalation -- none of those accounts has privileges of
-# its own to inherit. BOOTSTRAP 1-7 forbids handing the loop accounts power
-# over the machine; it does not forbid the runner from dropping into the
-# accounts it supervises.
+# だから、エージェントごとに狭い例外を1つずつ置く。Runas は (solver)、(planner)、
+# (critic) のどれかに限り、コマンドはそれぞれ root 所有の起動スクリプト1本に
+# 限る。これは横への移動で、昇格ではない。どのアカウントも、継げる権限を自分では
+# 持っていない。BOOTSTRAP 1-7 はループのアカウントに機械への権力を渡すことを
+# 禁じているが、ランナーが監督するアカウントに降りることは禁じていない。
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -28,33 +27,32 @@ install -o root -g root -m 755 bin/smoke-planner /srv/loop/bin/smoke-planner
 install -o root -g root -m 755 bin/smoke-plan    /srv/loop/bin/smoke-plan
 install -o root -g root -m 755 bin/smoke-critic  /srv/loop/bin/smoke-critic
 
-# The planner's channel, deliberately separate from the solver's.
+# planner の経路。solver の経路とはあえて分ける。
 #
-#   brief/  runner writes, planner reads. The planner cannot reach plan/ at all
-#           (0700 runner), so everything it is allowed to know arrives here.
-#   out/    planner writes a PROPOSAL, runner reads it. The planner never writes
-#           tasks.json; the runner applies a proposal only after checking what
-#           changed. Sticky, for the same reason the workspace root is: group
-#           write would otherwise let the planner delete runner-owned files.
+#   brief/  runner が書き、planner が読む。planner は plan/ にまったく届かない
+#           （0700 runner）ので、知ってよいことはすべてここに届く。
+#   out/    planner が「提案」を書き、runner が読む。planner は tasks.json を
+#           書かない。runner は何が変わったかを確かめてから提案を適用する。
+#           ワークスペースの根と同じ理由でスティッキーにする。グループの書き込み
+#           だけだと、planner が runner 所有のファイルを消せてしまう。
 install -d -o root  -g root     -m 755  /srv/loop/planner
 install -d -o runner -g plannerw -m 2750 /srv/loop/planner/brief
 install -d -o runner -g plannerw -m 3770 /srv/loop/planner/out
 
-# The critic's channel. Same two directories, same modes, and pointedly its own
-# group: criticw is not plannerw, so the critic cannot read the proposal the
-# planner is writing, and the planner cannot read the findings written about it.
+# critic の経路。同じ2つのディレクトリ、同じモードで、グループははっきり別に
+# する。criticw は plannerw ではないので、critic は planner が書いている提案を
+# 読めず、planner は自分について書かれた指摘を読めない。
 install -d -o root   -g root    -m 755  /srv/loop/critic
 install -d -o runner -g criticw -m 2750 /srv/loop/critic/brief
 install -d -o runner -g criticw -m 3770 /srv/loop/critic/out
 
-# The human's inbox. Mirror of the planner's out/: someone else writes, the
-# runner reads and decides. Sticky for the same reason -- the runner owns the
-# directory, so it can clear a consumed input without being able to be
-# surprised by one it did not put there.
+# 人間の受け渡し口。planner の out/ と対になる形で、誰かが書き、runner が読んで
+# 決める。スティッキーにする理由も同じ。runner がディレクトリを所有するので、
+# 使い終えた入力を片付けられ、自分が置いていない入力に不意を突かれることもない。
 #
-# Not readable by solver or planner. The requirements describe the whole system,
-# and handing that to the solver would put a second input channel beside the
-# brief (the same reason SYSTEM_SPEC.md lives under plan/).
+# solver と planner からは読めない。要件はシステム全体を述べており、それを
+# solver に渡すとブリーフの横に2つ目の入力経路ができる（SYSTEM_SPEC.md が
+# plan/ の下にあるのと同じ理由）。
 install -d -o root   -g root   -m 755  /srv/loop/human
 install -d -o runner -g humanw -m 3770 /srv/loop/human/in
 
@@ -85,23 +83,22 @@ fi
 chown root:solver /etc/loop/solver.env
 chmod 640 /etc/loop/solver.env
 
-# The planner's credentials are a SEPARATE file with a separate key, readable by
-# a different uid. Two reasons, both mechanical rather than tidy-minded:
-# a solver that burns through its quota must not be able to stop the planner from
-# running, and a sandbox breach must not hand over the credential that drives the
-# side which sets the acceptance criteria.
+# planner の資格情報は、別のキーを持つ別のファイルで、別の uid が読む。理由は
+# 2つあり、どちらも整理のためではなく仕組みのためだ。利用枠を使い切った solver
+# が planner の実行を止められてはならない。サンドボックスが破られても、受け入れ
+# 条件を決める側を動かす資格情報まで渡ってはならない。
 if [ ! -f /etc/loop/planner.env ]; then
   cat > /etc/loop/planner.env <<'EOF'
-# Non-interactive credentials for the `planner` account. Fill in by hand.
+# `planner` アカウントの非対話用資格情報。手で埋める。
 #
-# Preferred -- a subscription token, so planning costs nothing per call:
+# 推奨: サブスクリプションのトークン。計画づくりに呼び出しごとの費用がかからない。
 #     sudo -u planner -H claude setup-token
-# It prints a token; paste it after the '=' below. Note this draws on the same
-# usage window as your own interactive Claude Code work.
+# 表示されたトークンを '=' の後ろに貼る。あんた自身の対話作業と
+# 同じ利用枠を使う。
 CLAUDE_CODE_OAUTH_TOKEN=
 
-# Fallback -- metered Console credit. planner-run uses this only when the
-# subscription token above is empty, and says so when it does.
+# 予備: 従量課金の Console クレジット。planner-run は上のトークンが空のときだけ
+# これを使い、使うときはそう表示する。
 ANTHROPIC_API_KEY_CONSOLE=
 EOF
 fi
@@ -110,24 +107,45 @@ chmod 640 /etc/loop/planner.env
 
 if [ ! -f /etc/loop/critic.env ]; then
   cat > /etc/loop/critic.env <<'EOF'
-# Non-interactive credentials for the `critic` account. Fill in by hand.
+# `critic` アカウントの非対話用資格情報。手で埋める。
 #
 #     sudo -u critic -H claude setup-token
 #
-# Separate from the planner's on purpose: the account that judges the work and
-# the account that produced it must not be able to exhaust each other's quota,
-# and neither should be able to read the other's credential.
+# planner のものとあえて分ける。作業を判定するアカウントと作業を作った
+# アカウントが、互いの利用枠を使い切れてはならず、互いの資格情報を読めても
+# ならない。
 CLAUDE_CODE_OAUTH_TOKEN=
 
-# Fallback -- metered Console credit, used only when the token above is empty.
+# 予備: 従量課金の Console クレジット。上のトークンが空のときだけ使う。
 ANTHROPIC_API_KEY_CONSOLE=
 EOF
 fi
 chown root:critic /etc/loop/critic.env
 chmod 640 /etc/loop/critic.env
 
-# A malformed drop-in makes sudo refuse to run at all, including the sudo that
-# would fix it. Validate before either goes live.
+# 役ごとのモデル。起動スクリプトが LOOP_MODEL を --model で渡す。
+# 新しく作ったファイルにも、前からあるファイルにも、行が無いときだけ足す。
+# 値は手で埋めたものを上書きしない。
+for who in solver planner critic; do
+  if ! grep -q '^LOOP_MODEL=' "/etc/loop/$who.env"; then
+    cat >> "/etc/loop/$who.env" <<'EOF'
+
+# モデル。空ならアカウントの既定のモデルを使う。
+# 例: LOOP_MODEL=claude-sonnet-5
+LOOP_MODEL=
+EOF
+  fi
+  if ! grep -q '^LOOP_EFFORT=' "/etc/loop/$who.env"; then
+    cat >> "/etc/loop/$who.env" <<'EOF'
+
+# effort。low / medium / high / xhigh / max のどれか。空なら既定。
+LOOP_EFFORT=
+EOF
+  fi
+done
+
+# 形の壊れた drop-in があると、sudo は一切動かなくなる。それを直すための sudo も
+# 含めてだ。どちらも有効にする前に検証する。
 for spec in "solver:91-runner-to-solver" "planner:92-runner-to-planner" \
            "critic:93-runner-to-critic"; do
   who="${spec%%:*}"; file="${spec##*:}"
@@ -138,7 +156,7 @@ for spec in "solver:91-runner-to-solver" "planner:92-runner-to-planner" \
   rm -f "$tmp"
 done
 
-# Verify what actually took effect, not what was written.
+# 書いたものではなく、実際に効いたものを確かめる。
 granted="$(sudo -l -U runner 2>/dev/null || true)"
 for who in solver planner critic; do
   case "$granted" in
@@ -151,8 +169,8 @@ for who in solver planner critic; do
   esac
 done
 
-# ...and that it did not receive anything else. `sudo -l` prints a "(ALL : ALL)"
-# style line if a broader rule exists anywhere.
+# ……そして、それ以外は何も受け取っていないこと。どこかにもっと広い規則が
+# あれば、`sudo -l` は "(ALL : ALL)" のような行を出す。
 case "$granted" in
   *"(ALL"*|*"(root"*)
     echo "FATAL: runner has a Runas grant beyond the three agent accounts" >&2
@@ -160,13 +178,12 @@ case "$granted" in
     exit 1 ;;
 esac
 
-# ---- the critic's fence, from the critic's point of view ---------------
+# ---- critic の柵。critic の視点で確かめる ------------------------------
 #
-# Asserted rather than assumed, the same as 40-perms.sh does for the solver. The
-# critic's entire value is what it cannot see: one that reads the plan reports
-# that every criterion is met, and one that reads tests/ reports that the tests
-# pass. Both are true and both are worthless. So the ignorance is checked here,
-# where breaking it would be silent.
+# 40-perms.sh が solver について行うのと同じく、前提にせず確かめる。critic の
+# 価値はすべて、見えないものにある。計画を読む critic は全基準を満たしていると
+# 報告し、tests/ を読む critic はテストが通ると報告する。どちらも真で、どちらも
+# 無価値だ。だから、破れても誰も気づかないこの無知を、ここで確かめる。
 fail=0
 c_can()    { if sudo -u critic "$@" >/dev/null 2>&1; then :; else echo "FAIL: critic should be able to: $*"; fail=1; fi; }
 c_cannot() { if sudo -u critic "$@" >/dev/null 2>&1; then echo "FAIL: critic should NOT be able to: $*"; fail=1; fi; }
@@ -174,21 +191,21 @@ c_cannot() { if sudo -u critic "$@" >/dev/null 2>&1; then echo "FAIL: critic sho
 c_can    test -r /srv/loop/critic/brief
 c_can    test -w /srv/loop/critic/out
 
-# The work it is judging.
-c_cannot ls /srv/loop/project/plan          # the criteria it would otherwise grade against
-c_cannot ls /srv/loop/project/tests         # the tests that already passed
-c_cannot ls /srv/loop/project/.git          # history, which contains both
-c_cannot ls /srv/loop/planner/out           # the proposal being written
-c_cannot ls /srv/loop/brief                 # what the solver was told
-# The requirements reach it only through a brief the runner composed. Reading
-# the inbox directly would let a critique run against an input nobody handed it.
+# 判定する対象の作業。
+c_cannot ls /srv/loop/project/plan          # 見れば判定の拠り所にしてしまう基準
+c_cannot ls /srv/loop/project/tests         # すでに通ったテスト
+c_cannot ls /srv/loop/project/.git          # 両方を含む履歴
+c_cannot ls /srv/loop/planner/out           # 書かれている最中の提案
+c_cannot ls /srv/loop/brief                 # solver に伝えた内容
+# 要件は、runner が組み立てたブリーフを通してだけ届く。受け渡し口を直接読めると、
+# 誰も渡していない入力に対して批評が走りうる。
 c_cannot ls /srv/loop/human/in
-# Other accounts' credentials and homes.
+# ほかのアカウントの資格情報とホーム。
 c_cannot test -r /etc/loop/planner.env
 c_cannot ls /home/runner
 c_cannot ls /home/planner
 c_cannot ls /home/solver
-# It reads its brief; it does not get to write one for itself.
+# ブリーフは読むもので、自分で書くものではない。
 c_cannot test -w /srv/loop/critic/brief
 
 if [ "$fail" -ne 0 ]; then
@@ -225,7 +242,7 @@ if [ "$fail" -ne 0 ]; then
   exit 1
 fi
 
-# Report what is still missing, per account, rather than a bare "ok".
+# 単に "ok" と言わず、まだ足りないものをアカウントごとに報告する。
 pending=""
 for who in solver planner critic; do
   if ! grep -qE '^(CLAUDE_CODE_OAUTH_TOKEN|ANTHROPIC_API_KEY_CONSOLE)=.+' \

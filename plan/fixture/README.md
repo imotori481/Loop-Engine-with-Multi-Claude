@@ -1,23 +1,21 @@
-# The fixture plan
+# 見本の計画
 
-Not the project. This is the three-step plan (`normalize` -> `tokenize` ->
-`token_counts`) that was used to build and prove the runner: contract hand-off
-between steps, RED_GATE R1..R5, FREEZE, `run --all`, the escalation cap, and the
-planner's proposal guard were all first exercised against it.
+プロジェクトそのものではない。ランナーを作り、動くことを確かめるのに使った3ステップの計画
+（`normalize` -> `tokenize` -> `token_counts`）である。ステップ間の契約の受け渡し、RED_GATE の
+R1〜R5、FREEZE、`run --all`、エスカレーションの上限、プランナーの提案の検査は、どれも最初に
+この計画で動かした。
 
-All three steps went green on the real sandbox. It is kept because it is the
-only plan whose expected behaviour is fully known, which makes it the thing to
-re-run when the runner changes.
+3ステップとも、実際のサンドボックスで緑になった。期待される振る舞いが完全に分かっている
+唯一の計画なので残してある。ランナーを変えたときに流し直す対象になる。
 
-The live plan is no longer seeded from this repository. It is generated inside
-the distro by `plan bootstrap` from the requirements the human writes, and lives
-at `/srv/loop/project/plan/`. The working tree that produced this fixture is
-archived in the distro at `/srv/loop/project.fixture`.
+実際に回す計画は、このリポジトリから置くものではない。人間が書いた要件から、ディストロの中で
+`plan bootstrap` が作り、`/srv/loop/project/plan/` に置かれる。この見本を作った作業ツリーは、
+ディストロの `/srv/loop/project.fixture` に退避してある。
 
-Note it also predates L13 (no `skeleton` step, so `validate` now reports two L13
-violations against it) and satisfies L14 as written. Kept as it was: it is a
-record of a run that happened, not a plan to re-run as-is.
+この計画は L13 より前に書かれた（`skeleton` のステップが無いので、いまの `validate` は
+L13 違反を2件報告する）。L14 は書かれたままで満たしている。手を加えずに残してある。
+これは実際に走った記録であって、そのまま流し直すための計画ではない。
 
-Note it predates linter rule L12: `files_write` here is `src/*.py` at the top of
-`src/`, which is still valid, but the imports use the old `from src.x import y`
-form from before `conftest.py` put `src/` on `sys.path`.
+リンタ規則 L12 よりも前に書かれた。`files_write` は `src/` 直下の `src/*.py` で、これは
+いまも有効だ。ただし import は、`conftest.py` が `src/` を `sys.path` に載せる前の
+`from src.x import y` の形のままになっている。

@@ -13,31 +13,30 @@ RUNNER_SPEC.md の実行環境（§1）を再現するための手順とスク�
 
 | | |
 |---|---|
-| ディストロ | WSL2 `Ubuntu-24.04`（Ubuntu 24.04.1 LTS / systemd 有効） |
-| CPU / RAM | `.wslconfig` で 6 プロセッサ / 8GB / swap 4GB（ホストは 8C8T / 16GB） |
+| ディストロ | WSL2 `Ubuntu-24.04`（systemd 有効）。**普段使いのディストロとは別に作る** |
+| CPU / RAM | `.wslconfig` で配分する（例: 6 プロセッサ / 8GB / swap 4GB） |
 | ディスク | ext4 on VHDX（`sparseVhd=true`） |
 | ネットワーク | `networkingMode=NAT` + `localhostForwarding=true` |
 | SSH | ディストロ内 sshd が **2222 番で listen**。Windows からは `127.0.0.1:2222` |
 | Windows ドライブ | **マウントしない**（`automount enabled=false`） |
 | Windows 実行ファイル | **起動不可**（`interop enabled=false`） |
-| WSLg | **無効**（`.wslconfig` `guiApplications=false`。2026-08-17 適用・反映確認済み。§3-8） |
+| WSLg | **無効**（`.wslconfig` `guiApplications=false`。§3-8） |
+| このリポジトリ | 箱の中の `/opt/loop-engine` にクローンする。スクリプトはそこから実行する |
 
 アカウント:
 
 | ユーザー | uid | sudo | SSH | 用途 |
 |---|---|---|---|---|
-| 保守用（既定ユーザー） | 1000 | あり | 鍵のみ | プロビジョニングと保守。VS Code Remote-SSH はここに繋ぐ |
-| `runner` | 1001 | **なし** | 鍵のみ | ループの実行主体。ホストからの git push を受ける |
-| `solver` | 1002 | **なし** | **不可**（`AllowUsers` に載せない + `DenyUsers`） | 実装を書くだけ |
-| `planner` | 1003 | **なし** | **不可** | 受け入れ基準を書く。コードには触れない（BOOTSTRAP 1-1） |
-| `critic` | 1004 | **なし** | **不可** | 計画の欠陥を指摘する。**計画もテストも読めない**（2026-09-13 追加） |
+| 保守ユーザー（既定ユーザー） | 1000 | あり | 鍵のみ | プロビジョニングと保守。VS Code Remote-SSH はここに繋ぐ |
+| `runner` | 1001 | **なし** | 鍵のみ | ループの実行主体。ホストからの git pull を受ける |
+| `solver` | 1002 | **なし** | **不可**（`AllowUsers` に載せない + `DenyUsers`） | 実装を書く Claude Code。ファイルの読み書きだけを許す |
+| `planner` | 1003 | **なし** | **不可** | 受け入れ基準を書く Claude Code。コードには触れない（BOOTSTRAP 1-1） |
+| `critic` | 1004 | **なし** | **不可** | 計画の欠陥を指摘する Claude Code。**計画もテストも読めない** |
 
-保守用アカウントは VirtualBox 構成での `admin` に相当する。WSL2 のディストロには
-既定ユーザーが必ず1人いるので、それを保守用として使い、ループ用の4人を足す形にした。
-
+保守ユーザーは、ディストロを作るときに決めた既定ユーザーをそのまま使う。
 **名前はこのリポジトリでは決め打ちにしていない。** スクリプトは `ADMIN_USER` で受け取り、
-既定は `maint`。この機械の実際の既定ユーザーは `yoshito` なので、手で叩くときは
-`ADMIN_USER=yoshito` を渡す。**`maint` を前提に書くと落ちる**（2026-09-13 に踏んだ）。
+既定は `maint`。実際の名前と違うときは `ADMIN_USER=<保守ユーザー>` を必ず渡す。
+渡さないと `10-users.sh` が「`maint` が無い」で止まる。
 
 `critic` の uid が分かれている理由は、他の3人とは毛色が違う。solver と planner は
 「書けるものを制限する」ための分離だが、critic は**読めるものを制限する**ための分離で、
@@ -48,46 +47,62 @@ RUNNER_SPEC.md の実行環境（§1）を再現するための手順とスク�
 
 | もの | 場所 | 役割 |
 |---|---|---|
-| `loop-dev` ランチャ | `C:\Users\yoshi\bin\loop-dev.cmd`（原本は `host/loop-dev.cmd`） | ディストロ起動 → sshd 待機 → VS Code Remote-SSH 起動 |
-| SSH 設定 | `C:\Users\yoshi\.ssh\config` の `Host loop-dev` / `Host loop-runner` | `127.0.0.1:2222` / 鍵のみ |
+| `loop-dev` ランチャ | `C:\Users\<you>\bin\loop-dev.cmd`（原本は `host/loop-dev.cmd`） | ディストロ起動 → sshd 待機 → VS Code Remote-SSH 起動 |
+| SSH 設定 | `C:\Users\<you>\.ssh\config` の `Host loop-dev` / `Host loop-runner` | `127.0.0.1:2222` / 鍵のみ |
 | keepalive タスク | タスクスケジューラ `WSL-keepalive-Ubuntu-24-04` | **これが無いと VM がアイドルで落ちる**（§3-1） |
-| リソース設定 | `C:\Users\yoshi\.wslconfig` | メモリ/CPU/NAT/sparseVhd/WSLg |
+| リソース設定 | `C:\Users\<you>\.wslconfig` | メモリ/CPU/NAT/sparseVhd/WSLg |
 
 ---
 
 ## 2. 作り直す手順
 
-ホスト側は PowerShell、ディストロ内は bash。**`.ps1` を書き起こさずインライン実行すること**（§3-6）。
+各手順の見出しに、打つ場所を書いてある。
 
-### 2-1. 鍵を作る（**Bash で**。理由は §3-5）
+| 場所 | 何か |
+|---|---|
+| **Git Bash** | Windows 側の Git for Windows に付いてくる bash。鍵の生成と ssh に使う |
+| **PowerShell** | Windows 側の PowerShell。`wsl` コマンドと Windows の設定に使う |
+| **箱** | ディストロの中の bash。保守ユーザーでログインして打つ |
 
-保守用（`maint`）とループ用（`runner`）で鍵を分ける。前者は人が対話で使い、
-後者はホストの作業クローンから git push するためだけに使う。
+`wsl` コマンドは箱の中には無い。箱の中で `wsl --shutdown` を打っても何も起きない。
+
+### 2-1. 鍵を作る（Git Bash）
+
+保守ユーザー用とループ用（`runner`）で鍵を分ける。前者は人が対話で使い、
+後者はホストが `repo.git` を git pull するためだけに使う。
+PowerShell ではなく Git Bash で作る（理由は §3-5）。
 
 ```bash
-ssh-keygen -t ed25519 -f /c/Users/<you>/.ssh/id_ed25519         -N '' -C loop-dev
-ssh-keygen -t ed25519 -f /c/Users/<you>/.ssh/loop-runner_ed25519 -N '' -C loop-runner
+ssh-keygen -t ed25519 -f ~/.ssh/loop-dev    -N '' -C loop-dev
+ssh-keygen -t ed25519 -f ~/.ssh/loop-runner -N '' -C loop-runner
 # 必ず検証する。空パスフレーズで復号できなければ失敗している
-ssh-keygen -y -f /c/Users/<you>/.ssh/id_ed25519          -P ''
-ssh-keygen -y -f /c/Users/<you>/.ssh/loop-runner_ed25519 -P ''
+ssh-keygen -y -f ~/.ssh/loop-dev    -P ''
+ssh-keygen -y -f ~/.ssh/loop-runner -P ''
 ```
 
-### 2-2. ディストロを用意する
+鍵の名前は `loop-dev` と `loop-runner` を使う。以降の手順と `host/README.md` の
+`~/.ssh/config` はこの名前を前提にしている。
+
+### 2-2. ディストロを作る（PowerShell → 箱）
+
+**PowerShell**:
 
 ```powershell
-wsl --install -d Ubuntu-24.04     # 既定ユーザー(maint)を対話で作る
+wsl --install -d Ubuntu-24.04     # 既定ユーザー（保守ユーザー）を対話で作る
 wsl -l -v                         # Ubuntu-24.04 / Running / 2 であることを確認
 ```
 
-`/etc/wsl.conf` を次の内容にする（`[boot] systemd=true` が無いと `systemctl` が使えず、
-sshd の管理も 50-lockdown.sh の検証も成立しない）:
+**箱**: `/etc/wsl.conf` を次の内容にする。`<保守ユーザー>` は実際の名前に置き換える
+（`<` と `>` も消す）。`[boot] systemd=true` が無いと `systemctl` が使えず、
+sshd の管理も 50-lockdown.sh の検証も成立しない。
 
-```ini
+```bash
+sudo tee /etc/wsl.conf >/dev/null <<'EOF'
 [boot]
 systemd=true
 
 [user]
-default=maint
+default=<保守ユーザー>
 
 [automount]
 enabled=false
@@ -95,28 +110,40 @@ enabled=false
 [interop]
 enabled=false
 appendWindowsPath=false
+EOF
 ```
 
-`C:\Users\yoshi\.wslconfig` はリポジトリ外にあるが、次の3つは隔離の前提:
+**PowerShell**: `.wslconfig` を開く。ファイルが無ければメモ帳が新しく作る。
+
+```powershell
+notepad "$env:USERPROFILE\.wslconfig"
+```
+
+次の3つは隔離の前提:
 
 ```ini
 [wsl2]
-localhostForwarding=true    # 127.0.0.1:2222 で sshd に届く
-networkingMode=NAT          # mirrored にしない
-guiApplications=false       # WSLg を切る(§3-8)
+localhostForwarding=true
+networkingMode=NAT
+guiApplications=false
 ```
+
+- `localhostForwarding=true`: `127.0.0.1:2222` で sshd に届く
+- `networkingMode=NAT`: `mirrored` だとディストロから Windows の localhost サービスに到達できてしまう
+- `guiApplications=false`: 既定は true で、切らないと `/mnt/wslg` 経由の経路が開いたままになる（§3-8）
 
 残り（`memory` / `processors` / `swap` / `sparseVhd` / `autoMemoryReclaim`）は
 性能配分の話で、隔離には関わらない。`host/README.md` を参照。
 
-`mirrored` だとディストロから Windows の localhost サービスに到達できてしまい、
-隔離が緩くなる。`guiApplications` は既定 true で、切らないと `/mnt/wslg` 経由の
-経路が開いたままになる。
-
 **`/etc/wsl.conf` と `.wslconfig` の変更は `wsl --terminate` では反映されない。**
-`wsl --shutdown` が必要で、それをやったら keepalive タスクを再起動する（§3-2）。
+PowerShell で `wsl --shutdown` を打ち、keepalive タスクを再起動する（§3-2）。
 
-### 2-3. sshd を 2222 で立てる
+```powershell
+wsl --shutdown
+wsl -d Ubuntu-24.04 -- cat /etc/wsl.conf    # 起動し直し、中身を確かめる
+```
+
+### 2-3. sshd を 2222 で立てる（箱）
 
 ```bash
 sudo apt-get update && sudo apt-get install -y openssh-server
@@ -127,54 +154,102 @@ PermitRootLogin no
 PasswordAuthentication no
 KbdInteractiveAuthentication no
 PubkeyAuthentication yes
-AllowUsers maint
+AllowUsers <保守ユーザー>
 X11Forwarding no
 EOF
 sudo systemctl enable --now ssh
 ```
 
-`maint` の `~/.ssh/authorized_keys` に `id_ed25519.pub` を入れる。
-ここで `AllowUsers maint` だけになるが、`runner` は 50-lockdown.sh が
+ここでは `AllowUsers` が保守ユーザーだけになる。`runner` は 50-lockdown.sh が
 `00-loop.conf` 側で足す（**足す順番に意味がある。§3-4**）。
 
 22 ではなく 2222 を使うのは、Windows 側の 22 と衝突させないためと、
 `localhostForwarding` で `127.0.0.1:2222` にそのまま出るようにするため。
 
-### 2-4. Node と エージェント CLI
+### 2-4. 保守ユーザーの公開鍵を流し込む（PowerShell → Git Bash）
+
+箱には `/mnt/c` が無いので、公開鍵は `wsl` の標準入力で渡す。
+
+**PowerShell**:
+
+```powershell
+Get-Content "$env:USERPROFILE\.ssh\loop-dev.pub" |
+  wsl -d Ubuntu-24.04 -- sh -c 'mkdir -p ~/.ssh && chmod 700 ~/.ssh && cat >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys'
+```
+
+**Git Bash**: `host/README.md` の `~/.ssh/config` を書き、入れるか確かめる。
+
+```bash
+ssh loop-dev
+```
+
+config を書く前に確かめるなら、鍵を明示する。鍵の名前が既定の `id_ed25519` では
+ないので、`-i` を付けないと `Permission denied (publickey)` になる。
+
+```bash
+ssh -i ~/.ssh/loop-dev -p 2222 <保守ユーザー>@127.0.0.1
+```
+
+### 2-5. Node と Claude Code（箱）
 
 ```bash
 curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
 sudo apt-get install -y nodejs
-sudo npm i -g @anthropic-ai/claude-code @openai/codex   # 導入済みの構成に合わせる
+sudo npm i -g @anthropic-ai/claude-code
 ```
+
+Claude Code は apt のパッケージではない。`apt install claude` は通らない。
 
 **必ず `sudo npm i -g`（prefix が `/usr`）にすること。** ユーザーローカル prefix に入れて
 `.bashrc` で PATH を足す形にすると、Ubuntu の `.bashrc` が非対話シェルで早期 return する
-ため、SSH 経由の非対話実行やループから見えなくなる。nvm も同じ理由で使えない。
+ため、`sudo -u solver` で起動したエージェントから見えなくなる。nvm も同じ理由で使えない。
 
 interop を切ると Windows 側の `npm`/`node` が PATH から消えるので、
 ディストロ内にシステムワイドで入れる必要がある。
 
-### 2-5. スクリプトを送り込んでプロビジョニング
+Codex CLI（`@openai/codex`）は、計画の `solver_tiers` に `codex` を挙げるときだけ入れる。
 
-`/mnt/c` が無いので、ファイルの受け渡しは **scp** で行う。
+### 2-6. このリポジトリをクローンする（箱）
 
 ```bash
-ssh -p 2222 maint@127.0.0.1 'mkdir -p /tmp/loop-provision'
-scp -P 2222 provision/*.sh /c/Users/<you>/.ssh/loop-runner_ed25519.pub \
-    maint@127.0.0.1:/tmp/loop-provision/
-ssh -p 2222 maint@127.0.0.1 \
-    "cd /tmp/loop-provision && sed -i 's/\r\$//' *.sh && sudo bash provision.sh"
+sudo git clone -b develop <このリポジトリの https URL> /opt/loop-engine
 ```
 
-最後の行が非対話で通るのは、WSL の既定ユーザーに `NOPASSWD` の sudoers
-（`/etc/sudoers.d/90-maint`）が入っているから。VirtualBox 構成でパスワードを
-`sudo -S` に流し込んでいたのは不要になった。**`maint` は実質 root** なので、
-ループの三者に含めないこと（RUNNER_SPEC §0-1）。
+箱には GitHub の鍵を置かないので、https で取る。改行コードは `.gitattributes` で LF に
+なるので変換は要らない。スクリプトの更新は pull で取り込む:
+
+```bash
+sudo git -C /opt/loop-engine pull
+```
+
+### 2-7. runner の公開鍵を流し込む（PowerShell）
+
+```powershell
+Get-Content "$env:USERPROFILE\.ssh\loop-runner.pub" |
+  wsl -d Ubuntu-24.04 -- sh -c 'mkdir -p /tmp/loop-provision && cat > /tmp/loop-provision/loop-runner_ed25519.pub'
+```
+
+**箱の中での名前は `loop-runner_ed25519.pub` で固定。** `15-authkeys.sh` がこの名前を
+決め打ちで読む。Windows 側の鍵の名前とは関係ない。無ければ
+`FATAL: /tmp/loop-provision/loop-runner_ed25519.pub not found` で止まる。
+
+`/tmp` は VM の再起動で消える。最初のプロビジョニングの直前に流し込む。2回目以降は、
+流し込んだ鍵が無くても、runner にすでに入っている鍵をそのまま使う。鍵を替えるときだけ
+流し込み直す。
+
+### 2-8. プロビジョニング（箱）
+
+```bash
+cd /tmp && sudo ADMIN_USER=<保守ユーザー> bash /opt/loop-engine/provision/provision.sh
+```
+
+`cd /tmp` は省かない（§3-14）。何度流しても同じ状態になるので、スクリプトを
+pull したあとも同じ行を流す。
 
 `05-isolation.sh` が WSL 隔離（Windows パス非マウント、WSLg、systemd、NAT）を、
-`35-node.sh` が Node 側の凍結を、`40-perms.sh` が solver 視点の権限モデルを assert する。
-1つでも落ちたら異常終了する。`05-` を最初に走らせるのは、隔離が効いていないディストロには
+`35-node.sh` が Node 側の凍結を、`40-perms.sh` が solver 視点の権限モデルを、
+`45-agent-invoke.sh` が資格情報の柵を assert する。1つでも落ちたら異常終了する。
+`05-` を最初に走らせるのは、隔離が効いていないディストロには
 **プロビジョニングする意味が無い**（以降の全ステップが成功しつつ何も意味しなくなる）ため。
 
 `35-node.sh` は vitest と happy-dom を `/srv/loop/node` に入れて凍結し、
@@ -189,7 +264,90 @@ sudo -u runner /srv/loop/bin/smoke-dom
 `expected 0 to be greater than 0`。**両方向を見るのが要点**で、何でも通す関門は
 働いている関門と見分けがつかない。
 
-### 2-6. スナップショット
+`35-node.sh` は最後に `smoke-page` を流す。開発サーバ（Vite）で `index.html` を開いたとき、
+`src/main.ts` の `start` まで届くことを確かめる。計画には開発サーバの応答を確かめる
+条件を書かせないので、要件の「開発サーバで開ける」はここで確かめる。
+
+```bash
+sudo -u runner /srv/loop/bin/smoke-page
+```
+
+Vite はインラインのモジュールスクリプトを `/index.html?html-proxy&index=0.js` に切り出し、
+変換後の HTML には `/src/main.ts` が現れない。だから見るのは HTML ではなく、切り出された
+モジュールの中身だ。キャッシュは作業場所に書き、凍結したツールチェーンには書かない。
+
+### 2-9. 資格情報を入れる（箱）
+
+3役はそれぞれ別のファイルから資格情報を読む。各ファイルは、その役の uid だけが読める
+（`root:<役> 640`）。
+
+| 役 | ファイル |
+|---|---|
+| solver | `/etc/loop/solver.env` |
+| planner | `/etc/loop/planner.env` |
+| critic | `/etc/loop/critic.env` |
+
+役ごとにトークンを作る。表示されたトークンを控えてから、ファイルを開いて貼る。
+
+```bash
+sudo -u solver -H claude setup-token
+sudo nano /etc/loop/solver.env
+```
+
+埋める行:
+
+| 行 | 値 |
+|---|---|
+| `CLAUDE_CODE_OAUTH_TOKEN=` | `claude setup-token` が表示したトークン |
+| `LOOP_MODEL=` | 使うモデル。空ならアカウントの既定。例: planner は `claude-opus-5-5`、solver と critic は `claude-sonnet-5` |
+| `LOOP_EFFORT=` | `low` / `medium` / `high` / `xhigh` / `max`。空なら既定 |
+
+planner と critic も同じ手順で埋める。3役とも同じサブスクリプションの利用枠を使う。
+トークンが空の役があると、プロビジョニングの最後に `still unauthenticated` として名前が出る。
+
+配管を確かめる:
+
+```bash
+sudo -u runner /srv/loop/bin/smoke-solver
+sudo -u runner /srv/loop/bin/smoke-pytest
+sudo -u runner /srv/loop/bin/smoke-planner
+sudo -u runner /srv/loop/bin/smoke-critic
+```
+
+`smoke-pytest` は、ソルバーが pytest を実行**できない**ことを確かめる。
+
+### 2-10. 走らせる（箱）
+
+要件を人間の受け渡し口に置き、計画を起こして回す。
+
+```bash
+sudo install -o root -g humanw -m 644 <要件>.md /srv/loop/human/in/REQUIREMENTS.md
+L="sudo -u runner python3 -u /srv/loop/runner/loop.py"
+$L plan bootstrap                  # TypeScript なら --language typescript
+$L plan refine                     # critic の指摘をプランナーへ戻す
+$L plan apply
+$L run --all 2>&1 | sudo -u runner tee -a /srv/loop/logs/<名前>.log
+```
+
+**走行ログは `/srv/loop/logs/` に書く。** `/srv/loop` の直下には runner も保守ユーザーも
+書けない。`tee` も `sudo -u runner` で起こす ── パイプの先は保守ユーザーとして動くので、
+そのままでは `Permission denied` になる。
+
+### 2-11. run を退避する（箱）
+
+次の題材に移る前に、今の run を別名に移す。`/srv/loop` は root 所有なので、
+改名は保守ユーザーが `sudo` で行う。runner にはできない。
+
+```bash
+sudo mv /srv/loop/project  /srv/loop/project.<名前>
+sudo mv /srv/loop/repo.git /srv/loop/repo.<名前>.git
+cd /tmp && sudo ADMIN_USER=<保守ユーザー> bash /opt/loop-engine/provision/provision.sh
+```
+
+プロビジョニングが空の `project` と `repo.git` を作り直す。ホストの `loop-pull.cmd` は
+`repo.<名前>.git` も含めて全部引く（`host/README.md`）。
+
+### 2-12. スナップショット（PowerShell）
 
 VirtualBox のスナップショットに相当するのは `wsl --export`。
 
@@ -211,7 +369,7 @@ export は数 GB になるのでリポジトリには入れない（`.gitignore`
 WSL2 は約60秒アイドルすると **VM ごと停止する**。sshd も一緒に落ちる。
 `WSL-keepalive-Ubuntu-24-04`（ログオン時に `wsl -d Ubuntu-24.04 -u root --exec /usr/bin/sleep infinity`）
 がこれを抑えている。**起動は `host/wsl-keepalive.vbs` 経由**で、窓を出さない
-（2026-08-19 に変更。定義と理由は `host/README.md`）。
+（定義と理由は `host/README.md`）。
 
 実測で確認した事実（2026-08-17）:
 
@@ -221,12 +379,10 @@ WSL2 は約60秒アイドルすると **VM ごと停止する**。sshd も一緒
   「リモートを開いています」で止まる、が実際に起きた）
 - デタッチしたバックグラウンドプロセスも VM を保持しない
 
-タスクを作り直す手順は `host/README.md` に移した。**`schtasks /create` では作らないこと**
-── `/ri 0 /du 0000:00` は繰り返し間隔を消すだけで、以前ここに書いてあった
-「実行時間無制限」は**誤り**だった。`ExecutionTimeLimit` の既定は72時間で、
-それを外せるのは `Register-ScheduledTask` の側だけ。
+タスクを作る手順は `host/README.md` にある。**`schtasks /create` では作らないこと**
+── `ExecutionTimeLimit` の既定は72時間で、それを外せるのは `Register-ScheduledTask` の側だけ。
 
-さらに、**タスクから `wsl.exe` を直接起動すると窓が出る**。中身は `sleep infinity` で
+**タスクから `wsl.exe` を直接起動すると窓が出る**。中身は `sleep infinity` で
 何も映らないので空のターミナルに見え、閉じると VM ごと落ちる。`.vbs` 越しに起動して
 窓を消してある。
 
@@ -237,9 +393,9 @@ WSL2 は約60秒アイドルすると **VM ごと停止する**。sshd も一緒
 ### 3-2. `wsl --shutdown` を使うと keepalive が死ぬ
 
 keepalive プロセスは `wsl --shutdown` で `STATUS_CONTROL_C_EXIT` で落ちる。
-タスクは onlogon なので、以前は自動では戻らなかった。いまは `RestartCount 3` を
-付けてあるので**1分後に自力で戻る**が、待たずに戻すなら明示的に再実行する。
-いずれにせよ **`wsl --shutdown` は使わない**（VM が落ちれば走行中のステップは死ぬ）:
+タスクには `RestartCount 3` を付けてあるので**1分後に自力で戻る**が、
+待たずに戻すなら明示的に再実行する。**走行中は `wsl --shutdown` を使わない**
+（VM が落ちれば走行中のステップは死ぬ）:
 
 ```powershell
 schtasks /run /tn "WSL-keepalive-Ubuntu-24-04"
@@ -253,7 +409,6 @@ Ubuntu 24.04 の WSL イメージには `iptables` も `nft` も無い。
 `60-egress.sh` は自分で `apt-get install -y iptables` する（nft バックエンドで動く）。
 
 さらに **WSL2 の VM はアイドルで落ちるので、iptables ルールは頻繁に消える。**
-VirtualBox 構成では「再起動まで持てばよい」で済んだが、ここでは
 `iptables-persistent` による復元が実質必須。`60-egress.sh` の末尾を参照。
 
 ### 3-4. sshd の drop-in は「先に読んだ値が勝つ」。ただし `AllowUsers` は例外
@@ -266,33 +421,30 @@ sshd は各キーワードについて **最初に見た値**を採用する。`
 そして `sshd -T` で**実効値を検証する**。効いていなければ異常終了する。
 
 **`AllowUsers` / `DenyUsers` はリスト値で、drop-in をまたいで累積する。**
-`10-loop-dev.conf` の `AllowUsers maint` と `00-loop.conf` の
-`AllowUsers maint runner` は、順序に関係なく合算されて `{maint, runner}` になる。
+`10-loop-dev.conf` の `AllowUsers <保守ユーザー>` と `00-loop.conf` の
+`AllowUsers <保守ユーザー> runner` は、順序に関係なく合算される。
 帰結として重要なのは逆方向で、**後から書く drop-in は許可を広げることしかできない。**
 誰かを外すには、その名前を書いているファイル自体を直す必要がある。
 
 さらに `sshd -T` の出力形式が罠になる。**1ユーザーにつき1行**で出る:
 
-```
-allowusers maint
+```text
+allowusers admin
 allowusers runner
-allowusers maint      ← 2つの drop-in に書かれているので重複して出る
+allowusers admin      ← 2つの drop-in に書かれているので重複して出る
 denyusers solver
 ```
 
 検証スクリプトで「最後の行」や「最初の行」だけを見ると誤判定する
-（2026-08-17、実際に `50-lockdown.sh` がこれで正しい設定を FAIL と判定した）。
+（実際に `50-lockdown.sh` がこれで正しい設定を FAIL と判定した）。
 全行を集めて集合として扱うこと。
-
-（VirtualBox 構成では単一値キーワードのほうの罠を cloud-init の
-`50-cloud-init.conf` で踏んだ。書くファイル名は変わっても、原因と対処は同じ。）
 
 ### 3-5. PowerShell から `ssh-keygen -N ''` は空パスフレーズにならない
 
 `-N '""'` も `--%` 経由の `-N ""` も、**空文字ではないパスフレーズ**として渡る。
 生成自体は成功するので気づかない。症状は接続時の
 
-```
+```text
 debug1: Server accepts key: ...
 Permission denied (publickey,password).
 ```
@@ -301,7 +453,7 @@ Permission denied (publickey,password).
 **サーバは鍵を受理していて、クライアントが署名できずに切っている。**
 `authorized_keys` を疑って時間を溶かす典型。
 
-→ 鍵の生成は Bash で行い、`ssh-keygen -y -f <key> -P ''` で必ず検証する。
+→ 鍵の生成は Git Bash で行い、`ssh-keygen -y -f <key> -P ''` で必ず検証する。
 
 ### 3-6. `.ps1` に日本語コメントを書くと壊れる
 
@@ -318,20 +470,19 @@ PowerShell 5.1 は BOM 無し UTF-8 を ANSI として読む。日本語文字�
 Git Bash 経由で `wsl -d Ubuntu-24.04 --exec /bin/true` を実行すると、
 MSYS が `/bin/true` を Windows パスに変換して失敗する:
 
-```
+```text
 execvpe(C:/Program Files/Git/usr/bin/bash) failed: No such file or directory
 ```
 
-**「`/usr/bin/...` の形を使えばよい」は誤りだった**（2026-09-13 実測）。変換されるのは
-プログラム名だけでなく**引数の絶対パスも**で、`/usr/bin/bash /tmp/x.sh` は両方やられる。
-2回踏んでから分かった。正しくは変換そのものを止める:
+変換されるのはプログラム名だけでなく**引数の絶対パスも**で、
+`/usr/bin/bash /tmp/x.sh` は両方やられる。変換そのものを止める:
 
 ```bash
 MSYS_NO_PATHCONV=1 wsl -d Ubuntu-24.04 -u root bash /tmp/x.sh
 ```
 
 `loop-dev.cmd` が `/usr/bin/...` で通っているのは、cmd から呼ばれていて MSYS を
-経由しないため。Git Bash から叩くときは上の形を使う。
+経由しないため。`wsl` を使う手順を PowerShell に寄せているのもこのため。
 
 ### 3-8. WSLg が Windows 側への通り道を開けたままにする
 
@@ -339,7 +490,7 @@ MSYS_NO_PATHCONV=1 wsl -d Ubuntu-24.04 -u root bash /tmp/x.sh
 `/mnt/wslg` に Windows 側で動くコンポジタと PulseAudio サーバへのソケットがあり、
 パーミッションは誰でも読める:
 
-```
+```text
 drwxrwxrwx  .X11-unix
 srwxrwxrwx  PulseServer / PulseAudioRDPSink / PulseAudioRDPSource
 ```
@@ -352,9 +503,7 @@ srwxrwxrwx  PulseServer / PulseAudioRDPSink / PulseAudioRDPSource
 guiApplications=false
 ```
 
-反映には `wsl --shutdown` が必要（→ keepalive 再起動、§3-2）。
-
-2026-08-17 に適用済み。反映後の状態（確認済み）:
+反映には `wsl --shutdown` が必要（→ keepalive 再起動、§3-2）。反映後の状態:
 
 - `/mnt/wslg` 配下のソケットが**全て消える**（`find -type s` が 0 件）
 - `/mnt/wslg/versions.txt` と `/doc` の overlay マウントも消える
@@ -372,10 +521,10 @@ guiApplications=false
 登録されたまま（`enabled` / `interpreter /init` / `magic 4d5a`）。
 **したがってハンドラの有無は隔離の証拠にならない。**
 
-実際に効いていないことは実行して初めて分かる。2026-08-17 に root で `C:` を
+実際に効いていないことは実行して初めて分かる。root で `C:` を
 drvfs マウントして `cmd.exe` を叩いた結果:
 
-```
+```text
 rc=1  WSL ERROR: UtilAcceptVsock:273: accept4 failed 110
 ```
 
@@ -419,9 +568,10 @@ runner が書いたブリーフのグループが `runner` になり、`solver` 
 
 ### 3-13. Codex の `apply_patch` はワークスペースのルートを経由して書く
 
-`/srv/loop/project` が `755 runner:runner` だと、`src/` に権限があっても**全ての編集が失敗する**。
-しかもエラーは対象ファイル名で報告されるので `src/` の権限を疑わせる。
-`bubblewrap` が未導入だと、さらに手前の「サンドボックス構築の失敗」として出る。
+`solver_tiers` に `codex` を挙げたときの話。`/srv/loop/project` が `755 runner:runner` だと、
+`src/` に権限があっても**全ての編集が失敗する**。しかもエラーは対象ファイル名で
+報告されるので `src/` の権限を疑わせる。`bubblewrap` が未導入だと、さらに手前の
+「サンドボックス構築の失敗」として出る。
 
 → ルートを `3775`（setgid + **スティッキー**）にする。書けるだけでは穴で、
 unlink と rename は親ディレクトリの権限で決まるため `conftest.py` を差し替えられてしまう
@@ -429,12 +579,19 @@ unlink と rename は親ディレクトリの権限で決まるため `conftest.
 `40-perms.sh` が「作れること」と「消せないこと」を両方 assert する。
 併せて `apt install bubblewrap` を入れる（バンドル版へのフォールバックは不安定）。
 
-### 3-14. `sudo -u runner` を `~/provision` を cwd にしたまま呼ぶと落ちる
+### 3-14. プロビジョニングを 0700 のホームから走らせない
 
-`/home/maint` は 700 なので、runner が cwd を stat できず
-`fatal: failed to stat '/home/maint/provision'` になる。git を呼ぶ行だけが死ぬ。
+保守ユーザーのホームを cwd にしたまま流すと、内部の `sudo -u runner git ...` が
 
-→ プロビジョニングスクリプトは中立なディレクトリから実行する（`cd /tmp`）。
+```text
+fatal: failed to stat '/home/<保守ユーザー>': Permission denied
+```
+
+で落ちる。**スクリプトの問題ではなく cwd の問題**で、`sudo` は呼び出し元の作業
+ディレクトリをそのまま渡し、`runner` は 0700 のホームを辿れない。
+`solver-run` の `cd /srv/loop/project` が存在する理由とまったく同じ形の失敗。
+
+→ `cd /tmp` してから流す（§2-8）。
 
 ### 3-15. `.pyc` は実行した uid の所有物になる
 
@@ -467,52 +624,23 @@ unlink と rename は親ディレクトリの権限で決まるため `conftest.
 → `cmd_reset` は reset の前に台帳を読み、後で書き戻す。
 追記専用の台帳が、よりによって失敗の記録だけを失うのは無いより悪い。
 
----
-
-### プロビジョニングを 0700 のホームから走らせない（2026-09-01）
-
-`20-layout.sh` を `~/provision` から実行すると、内部の `sudo -u runner git clone` が
-
-    fatal: failed to stat '/home/yoshito/provision': Permission denied
-
-で落ちる。**スクリプトの問題ではなく cwd の問題**で、`sudo` は呼び出し元の作業
-ディレクトリをそのまま渡し、`runner` は `/home/<maint>`（0700）を辿れない。
-`solver-run` の `cd /srv/loop/project` が存在する理由とまったく同じ形の失敗で、
-あちらは codex が `src/` に対してエラーを出すという原因から遠い場所に現れた。
-
-対処は cwd を中立な場所にするだけ:
-
-    cd /tmp && sudo bash ~/provision/20-layout.sh
-
-`45-agent-invoke.sh` と `70-local-solver.sh` は自分で `cd "$(dirname "$0")"` して
-相対パスの `bin/...` を読むので、こちらは provision ディレクトリから実行してよい
-（内部で他 uid に落ちないため）。
-
----
-
-### `tkinter` は別パッケージで、無いと import 時点で落ちる（2026-09-01）
+### 3-18. `tkinter` は別パッケージで、無いと import 時点で落ちる
 
 Debian 系では tkinter が標準で入らない。`python3-tk` が無いと `import tkinter` が
 `ModuleNotFoundError` になり、**テストがそれを間接的に import した時点で**
 アサーションに到達する前に落ちる。ソルバーからは、頼まれた内容と何の関係もない失敗が
-返り続けることになり、試行回数を全部そこで使う。GUI を含む題材の前に潰しておくこと
-（`30-python.sh` に入れてある）。
+返り続けることになり、試行回数を全部そこで使う。`30-python.sh` が入れる。
 
-    apt-get install -y python3-tk
+**それでもランナーは Tk の画面を検証できない。** `DISPLAY` は無いので、確かめられるのは
+GUI プログラムの**ロジック**だけ。画面を持つ題材は TypeScript（happy-dom）で書くか、
+テスト可能なコアと `Tk` に触る薄い殻を別のステップに割る。
+画面そのものの確認はホスト側の人間がやる（`host/dashboard` の予定レビュー）。
 
-**それでもランナーは GUI を検証できない。** WSLg（`/mnt/wslg`、`/tmp/.X11-unix`）は
-存在するが、`DISPLAY` は sshd 経由のセッションには渡らない。つまりランナーが確かめ
-られるのは GUI プログラムの**ロジック**だけで、画面そのものは確かめられない。これは
-欠陥ではなく分担で、画面の確認はホスト側の人間がやる（`host/dashboard` の予定レビュー）。
-したがって計画は、テスト可能なコアと `Tk` に触る薄い殻を別のステップに割ること。
-
----
-
-### 3-18. setgid のルートは、runner が作ったファイルまで solver に書かせる（2026-09-02）
+### 3-19. setgid のルートは、runner が作ったファイルまで solver に書かせる
 
 3-13 でルートを `3775`（setgid + スティッキー）にした。setgid には**もう一つの効果**が
-あり、そちらは見落とされていた ── **runner がルートに作ったファイルも group が
-`solverw` になる。** runner の umask は 002 なので `664` で落ち、solver が書ける。
+ある ── **runner がルートに作ったファイルも group が `solverw` になる。**
+runner の umask は 002 なので `664` で落ち、solver が書ける。
 
 ルートにあるのは作業物ではなく**防壁そのもの**である:
 
@@ -525,19 +653,11 @@ Debian 系では tkinter が標準で入らない。`python3-tk` が無いと `i
 **どれか1つでも書き換えられれば、FREEZE が見張っているファイルに一切触れずに
 FREEZE を無効化できる。**
 
-`conftest.py` が今日まで無事だったのは**偶然**で、`20-layout.sh` がルートを setgid に
-する `40-perms.sh` より先に走るというだけの理由。順番が入れ替われば穴が開く ──
-`plan/` が10ステップ分ずっと読める状態だったのと同じ事故の形。
-
-見つかったのは `35-node.sh` が `vitest.config.mjs` を書いたとき。**同じ手順で作った
-新しいファイルが、assert に引っかかって落ちた**（`FAIL: solver should NOT be able to:
-test -w .../vitest.config.mjs`）。3-13 の assert が効いていたので、書いた直後に露見した。
-
 → `40-perms.sh` がルート直下の runner 所有ファイルを `runner:runner 644` に揃え、
 `conftest.py` / `.gitignore` / `vitest.config.mjs` を solver が書けないことを assert する。
 各スクリプトは**自分が作ったファイルの mode を自分で設定する**（後続に閉じさせない）。
 
-### 3-19. Node の凍結は Python の凍結と同じ形では効かない（2026-09-02）
+### 3-20. Node の凍結は Python の凍結と同じ形では効かない
 
 Python は `sys.path` をランナーが握っているので、solver が何をどこに入れても
 テストは `.venv/bin/pytest` の環境でしか走らない。**Node は違う** ── モジュール解決が
@@ -546,7 +666,7 @@ Python は `sys.path` をランナーが握っているので、solver が何を
 
 塞いでいるのは `.gitignore` の書き方1つ:
 
-```
+```text
 /node_modules        ← ルートだけを無視する
 node_modules/        ← 全ての深さで無視する（これを書くと穴が開く）
 ```
@@ -556,27 +676,22 @@ node_modules/        ← 全ての深さで無視する（これを書くと穴�
 凍結済みのシンボリックリンクだけが無視され、`src/node_modules` は未追跡として現れる。
 `35-node.sh` は `node_modules/` 形式の行を見つけたら**進まずに落ちる**。
 
-実測（solver として `src/node_modules/evil/index.js` を作成）:
-
-```
-?? src/node_modules/evil/index.js        ← git に見える = allowlist 違反で停止
-.gitignore:5:/node_modules  node_modules ← ルートのみ無視
-```
-
 ツールチェーン本体を `/srv/loop/node` に置いて**プロジェクトの外**に出しているのは
 このため。中に置くと `node_modules/` を無視するしかなくなる。
+
+`35-node.sh` の `npm install` は `--legacy-peer-deps` を付ける。npm 10.9 は vitest の
+任意の peer 依存を解決する途中で `Cannot read properties of null (reading 'edgesOut')`
+で落ちる。
 
 ## 4. 未適用
 
 `70-local-solver.sh` は**ソルバーをローカルモデルに差し替えると決めたときだけ**当てる
 （`60-egress.sh` と同じ理由で `provision.sh` からは呼ばない）。手順と失敗表は
-`LOCAL_SOLVER.md`。sudoers は変更しない ── `solver-run` が持つ Runas(solver) の許可1つで
+`docs/LOCAL_SOLVER.md`。sudoers は変更しない ── `solver-run` が持つ Runas(solver) の許可1つで
 足り、バックエンドは同じ uid で exec されるため。
 
-`60-egress.sh` は**意図的に実行していない**（2026-08-18 判断）。
-
-当初は「これを当てて初めて環境凍結が成立する」と書いていたが、**それは誤りだった**。
-ネットワークを全開にしたまま測ったところ、4経路すべてが既に塞がっている:
+`60-egress.sh` は**意図的に実行していない**。ネットワークを全開にしたまま測ったところ、
+環境を変える4経路はすべて既に塞がっている:
 
 | 試みたこと | 結果 | 効いている機構 |
 |---|---|---|
@@ -588,12 +703,12 @@ node_modules/        ← 全ての深さで無視する（これを書くと穴�
 3つ目が要。**テストは必ず `.venv/bin/pytest` で走らせること** ── 素の `python3` に変えると
 user site が復活し、この防御だけが崩れる。
 
-そのうえで、egress 制限が買うのは環境凍結ではなく**持ち込みと持ち出し**の遮断であり、
+既定のソルバー（`solver-claude`）はコマンドを実行できないので、上の経路はそもそも
+試せない。egress 制限が買うのは環境凍結ではなく**持ち込みと持ち出し**の遮断であり、
 ループの前提条件ではない。当てるかどうかはその脅威をどう見るかで決める。
 
-**当てるなら IP 固定ではなくプロキシで作ること。** 観測したソルバーの宛先は
-`chatgpt.com` の1つだけだが（`api.openai.com` は使われない ── あれは API キー経路）、
-Cloudflare の後ろにあり複数アドレスに解決される。IP 固定は黙って陳腐化し、
+**当てるなら IP 固定ではなくプロキシで作ること。** ソルバーの宛先は Claude の API で、
+CDN の後ろにあり複数アドレスに解決される。IP 固定は黙って陳腐化し、
 WSL2 では VM が頻繁に止まるので規則の永続化が要る ──
 **永続化した固定 IP は時限爆弾**（ローテーション後、原因の分かりにくい停止として出る）。
 
@@ -607,16 +722,16 @@ sudo -u runner /srv/loop/bin/smoke-solver
 dmesg | grep LOOPOBS
 ```
 
-### 認証（2026-08-18 時点）
+### 認証
 
-- **`solver` = Codex CLI + ChatGPT サブスクリプション**。API キーは使わない。
-  `sudo -u solver -H codex login --device-auth`（ブラウザはホスト側でよい）。
-  **必ず `solver` として実行すること** ── 他アカウントでログインしても
-  `/home/<other>` が 700 なので solver からは読めない。認証情報が
-  `/home/solver/.codex` に入ることが、そのまま隔離になっている
-- **`planner` = Claude の API キー**。`/etc/loop/planner.env`（`root:planner 0640`）。
-  ベンダを分けているのは、基準を書く側と満たす側の相関した盲点を避けるためと、
-  片方の枠・認証情報の事故がもう片方を巻き込まないようにするため
+- **3役とも Claude のサブスクリプションのトークン**（`claude setup-token`）を使う。
+  置き場は `/etc/loop/<役>.env`（`root:<役> 640`）。手順は §2-9
+- 役ごとにファイルを分けるのは、ある役の資格情報が漏れても他の役の資格情報が渡らないようにするため。
+  `45-agent-invoke.sh` が「各役は自分のファイルだけを読める」ことを assert する
+- 3役は同じ利用枠を使う。上限に当たった呼び出しは、ランナーが待ってからやり直す
+- `ANTHROPIC_API_KEY_CONSOLE=` は予備。トークンが空のときだけ従量課金の API キーを使う
+- Codex バックエンドを使う場合、認証は `solver` 自身の ChatGPT ログインで、
+  `/home/solver/.codex`（0700）に入る: `sudo -u solver -H codex login --device-auth`
 
 ---
 
@@ -632,17 +747,14 @@ WSL2 でよいのは「人が張り付いている間だけ回す」用途に限
 ディストロ内の構成（`provision/` の 10〜60）は**そのまま持っていける**。
 変わるのはホスト側の起動・接続まわりと、スナップショットの取り方だけ。
 
-## 6. なぜ VirtualBox をやめたか
-
-当初は VirtualBox 7.x + Ubuntu Server 24.04 の無人インストールで作っていた
-（`c4374f4` まではその手順がこのファイルにあった）。捨てた理由:
+## 6. なぜ VirtualBox を使わないか
 
 **Hyper-V が有効な Windows ホストでは VirtualBox が使えない。**
 Hyper-V / WSL2 / Virtual Machine Platform / メモリ整合性 のいずれかが有効だと、
 VirtualBox は VT-x を直接使えず NEM モード（Hyper-V の API 経由）で動く。
 この状態で Linux ゲストは起動時に **2回に1回ハングした**:
 
-```
+```text
 nmi_backtrace_stall_check: CPU 1: NMIs are not reaching exc_nmi() handler
 last activity: 4294855847 jiffies ago
 ```
@@ -655,8 +767,6 @@ jiffies が 32bit ラップした異常値になるのはタイマー起因の�
 Hyper-V を無効化すれば VT-x に戻って安定するが、**WSL2 も Docker Desktop も動かなくなる**。
 すでに Hyper-V が動いているなら、そちらがネイティブなので WSL2 に寄せるほうが筋が良い。
 
-WSL2 に移して失ったもの・得たもの:
-
 | | VirtualBox | WSL2 |
 |---|---|---|
 | 起動の安定性 | 2回に1回ハング | 安定 |
@@ -665,11 +775,14 @@ WSL2 に移して失ったもの・得たもの:
 | スナップショット | `VBoxManage snapshot`（差分・軽い） | `wsl --export`（全体・数GB） |
 | ホストからの root | できない | **いつでもできる**（`wsl -u root`） |
 
-最後の行は重要で、脅威モデルが片方向になったことを意味する。守っているのは
+最後の行は重要で、脅威モデルが片方向であることを意味する。守っているのは
 「サンドボックスから Windows を守る」方向だけで、逆方向は守っていない。
-RUNNER_SPEC §0-1 の「プランナーはサンドボックスに入らない」は機構ではなく規律である
-（VirtualBox 構成でも規律だったが、WSL2 では踏み越えるコストがさらに低い）。
+RUNNER_SPEC §0-1 の「人間の作業環境はサンドボックスの中身に手を入れない」は機構ではなく規律である。
 
-VirtualBox 特有の落とし穴（標準テンプレートに sshd が無い / `ds=nocloud` のスキーム、
-インストール完了をポートで判定してはいけない）と `autoinstall_user_data` は、
-この構成では使わないので削除した。必要なら `c4374f4` から拾える。
+VirtualBox 構成の手順は `c4374f4` から拾える。
+
+## 更新履歴
+
+- 2026/09/26: 2回目以降のプロビジョニングで runner の公開鍵の流し込みを不要にした
+- 2026/09/26: 開発サーバで開けることを確かめる `smoke-page` を §2-8 に追加
+- 2026/09/26: 手順を、実行する場所の明記、鍵の名前 `loop-dev` / `loop-runner`、公開鍵の流し込み、`/opt/loop-engine` からのプロビジョニング、Claude の資格情報、走行ログと run の退避に合わせて書き換え

@@ -1,17 +1,15 @@
 #!/usr/bin/env bash
-# Can the critic be started at all, and does what it writes come back?
+# クリティックはそもそも起動できるか。書いたものは戻ってくるか。
 #
 #     sudo -u runner /srv/loop/bin/smoke-critic
 #
-# Cheap on purpose. Everything this checks -- the sudoers grant, the credential
-# file, the throwaway HOME, the working directory, the Write tool, the group on
-# the brief -- fails in a way that looks identical from the runner: a critique
-# that produced nothing. Finding that out after a bootstrap has already spent
-# twenty-five minutes is the expensive way to learn it.
+# あえて安く済ませる。これが確かめるもの（sudoers の許可、資格情報のファイル、
+# 使い捨ての HOME、作業ディレクトリ、Write ツール、ブリーフのグループ）は、
+# どれが壊れてもランナーからは同じに見える。何も出てこない批評だ。bootstrap に
+# 25分使った後でそれを知るのは、高くつく知り方だ。
 #
-# The check is not "did the agent say it wrote the file". The file is read back
-# and its contents inspected, the same as smoke-pytest reads the JUnit report
-# rather than believing a claim in prose.
+# 確かめるのは「エージェントがファイルを書いたと言ったか」ではない。ファイルを
+# 読み戻して中身を見る。文章での主張を信じずに結果のファイルを読むのと同じだ。
 set -euo pipefail
 
 [ "$(id -un)" = "runner" ] || { echo "run as runner: sudo -u runner $0" >&2; exit 1; }
@@ -49,8 +47,8 @@ fi
 REPORT="$OUT/FINDINGS.json"
 [ -f "$REPORT" ] || { echo "FAIL: no $REPORT" >&2; ls -la "$OUT" >&2; exit 1; }
 
-# Read it back rather than trusting the exit code, and check the token this run
-# generated -- a file left by an earlier run would otherwise pass.
+# 終了コードを信じずに読み戻し、この実行で作った目印を確かめる。そうしないと、
+# 前の実行が残したファイルでも通ってしまう。
 python3 - "$REPORT" "$TOKEN" <<'PY'
 import json, sys
 report, token = sys.argv[1], sys.argv[2]
@@ -63,7 +61,7 @@ if token not in titles:
 print(f"  {report}: {len(value['findings'])} finding(s), token matches")
 PY
 
-# The runner owns the directory, so it clears what it consumed.
+# ディレクトリは runner の所有なので、使い終えたものは runner が片付ける。
 rm -f "$OUT"/* "$BRIEF"
 echo "smoke-critic: ok -- the critic starts, writes where it is told, and the"
 echo "               runner can read it back"

@@ -1,24 +1,22 @@
 #!/usr/bin/env python3
-"""The loop runner -- v1, deliberately disposable.
+"""ループのランナー。v1 で、捨てる前提で書いてある。
 
     sudo -u runner python3 /srv/loop/runner/loop.py run <step-id>
 
-This is the enforcement layer described in RUNNER_SPEC. It is an ordinary
-program, not an agent, and that is the whole point: a gate is worth something
-precisely because it does not exercise judgement. Nothing here decides whether a
-failure is "close enough".
+RUNNER_SPEC が述べる、関門を強制する層。エージェントではなく普通の
+プログラムで、そこが要点だ。関門に価値があるのは、判断をしないからだ。
+失敗が「惜しい」かどうかを決めるものは、ここには何も無い。
 
-The phases (RUNNER_SPEC section 3):
+位相（RUNNER_SPEC 3 章）:
 
     PLAN_LOAD -> TEST_WRITE -> STUB -> RED_GATE -> FREEZE -> IMPL <-> VERIFY -> GREEN
 
-REVIEW_GATE is not implemented in v1; it is a human step and would block the
-first end-to-end run. Its absence is written to the ledger on every step rather
-than left implicit, so a green produced without review is never mistaken for one
-that passed review.
+REVIEW_GATE は v1 では実装していない。人間の手順で、最初の通し実行を止めて
+しまうからだ。その不在は暗黙にせず、毎ステップ台帳に書く。レビューなしで出た
+緑を、レビューを通った緑と取り違えないためだ。
 
-Standard library only. It runs as `runner`, which owns the repository and holds
-the one sudo exception that lets it start the solver.
+標準ライブラリだけを使う。`runner` として動き、runner はリポジトリを所有し、
+エージェントを起動するための sudo の例外を持つ。
 """
 
 from __future__ import annotations
@@ -44,9 +42,9 @@ SRC = PROJECT / "src"
 STATE = PROJECT / ".runner"
 BRIEF_DIR = LOOP / "brief"
 PYTEST = PROJECT / ".venv" / "bin" / "pytest"
-# The TypeScript side of the same idea: the toolchain is frozen and lives
-# outside the project (provision/35-node.sh), reached through a symlink the
-# solver can follow and cannot replace.
+# 同じ考え方の TypeScript 側。ツールチェーンは凍結してプロジェクトの外に置き
+# （provision/35-node.sh）、solver がたどれるが差し替えられないシンボリック
+# リンクで届かせる。
 VITEST = PROJECT / "node_modules" / ".bin" / "vitest"
 SOLVER_RUN = LOOP / "bin" / "solver-run"
 PLANNER_RUN = LOOP / "bin" / "planner-run"
@@ -55,134 +53,155 @@ PLANNER_OUT = LOOP / "planner" / "out"
 CRITIC_RUN = LOOP / "bin" / "critic-run"
 CRITIC_BRIEF = LOOP / "critic" / "brief"
 CRITIC_OUT = LOOP / "critic" / "out"
-# The one filename the critic may write, for the same reason the planner has
-# three: a name it was never given is a name the runner refuses to read.
+# クリティックが書いてよいファイル名は1つだけ。プランナーが3つなのと同じ理由で、
+# 与えられていない名前は、ランナーが読むのを拒む名前だ。
 FINDINGS_NAME = "FINDINGS.json"
 
-# The human's own channel, and the one the planner cannot write. The
-# requirements that start a project arrive here, and later so will the answers
-# to escalations -- both are things only a person may say. It is the mirror of
-# /srv/loop/planner/out: same shape, opposite direction, different group.
+# 人間の経路で、プランナーには書けない。プロジェクトを始める要件がここに届き、
+# 後にはエスカレーションへの答えも届く。どちらも人だけが言ってよいことだ。
+# /srv/loop/planner/out と対になっていて、形は同じ、向きは逆、グループは別。
 HUMAN_IN = LOOP / "human" / "in"
 REQUIREMENTS = HUMAN_IN / "REQUIREMENTS.md"
 
-# The three files the planner may write (BOOTSTRAP, "書いてよいのは次の3つだけ"),
-# as a map from the name it writes in out/ to where that file lives in the
-# project. This mapping is the allowlist: a proposal cannot name a fourth file
-# because there is no fourth entry to send it to.
+# プランナーが書いてよい3つのファイル（BOOTSTRAP「書いてよいのは次の3つだけ」）。
+# out/ に書く名前から、プロジェクトの中の置き場への対応表にしてある。この表が
+# 許可リストだ。4つ目の項目が無いので、提案が4つ目のファイルを名指しすることは
+# できない。
 #
-# SYSTEM_SPEC.md lives under plan/ rather than at the repository root, which is
-# a deviation from BOOTSTRAP's file table and a deliberate one. The root is
-# readable by the solver -- it has to be, it works there -- so a spec sitting in
-# it would be a second input channel next to the brief, and the whole design of
-# the system would be readable from inside a step that was handed one contract.
-# plan/ is 0700 runner, so putting it there costs nothing and closes that.
+# SYSTEM_SPEC.md はリポジトリの根ではなく plan/ の下に置く。BOOTSTRAP の
+# ファイル表からの逸脱で、意図したものだ。根は solver から読める（そこで作業
+# するので読めなければならない）。仕様が根にあれば、ブリーフの横に2つ目の入力
+# 経路ができ、契約を1つ渡されたステップの中からシステム全体の設計が読めてしまう。
+# plan/ は 0700 runner なので、そこに置けば何も失わずにその経路を閉じられる。
 SYSTEM_SPEC = PLAN / "SYSTEM_SPEC.md"
 PROPOSAL_FILES = {
     "SYSTEM_SPEC.md": SYSTEM_SPEC,
     "CONTEXT.md": PLAN / "CONTEXT.md",
     "tasks.json": PLAN / "tasks.json",
 }
-# ...and the one thing the planner may write that is never applied anywhere: its
-# way of saying "this is case (b) or (c), so it is not mine to decide".
+# ……そして、プランナーが書いてよいが、どこにも適用されない唯一のもの。
+# 「これは (b) か (c) なので、自分が決めることではない」と言うための手段だ。
 ESCALATE_NAME = "ESCALATE.md"
 
 LEDGER = PLAN / "ledger.jsonl"
 ESCALATION = PLAN / "ESCALATION.md"
-# The planner's way of saying "this is not mine to decide", once it has reached
-# the project. `planner/out/` is outside the repository, so what the planner
-# writes there is committed nowhere, mirrored nowhere, and visible only to the
-# terminal that happened to run `plan apply`. The two files are kept apart
-# because they mean different things and are answered differently: ESCALATION.md
-# is the question `plan propose` answers, and one of those must not silently
-# become the other.
+# プランナーの「自分が決めることではない」が、プロジェクトに届いた後の置き場。
+# `planner/out/` はリポジトリの外にあるので、そこに書かれたものはどこにも
+# コミットされず、どこにも写されず、たまたま `plan apply` を走らせた端末にしか
+# 見えない。2つのファイルを分けるのは、意味も答え方も違うからだ。ESCALATION.md
+# は `plan propose` が答える問いで、片方が黙ってもう片方になってはならない。
 PLANNER_ESCALATION = PLAN / "PLANNER_ESCALATION.md"
+# plan refine の途中でプランナーがエスカレーションしたときの控え。提案は
+# 改訂前に戻すので、エスカレーションの本文はここにしか残らない。
+REFINE_ESCALATION = STATE / "refine-escalation.md"
 
-# tests/ must be run with the project venv's pytest and nothing else. A plain
-# `python3 -m pytest` would put the solver's own ~/.local packages back on
-# sys.path, and that is the single mechanism keeping "when stuck, pip install"
-# from working (RUNNER_SPEC 1-3).
+# tests/ はプロジェクトの venv の pytest でだけ走らせる。素の
+# `python3 -m pytest` にすると、solver 自身の ~/.local のパッケージが sys.path に
+# 戻る。「詰まったら pip install」を効かなくしている唯一の仕組みがそれだ
+# （RUNNER_SPEC 1-3）。
 PYTEST_ARGS = ["-q", "-p", "no:cacheprovider", "--strict-markers"]
 
-# RUNNER_SPEC section 11 leaves these open. Fixed values to start from, both
-# overridable per plan via a top-level "timeouts" object in tasks.json.
+# RUNNER_SPEC 11 章が未決にしている値。出発点としての固定値で、どれも
+# tasks.json の最上位の "timeouts" で計画ごとに上書きできる。
 #
-# A test run that never returns is the expected failure here: an implementation
-# with an infinite loop is an ordinary thing for a solver to write, and without a
-# ceiling the runner waits for it forever.
+# 返ってこないテストの実行は、ここでは予想される失敗だ。無限ループする実装は
+# ソルバーが普通に書くもので、上限が無ければランナーは永遠に待つ。
 #
-# The agent's own ceiling lives in solver-run and planner-run, not here. The
-# runner cannot kill a process belonging to another uid, so a timeout enforced
-# only on this side would leave the agent running with nothing able to stop it.
-# These values are therefore PASSED to those scripts, and the runner's own
-# subprocess timeout is set above them as a backstop for the case where the
-# script's `timeout` does not fire. Not passing them was a real bug: the scripts
-# default to 900s, so raising the number here moved nothing and run 5 was killed
-# at 900 twice while the value in this file read 1800.
+# エージェント自身の上限は、ここではなく solver-run と planner-run にある。
+# ランナーは別の uid のプロセスを止められないので、こちら側だけで掛けた上限は、
+# 誰にも止められないエージェントを残す。だからこれらの値は起動スクリプトに
+# 「渡し」、ランナー自身の subprocess の上限は、スクリプトの `timeout` が発動
+# しなかったときの備えとしてその上に置く。渡していなかったのは実際のバグだった。
+# スクリプトの既定は 900 秒なので、ここの数を上げても何も動かず、このファイルの
+# 値が 1800 なのに run 5 は 900 秒で2回殺された。
 #
-# Measured, not guessed. Planning has taken 8m (run 4), 12m (run 3) and more
-# than 15 (run 5, killed at planner-run's 900s default with nothing written).
-# The spread grows with the rules: every one of them is something the plan has to
-# satisfy before the planner will write it out. A ceiling that fires is pure
-# waste here -- Claude Code writes the files at the end, so a killed planning
-# call yields no partial plan to salvage -- which makes the cost of setting this
-# too low much higher than the cost of setting it too high.
+# 推測ではなく測った値だ。計画づくりは 8分（run 4）、12分（run 3）、15分超
+# （run 5、planner-run の既定 900 秒で殺され、何も書かれなかった）かかった。
+# 規則が増えるほど伸びる。規則はどれも、プランナーが書き出す前に計画が満たす
+# べきものだからだ。ここで上限が発動すると丸損になる。Claude Code はファイルを
+# 最後に書くので、殺された計画の呼び出しからは拾える途中の計画が残らない。
+# だから低すぎる設定の代償は、高すぎる設定の代償よりずっと大きい。
 TIMEOUTS = {"test": 120, "solver": 960, "planner": 1800, "critic": 900}
-# How far above an agent's own ceiling the runner's backstop sits. It only has to
-# cover solver-run/planner-run's `--kill-after=30` plus the time to write output.
+# ランナーの備えを、エージェント自身の上限からどれだけ上に置くか。solver-run や
+# planner-run の `--kill-after=30` と、出力を書く時間を覆えば足りる。
 BACKSTOP_MARGIN = 120
 
-# RUNNER_SPEC 6-2. BOOTSTRAP 1-4 caps the ATTEMPTS inside a step but says nothing
-# about the loop outside it, so a planner answering (a) over and over is
-# unbounded -- and (a) is the answer a planner will keep reaching for, because it
-# is the only one it is allowed to give.
+# 利用上限と一時的な混雑。3役は同じサブスクリプションの枠を使うので、上限に
+# 当たるのは計画の失敗でもソルバーの失敗でもない。それを Halt にすると
+# エスカレーションになり、エスカレーションはプランナーを呼んで、同じ枠を
+# さらに使う。だから見分けて、待ってから同じ呼び出しをやり直す。
 #
-# The spec's rule is: from the second escalation on a step, (a) is off the table
-# and only (b) or (c) remain, both of which are the human's. So the planner
-# answers exactly one escalation per step. Overridable per plan via a top-level
-# "limits" object, for the same reason the timeouts are.
+# 文面は Claude Code のエラーのドキュメントにあるもの。-p では、実行中の
+# 失敗はこの文が標準出力に出て、0 以外で終わる。
+#   usage_limit  サブスクリプションの枠。Claude Code は自分ではやり直さない
+#   rate_limit   429 と 529。Claude Code が何度かやり直したうえで諦めたもの
+QUOTA_PATTERNS = {
+    "usage_limit": re.compile(r"You[’']ve hit your \w+ limit"),
+    "rate_limit": re.compile(r"Request rejected \(429\)|temporarily limiting requests"
+                             r"|Repeated 529 Overloaded"),
+}
+# 1回の待ち時間と、待つ回数の上限。既定は 15分 × 24回 = 6時間で、セッションの
+# 枠が戻るまでの時間を覆う。週の枠は覆わない。そのときは待ち切ってから止まる。
+QUOTA = {"wait_seconds": 900, "waits": 24}
+
+
+class QuotaExhausted(Exception):
+    """待ち切っても枠が戻らなかった。Halt ではないので、エスカレーションしない。"""
+
+    def __init__(self, who: str, phase: str, kind: str):
+        super().__init__(f"{who} is still out of quota ({kind}) in {phase}")
+        self.who = who
+        self.phase = phase
+        self.kind = kind
+
+# RUNNER_SPEC 6-2。BOOTSTRAP 1-4 はステップの中の「試行」に上限を掛けるが、
+# その外のループについては何も言わない。だからプランナーが (a) を繰り返し答える
+# ことに上限が無い。そして (a) は、プランナーが許された唯一の答えなので、
+# 何度でも手を伸ばす答えだ。
 #
-# "revisions" is a different ceiling for a different failure: the planner is
-# handed the linter's verdict and asked to fix it, and an agent that trades one
-# violation for another would otherwise do so forever. Three is enough that a
-# plan which merely misunderstood the layout converges, and few enough that one
-# which cannot satisfy the rules stops costing money.
-# "attempts" is a plan-wide override for every step's max_attempts, and 0 means
-# "leave each step alone". It exists because the right number depends on WHO IS
-# PAYING for an attempt, which the planner cannot know when it writes the plan:
-# against a subscription solver 3 is right, and against a local one an attempt costs
-# only wall-clock -- so ten of them are cheaper than the single planner call that
-# an escalation buys.
+# 仕様の規則: ステップの2回目のエスカレーションからは (a) は選べず、(b) か (c)
+# だけが残り、どちらも人間のものだ。だからプランナーが答えるエスカレーションは
+# ステップごとにちょうど1回。上限と同じ理由で、最上位の "limits" で計画ごとに
+# 上書きできる。
+#
+# "revisions" は、別の失敗に対する別の上限だ。プランナーはリンタの判定を渡されて
+# 直すよう頼まれる。ある違反を別の違反と取り替えるエージェントは、上限が無ければ
+# それを永遠に続ける。3 は、配置を誤解しただけの計画が収束するには十分で、
+# 規則を満たせない計画がお金を使い続けないだけ少ない。
+# "attempts" は全ステップの max_attempts を計画全体で上書きする値で、0 は
+# 「各ステップのままにする」を意味する。適切な回数は「誰が試行の代金を払うか」で
+# 決まり、プランナーは計画を書く時点でそれを知りえないので、この口がある。
+# サブスクリプションのソルバーなら 3 が正しく、ローカルのソルバーなら試行の
+# 原価は実時間だけなので、10回でも、エスカレーションが買うプランナー呼び出し
+# 1回より安い。
 LIMITS = {"escalations": 1, "revisions": 3, "attempts": 0, "critiques": 2,
           "test_writes": 3}
 
-# How the next attempt inside a step begins.
+# ステップの中の次の試行を、どう始めるか。
 #
-#   "repair"   -- from the failed tree, told what broke. Right when the solver
-#                 can read its own mistake and undo it.
-#   "resample" -- from a clean tree, carrying only the RED_GATE failures. An
-#                 independent draw rather than a repair.
+#   "repair"   -- 失敗した木から、何が壊れたかを伝えて始める。ソルバーが自分の
+#                 誤りを読んで元に戻せるときに正しい。
+#   "resample" -- きれいな木から、RED_GATE の失敗だけを持って始める。修理では
+#                 なく、独立した抽選。
 #
-# The second exists because attempts are not all the same kind of thing. A
-# solver that cannot see what it did wrong compounds the damage rather than
-# undoing it, and every later attempt then starts from a worse tree. Meanwhile
-# the runner is an EXACT verifier: N independent draws against a gate that
-# cannot be talked round is a different use of the same budget, and for a weaker
-# solver a better one. Overridable per plan ("policy") and per step ("retry").
+# 後者があるのは、試行がすべて同じ種類のものではないからだ。何を誤ったかが
+# 見えないソルバーは、損傷を元に戻さず積み重ね、後の試行ほど悪い木から始まる。
+# 一方でランナーは「厳密な」検証器だ。言いくるめられない関門に対する N 回の
+# 独立した抽選は、同じ予算の別の使い方で、弱いソルバーにはより良い使い方になる。
+# 計画ごと（"policy"）とステップごと（"retry"）に上書きできる。
 POLICY = {"retry": "repair"}
 RETRY_MODES = ("repair", "resample")
 
-# The solver backends to try, in order. Each gets a full set of attempts before
-# the next one sees the step at all. The runner passes the NAME to solver-run,
-# which owns the mapping to an actual command -- so this is not a way for the
-# runner, or for a plan, to choose what runs.
+# 試すソルバーのバックエンドを、順に並べる。次の段がそのステップを初めて見る
+# 前に、各段は試行を全部使う。ランナーは名前を solver-run に渡し、実際の
+# コマンドへの対応は solver-run が持つ。だからこれは、ランナーや計画が何を
+# 走らせるかを選ぶ手段ではない。
 #
-# One entry is the normal case. Two is the arrangement this was built for: a
-# cheap or local backend does the work, and a rationed one is spent only on the
-# steps it could not finish. The ordering matters more than it looks, because
-# the alternative on exhaustion is an escalation, and an escalation costs a
-# PLANNER call -- so a second solver tier is not an extra expense, it is the
-# cheaper of the two things that can happen next.
+# 普通は1つ。2つにすると、安いかローカルのバックエンドが仕事をし、枠の限られた
+# ほうはそれが終えられなかったステップにだけ使う。順番は見た目以上に大事だ。
+# 使い切った先にあるのはエスカレーションで、それはプランナーの呼び出しを1回
+# 使う。だから2段目のソルバーは余計な出費ではなく、次に起こりうる2つのうち
+# 安いほうだ。
 #
 # 既定値は計画ではなく箱の性質なので、tasks.json ではなくここに置く。
 # BOOTSTRAP はプランナーに「誰が実装するかは関知しない」と伝えている。
@@ -191,20 +210,35 @@ RETRY_MODES = ("repair", "resample")
 # 挙げたときだけ使う。
 SOLVER_TIERS = ["claude"]
 
+# コマンドを実行できるバックエンド。codex はサンドボックスの中でテストを
+# 走らせられる。claude は Bash を許していない（solver-claude）。local は
+# 1回の問い合わせでファイルを返すだけ（solver-local）。
+SOLVERS_THAT_RUN_COMMANDS = {"codex"}
+
 
 # --------------------------------------------------------------------------
-# small helpers
+# 小さな道具
 # --------------------------------------------------------------------------
 
 
 class Halt(Exception):
-    """Stop the step. Carries the reason that goes into the ledger."""
+    """ステップを止める。台帳に入る理由を運ぶ。"""
 
     def __init__(self, phase: str, reason: str, detail: str = ""):
         super().__init__(reason)
         self.phase = phase
         self.reason = reason
         self.detail = detail
+
+
+class SolverTimeout(Halt):
+    """ソルバーが solver-run の上限時間内に終わらなかった。
+
+    Halt の一種なので、受け止めない場所では今までどおりステップを止める。受け止める
+    のは IMPL のループだけだ。実装の試行の時間切れは、試行1回分の失敗であって、
+    計画の問題ではない。run 8 の S10 では、残り1回の試行を使わずにエスカレーション
+    になり、上限を使い切って人間で止まった。
+    """
 
 
 def run(cmd: list[str], cwd: Path = PROJECT, check: bool = False,
@@ -226,32 +260,36 @@ def attempts_for(step: dict) -> int:
 
 
 def attempt_schedule(step: dict) -> list[str]:
-    """One entry per attempt, naming the backend that attempt runs on."""
+    """試行1回につき1項目で、その試行を走らせるバックエンドの名前を並べる。"""
     return [t for t in SOLVER_TIERS for _ in range(attempts_for(step))]
 
 
 def source_files(path: Path):
-    """Every file under `path` except compiled bytecode.
+    """`path` の下の、コンパイル済みバイトコード以外のすべてのファイル。
 
-    __pycache__ matters here for a reason that is not obvious: whichever account
-    ran the interpreter owns those .pyc files, so a stray one written by the
-    solver cannot be chmod'ed by the runner at all. Bytecode is disabled for the
-    runner's own pytest invocations as well (see pytest_run); this skip covers
-    anything left behind by something else.
+    __pycache__ がここで効く理由は分かりにくい。.pyc はインタプリタを動かした
+    アカウントの所有になるので、solver が書いたものが紛れ込むと、ランナーは
+    chmod すらできない。ランナー自身の pytest でもバイトコードは切ってある
+    （pytest_run を参照）。ここで飛ばすのは、ほかの何かが残したものの分だ。
     """
     for child in path.rglob("*"):
         if child.is_file() and "__pycache__" not in child.parts:
             yield child
 
 
-def ledger(event: str, **fields) -> None:
-    """Append-only. The ledger is how a step is resumed after the VM dies, and
-    under WSL2 that is a matter of when, not if (RUNNER_SPEC 1-6)."""
+def ledger(event: str, *, echo: str | None = None, **fields) -> None:
+    """追記専用。VM が落ちた後にステップを再開する手段が台帳で、WSL2 では
+    落ちるかどうかではなく、いつ落ちるかの問題だ（RUNNER_SPEC 1-6）。
+
+    echo を渡すと、画面にはそれを出す。台帳には常に fields を全部書く。
+    """
     record = {"ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "event": event, **fields}
     LEDGER.parent.mkdir(parents=True, exist_ok=True)
     with LEDGER.open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(record, ensure_ascii=False) + "\n")
-    print(f"[{event}] " + " ".join(f"{k}={v}" for k, v in fields.items() if k != "detail"))
+    shown = echo if echo is not None else \
+        " ".join(f"{k}={v}" for k, v in fields.items() if k != "detail")
+    print(f"[{event}] {shown}")
 
 
 def sha256(path: Path) -> str:
@@ -259,22 +297,21 @@ def sha256(path: Path) -> str:
 
 
 # --------------------------------------------------------------------------
-# the write fence
+# 書き込みの柵
 # --------------------------------------------------------------------------
 
 
 def set_writable(*, tests: bool | None, src: bool | None) -> None:
-    """Grant the solver write access to exactly one of tests/ or src/.
+    """solver に、tests/ か src/ のどちらか一方だけへの書き込みを許す。
 
-    This is the files_write allowlist as a mechanism rather than an instruction.
-    It is coarse -- directory granularity, not per-file -- so `assert_touched`
-    below checks the exact paths afterwards. Coarse mechanism plus exact
-    assertion beats a fine-grained mechanism that only exists in the prompt.
+    files_write の許可リストを、指示ではなく仕組みにしたもの。粒度は粗く、
+    ファイル単位ではなくディレクトリ単位なので、後で下の `assert_touched` が
+    正確なパスを確かめる。粗い仕組みと正確な検査の組み合わせは、プロンプトの中に
+    しか無い細かい仕組みに勝る。
 
-    `None` means "leave this directory exactly as it is". After FREEZE that is
-    the only correct value for tests/: re-applying a mode there, even a
-    restrictive one, would hand the write bit back to the owner and quietly
-    undo the thing FREEZE just established.
+    `None` は「このディレクトリはそのままにする」を意味する。FREEZE の後の
+    tests/ には、これだけが正しい値だ。制限する方向でもモードを当て直すと、
+    書き込みビットを所有者に返し、FREEZE が作ったものを黙って崩してしまう。
     """
     for path, writable in ((TESTS, tests), (SRC, src)):
         if writable is None:
@@ -291,16 +328,15 @@ def set_writable(*, tests: bool | None, src: bool | None) -> None:
 
 
 def discard_attempt(files_write: list[str]) -> list[str]:
-    """Undo one failed attempt, leaving this step's frozen tests in place.
+    """失敗した試行を1回分取り消す。このステップの凍結済みのテストは残す。
 
-    Deliberately NOT `git reset --hard`, which is what `reset` uses: this step's
-    tests are written but not yet committed -- the commit happens at GREEN -- so
-    a reset here would delete the very tests the attempt is trying to satisfy.
+    `reset` が使う `git reset --hard` は、あえて使わない。このステップのテストは
+    書かれているがまだコミットされていない（コミットは GREEN で行う）ので、ここで
+    reset すると、試行が満たそうとしているテストそのものを消してしまう。
 
-    Only the step's own write paths are touched, and that is exactly the set
-    `assert_touched` has already confirmed is the only thing that changed. A
-    path that exists in HEAD goes back to it; one that does not is removed,
-    because it did not exist before this attempt invented it.
+    触るのはステップ自身の書き込みパスだけで、それは `assert_touched` が「変わった
+    のはここだけ」とすでに確かめた集合と同じだ。HEAD にあるパスは HEAD に戻す。
+    無いパスは消す。この試行が作り出すまで存在しなかったからだ。
     """
     tracked = set(run(["git", "ls-files", "--"] + files_write).stdout.splitlines())
     dropped = []
@@ -316,17 +352,17 @@ def discard_attempt(files_write: list[str]) -> list[str]:
 
 
 def adopt(*dirs: Path) -> list[str]:
-    """Take ownership of whatever the solver just wrote.
+    """solver がいま書いたものの所有権を引き取る。
 
-    A file the solver creates is owned by `solver`, and the runner cannot chmod
-    a file it does not own -- so without this step the write fence can be opened
-    and never closed again. `chown` would fix it and needs root, which the runner
-    deliberately does not have.
+    solver が作ったファイルは `solver` の所有になり、ランナーは自分が所有しない
+    ファイルを chmod できない。この手順が無いと、書き込みの柵は開けられても
+    二度と閉じられない。`chown` なら直るが root が要り、ランナーはあえてそれを
+    持たない。
 
-    Rewriting the file through the runner gets the same result with no privilege
-    at all: the enclosing directories are runner-owned, which is what makes the
-    unlink legal, and the file that reappears belongs to the runner. Content is
-    byte-identical, so git sees nothing and the freeze manifest is unaffected.
+    ランナーを通してファイルを書き直せば、特権を一切使わずに同じ結果になる。
+    親のディレクトリは runner の所有なので unlink が許され、書き直したファイルは
+    runner のものになる。中身はバイト単位で同じなので、git には何も見えず、
+    凍結のマニフェストにも影響しない。
     """
     me = os.getuid()
     adopted = []
@@ -342,8 +378,8 @@ def adopt(*dirs: Path) -> list[str]:
 
 
 def freeze_tests() -> dict[str, str]:
-    """FREEZE (RUNNER_SPEC 4-3). chmod is the mechanism; the manifest returned
-    here is a tripwire on top of it, not the thing doing the work."""
+    """FREEZE（RUNNER_SPEC 4-3）。仕組みは chmod で、ここで返すマニフェストは
+    その上に重ねたトリップワイヤだ。仕事をしているのはマニフェストではない。"""
     shutil.chown(TESTS, group="runner")
     TESTS.chmod(0o2555)
     manifest = {}
@@ -356,14 +392,13 @@ def freeze_tests() -> dict[str, str]:
 
 
 # --------------------------------------------------------------------------
-# git-based change detection
+# git で変更を見つける
 # --------------------------------------------------------------------------
 
 
-# plan/ and .runner/ are 0700 runner. The solver cannot write there, so a change
-# under them is by definition the runner's own -- the ledger it just appended to,
-# the junit report it just produced. Counting those as solver activity would make
-# every step fail on its own bookkeeping.
+# plan/ と .runner/ は 0700 runner。solver はそこに書けないので、その下の変更は
+# 定義上ランナー自身のものだ。いま追記した台帳、いま作った junit のレポート。
+# それを solver の書き込みに数えると、どのステップも自分の帳簿付けで落ちる。
 RUNNER_OWNED = ("plan/", ".runner/")
 
 
@@ -373,7 +408,7 @@ def touched_paths() -> set[str]:
     for line in out.splitlines():
         if not line.strip():
             continue
-        # "XY path" or "XY old -> new"
+        # "XY path" か "XY old -> new" の形
         path = line[3:]
         if " -> " in path:
             path = path.split(" -> ", 1)[1]
@@ -385,14 +420,13 @@ def touched_paths() -> set[str]:
 
 
 def assert_written(phase: str, required: list[str]) -> None:
-    """The files the phase was asked for exist and hold something.
+    """その位相に頼んだファイルが存在し、中身があること。
 
-    assert_touched checks that nothing OUTSIDE the allowlist was written. It
-    says nothing about whether anything INSIDE it was, and the two are not the
-    same question: run 8's S2 had a TEST_WRITE return with no file at all, and
-    the phase recorded ok=True because the solver had not written anywhere it
-    should not. RED_GATE then read an empty report and called it an error, two
-    phases away from the cause.
+    assert_touched は、許可リストの「外」に何も書かれていないことを確かめる。
+    「内」に何かが書かれたかについては何も言わず、2つは別の問いだ。run 8 の S2
+    では TEST_WRITE がファイルを1つも書かずに戻り、solver が書いてはいけない
+    場所に書いていなかったので、位相は ok=True と記録された。その後 RED_GATE が
+    空のレポートを読んでエラーと呼んだ。原因から2位相離れた場所だった。
     """
     missing = [p for p in required
                if not (PROJECT / p).is_file() or not (PROJECT / p).stat().st_size]
@@ -402,11 +436,10 @@ def assert_written(phase: str, required: list[str]) -> None:
 
 
 def assert_touched(phase: str, allowed: list[str]) -> None:
-    """The solver may have written only where the step said it could.
+    """solver が書いたのは、ステップが許した場所だけであること。
 
-    Note what this does NOT do: it does not ask the solver what it changed. The
-    question is answered by git, which the solver cannot reach (.git is 0700
-    runner).
+    これがしないことに注意する。solver に何を変えたかは訊かない。その問いには
+    git が答え、solver は git に届かない（.git は 0700 runner）。
     """
     allowed_set = set(allowed)
     actual = touched_paths()
@@ -420,7 +453,7 @@ def assert_touched(phase: str, allowed: list[str]) -> None:
 
 
 # --------------------------------------------------------------------------
-# running the tests
+# テストを走らせる
 # --------------------------------------------------------------------------
 
 
@@ -433,68 +466,63 @@ class TestRun:
     failure_kinds: list[str]
     passed_names: list[str]
     output: str
-    # The assertions themselves, one per failing test: its name and what the
-    # comparison said. The only part of a failure a solver can act on.
+    # アサーションそのもの。落ちたテスト1件につき1つで、テスト名と比較の結果。
+    # 失敗のうち、ソルバーが手を打てる唯一の部分だ。
     failure_details: list[str] = field(default_factory=list)
-    # Which test files the failures are in, as pytest reports them
-    # ("tests.test_models"). VERIFY runs the whole suite, so it needs to say
-    # whether what broke belongs to this step or to one that was already green.
+    # 失敗がどのテストファイルにあるか。pytest の報告どおりの形
+    # （"tests.test_models"）。VERIFY はスイート全体を走らせるので、壊れたものが
+    # このステップのものか、すでに緑だったステップのものかを言う必要がある。
     failed_files: list[str] = field(default_factory=list)
 
-    # Which tests reported no verdict at all, as "tests.test_models::test_rate".
+    # 判定をまったく出さなかったテスト。"tests.test_models::test_rate" の形。
     skipped_names: list[str] = field(default_factory=list)
 
     @property
     def green(self) -> bool:
-        # A skipped test produced no verdict, so it cannot be part of one.
-        # RED_GATE says this outright (R3) and VERIFY did not, and the asymmetry
-        # was a hole in PASS_TO_PASS: a test that already passed could start
-        # skipping -- a skipif or an importorskip that a later implementation
-        # makes true -- and the gate would step over it without running it,
-        # counting the step green on a suite that had quietly shrunk. Both gates
-        # now refuse the same thing for the same reason.
+        # スキップされたテストは判定を出していないので、緑の一部にはなれない。
+        # RED_GATE はそれを明言し（R3）、VERIFY は言っていなかった。この非対称は
+        # PASS_TO_PASS の穴だった。通っていたテストがスキップし始めると
+        # （後の実装が真にする skipif や importorskip）、関門はそれを走らせずに
+        # またぎ、黙って縮んだスイートでステップを緑と数えた。いまは2つの関門が
+        # 同じ理由で同じものを拒む。
         return (self.tests > 0 and self.failures == 0
                 and self.errors == 0 and self.skipped == 0)
 
 
-# R5: only a genuine assertion counts as red. An ImportError or a collection
-# error means the stub is broken, which looks like red and means something else
-# entirely -- accepting it would let a step "pass" RED_GATE without ever having
-# had a working test.
+# R5: 本物のアサーションだけを赤と数える。ImportError や収集エラーはスタブが
+# 壊れていることを表し、赤に見えてまったく別の意味を持つ。それを認めると、
+# 動くテストを一度も持たないまま、ステップが RED_GATE を「通る」。
 RED_KINDS = re.compile(r"^(AssertionError|Failed)\b")
 
-# L14: a container type whose contents are not stated. Matched only where a type
-# is actually annotated -- after "->" or ":" -- so prose in the same string
-# ("... a list of ids") is not mistaken for a signature.
+# L14: 中身を述べていないコンテナ型。実際に型を注釈している場所（"->" か ":"
+# の後）でだけ照合する。同じ文字列の中の文（"... a list of ids"）を署名と
+# 取り違えないためだ。
 ANNOTATION = re.compile(r"(?:->|:)\s*([A-Za-z_][\w.]*)\s*([\[<]?)")
 
 
 # --------------------------------------------------------------------------
-# the language a plan is written in
+# 計画を書く言語
 # --------------------------------------------------------------------------
 #
-# Two entries, and no plugin mechanism. An adapter cut while only one language
-# existed would have been cut in the wrong place; this is the second, so the
-# differences are now facts rather than guesses. They turned out to be four:
-# what command produces a verdict, which suffixes the freeze covers, how a file
-# path becomes an importable name, and which type names carry no shape.
+# 項目は2つで、プラグインの仕組みは無い。言語が1つしか無いうちに切り出した
+# アダプタは、間違った場所で切られていただろう。これは2つ目なので、違いは
+# 推測ではなく事実だ。違いは4つだった。判定を出すコマンド、凍結する拡張子、
+# ファイルのパスが import できる名前になる規則、形を持たない型名。
 #
-# What did NOT differ is worth as much: the junit report, every gate's
-# arithmetic, the write fence, the ledger, the escalation rules, and every
-# linter rule except L14's vocabulary. The rules were language-independent
-# already -- only their Python-shaped expression was not.
+# 違わなかったものにも同じだけ価値がある。junit のレポート、全関門の算術、
+# 書き込みの柵、台帳、エスカレーションの規則、L14 の語彙以外の全リンタ規則。
+# 規則はもともと言語に依存していなかった。Python の形をしていたのは表現だけだ。
 #
-# TypeScript rather than plain JavaScript, and the reason is L14: a contract has
-# to state the shape of what it hands the next step, and a language with no type
-# syntax cannot. vitest transpiles .ts through esbuild with no separate build
-# step and no tsc in the loop -- the types are there to be READ, by the planner
-# writing a contract and the solver reading one.
+# 素の JavaScript ではなく TypeScript にした理由は L14 にある。契約は次の
+# ステップに渡すものの形を述べなければならず、型の構文を持たない言語では
+# できない。vitest は .ts を esbuild で変換し、別のビルド手順も tsc も無い。
+# 型は「読まれる」ためにある。契約を書くプランナーと、それを読むソルバーが読む。
 LANGUAGES = {
     "python": {
         "label": "Python",
         "source_suffix": ".py",
         "test_suffixes": (".py",),
-        # A package directory names itself through __init__; nothing else does.
+        # パッケージのディレクトリは __init__ で自分を名乗る。ほかのものは名乗らない。
         "index_name": "__init__",
         "module_separator": ".",
         "shapeless": frozenset({
@@ -504,9 +532,9 @@ LANGUAGES = {
         }),
         "shape_bracket": "[",
         "shape_example": "dict[str, Generator], tuple[GameState, int]",
-        # What may NOT sit against a module name for it to count as named.
-        # The dot is here because it is Python's separator: `incgame.engine`
-        # appearing inside `incgame.engine.sub` names a different module.
+        # モジュール名を名指ししたと数えるために、その名前に隣接してはならない
+        # 文字。ドットを含めるのは Python の区切り文字だからだ。
+        # `incgame.engine.sub` の中に現れる `incgame.engine` は、別のモジュールを指す。
         "name_boundary": r"[\w.]",
         "layout_note": """Put the package inside src/, e.g. `src/yourpkg/models.py`, and import it as
 `from yourpkg.models import Thing` -- `src` is on sys.path, so the `src.`
@@ -519,9 +547,9 @@ other way to learn it.""",
         "test_suffixes": (".ts",),
         "index_name": "index",
         "module_separator": "/",
-        # `object` and `any` are here for the same reason `dict` is: they are
-        # the shapes a contract can name while saying nothing, and a stub
-        # written from one of them satisfies whatever the criterion asked.
+        # `object` と `any` があるのは、`dict` があるのと同じ理由だ。契約が
+        # 何も言わずに名指しできる形で、そこから書いたスタブは、条件が何を
+        # 求めても満たしてしまう。
         "shapeless": frozenset({
             "Array", "ReadonlyArray", "Record", "Map", "Set", "WeakMap",
             "Promise", "Iterable", "Iterator",
@@ -529,12 +557,12 @@ other way to learn it.""",
         }),
         "shape_bracket": "<",
         "shape_example": "Record<string, Generator>, [GameState, number]",
-        # No dot: in TypeScript the separator is the slash and the dot is a
-        # file extension. Including it rejected `src/idlegame/model.ts`, which
-        # names the module about as plainly as a line can -- L15's purpose met,
-        # and the check refusing it on Python's grammar. Found on attempt 1 of
-        # the first TypeScript bootstrap; same shape as the B3 defect, an
-        # attempt spent on a rule that was wrong rather than a plan that was.
+        # ドットは含めない。TypeScript の区切り文字はスラッシュで、ドットは
+        # 拡張子だ。含めると `src/idlegame/model.ts` が拒まれる。この行ほど
+        # はっきりモジュールを名指しするものは無く、L15 の目的を満たしている
+        # のに、検査が Python の文法でそれを拒む。最初の TypeScript の
+        # bootstrap の1回目で見つかった。B3 の欠陥と同じ形で、誤っていたのは
+        # 計画ではなく規則で、そのために試行を1回使った。
         "name_boundary": r"[\w]",
         "layout_note": """Every source file is `.ts` under src/, e.g. `src/idlegame/models.ts`, and
 every test file is `.ts` under tests/. Import with a RELATIVE path and no
@@ -563,44 +591,47 @@ Say all of this in CONTEXT.md; the solver has no other way to learn it.""",
     },
 }
 
-# Selected by tasks.json's top-level "language", defaulting to Python because
-# that is what every plan written before this existed assumed.
+# tasks.json の最上位の "language" で選ぶ。既定は Python。これができる前に
+# 書かれた計画は、すべて Python を前提にしているからだ。
 LANGUAGE = dict(LANGUAGES["python"])
 
-# pytest ends every failure body with "<file>:<line>: <ExceptionName>". That
-# last line is where the exception class is actually legible; see failure_kind.
-# vitest colours its transform errors, and the escape codes make the message
-# unreadable wherever it is quoted back -- a brief, an escalation, a ledger.
-ANSI = re.compile(chr(27) + r"\[[0-9;]*m")
+# pytest は失敗の本文を必ず "<file>:<line>: <ExceptionName>" で終える。例外の
+# クラスが実際に読めるのはその最後の行だ。failure_kind を参照。
+# vitest は変換エラーに色を付け、そのエスケープコードのせいで、引用した先
+# （ブリーフ、エスカレーション、台帳）のどこでも文が読めなくなる。
+#
+# ESC の無い形も取り除く。JUnit の XML に ESC は書けないので、vitest は
+# ESC だけを落として `[38;5;249m` の部分を残す。構文エラーの位置を示す図は
+# NO_COLOR を見ずに色を付けるので、レポートの message はこの切れ端だらけになる。
+# ESC の無い形は数字を必須にする。`arr[m]` の `[m` を消さないためだ。
+ANSI = re.compile(chr(27) + r"\[[0-9;]*m|\[\d{1,3}(?:;\d{1,3})*m")
 FAILURE_TAIL = re.compile(r":\s*([A-Za-z_][\w.]*)\s*$")
 
 
 def failure_kind(failure: ET.Element) -> str:
-    """The exception class that ended one test.
+    """1つのテストを終わらせた例外のクラス。
 
-    vitest sets `type` and that is the end of it. pytest never does, so for a
-    Python report this has to be read out of the body. The obvious place -- the
-    `message` attribute -- is the wrong one, and wrong in a way that took a real
-    step to expose:
+    vitest は `type` を設定するので、それで済む。pytest は設定しないので、Python の
+    レポートでは本文から読み取る必要がある。すぐ思いつく `message` 属性は誤った
+    場所で、その誤り方は実際のステップで初めて露見した:
 
         assert float("nan") == 5.0     -> "AssertionError: assert nan == 5.0"
         assert state.resources == 5.0  -> "assert nan == 5.0"
 
-    Both are ordinary assertions. The second loses the class name because its
-    explanation spans two lines ("+ where nan = <GameState>.resources"), and
-    pytest drops the prefix when it does. So matching the message on
-    "AssertionError" accepted assertions about values and rejected assertions
-    about attributes -- and a data-model step, which is how most plans begin,
-    asserts about attributes. RED_GATE would have refused a perfectly good red.
+    どちらも普通のアサーションだ。2つ目は説明が2行にわたる
+    （"+ where nan = <GameState>.resources"）ので、pytest が接頭辞を落とし、クラス名が
+    消える。message を "AssertionError" で照合すると、値についてのアサーションは
+    認め、属性についてのアサーションは拒むことになる。そしてデータモデルのステップ
+    （たいていの計画はそこから始まる）は属性について確かめる。RED_GATE は、まったく
+    正しい赤を拒むところだった。
 
-    The body's last line carries the class uniformly, whatever the explanation
-    looked like:
+    本文の最後の行は、説明がどうであれ、同じ形でクラスを運ぶ:
 
         tests/test_models.py:16: AssertionError
-        tests/test_models.py:21: Failed              (pytest.raises saw nothing)
-        tests/test_models.py:25: AttributeError      (the call itself is broken)
+        tests/test_models.py:21: Failed              (pytest.raises が何も捕まえなかった)
+        tests/test_models.py:25: AttributeError      (呼び出しそのものが壊れている)
 
-    which is exactly the distinction R5 exists to make.
+    これがちょうど、R5 が見分けるための区別だ。
     """
     declared = (failure.get("type") or "").strip()
     if declared:
@@ -610,54 +641,52 @@ def failure_kind(failure: ET.Element) -> str:
         match = FAILURE_TAIL.search(body.splitlines()[-1])
         if match:
             return match.group(1)
-    # Only for a junit writer that omits the body. Kept deliberately dumb: if
-    # the class cannot be read, R5 should refuse rather than guess generously.
+    # 本文を省く junit の書き手のためだけのもの。あえて単純にしてある。クラスが
+    # 読めなければ、R5 は気前よく推測するのではなく拒むべきだ。
     message = (failure.get("message") or "").strip()
     return message.splitlines()[0] if message else "<no type>"
 
 
 def test_argv(files_test: list[str], xml_path: Path) -> tuple[list[str], dict[str, str]]:
-    """The command that produces a verdict, and the environment it needs.
+    """判定を出すコマンドと、それに要る環境変数。
 
-    Separate from the running so a test can check what would be executed without
-    executing it -- the same reason agent_command exists.
+    走らせる部分と分けてあるので、テストは実行せずに何が実行されるかを確かめ
+    られる。agent_command があるのと同じ理由だ。
     """
     if LANGUAGE["source_suffix"] == ".ts":
-        # `run` and not `watch`: vitest's default is interactive, and a runner
-        # that blocks forever looks exactly like a step that never finishes.
-        # The binary comes from the frozen toolchain by absolute path rather
-        # than through npx, which would be willing to fetch one.
+        # `watch` ではなく `run`。vitest の既定は対話的で、永遠に止まったランナーは
+        # 終わらないステップとまったく同じに見える。
+        # 実行ファイルは npx ではなく、凍結したツールチェーンから絶対パスで取る。
+        # npx は取ってくることも厭わないからだ。
         return ([str(VITEST), "run", *files_test,
                  "--reporter=junit", f"--outputFile={xml_path}"],
                 {"CI": "1", "NO_COLOR": "1"})
-    # No bytecode: a .pyc is owned by whoever wrote it, and a solver-owned one
-    # under tests/ makes the runner unable to re-apply modes there at all.
+    # バイトコードは作らない。.pyc は書いた者の所有になり、tests/ の下に solver
+    # 所有のものがあると、ランナーはそこのモードを当て直せなくなる。
     return ([str(PYTEST), *files_test, *PYTEST_ARGS, "--junitxml", str(xml_path)],
             {"PYTHONDONTWRITEBYTECODE": "1"})
 
 
 def pytest_run(tag: str, files_test: list[str]) -> TestRun:
-    """RUNNER_SPEC section 4: the verdict is read from the junit XML, never from
-    the exit code.
+    """RUNNER_SPEC 4 章: 判定は終了コードではなく、必ず junit の XML から読む。
 
-    What is passed in differs by gate, and deliberately. RED_GATE is handed only
-    this step's test files: its job is to establish that these tests fail for
-    want of this implementation, and a count that included the rest of the suite
-    would make R1 meaningless. VERIFY is handed the whole of tests/, because its
-    job is the other half -- these now pass AND nothing that already passed
-    stopped passing."""
+    渡すものは関門ごとに違い、それは意図したものだ。RED_GATE にはこのステップの
+    テストファイルだけを渡す。その仕事は、これらのテストがこの実装が無いために
+    落ちることを確かめることで、スイートの残りまで数えると R1 が意味を失う。
+    VERIFY には tests/ 全体を渡す。その仕事はもう半分、これらがいま通り、かつ
+    通っていたものが1つも落ちていないことを確かめることだからだ。"""
     STATE.mkdir(parents=True, exist_ok=True)
     xml_path = STATE / f"pytest-{tag}.xml"
     argv, env = test_argv(files_test, xml_path)
-    # vitest appends to a report that is already there, so a stale one from an
-    # earlier attempt would be counted alongside this run's.
+    # vitest は既にあるレポートに追記するので、前の試行の古いレポートが今回の
+    # 分と一緒に数えられてしまう。
     xml_path.unlink(missing_ok=True)
     try:
         proc = run(argv, env=env, timeout=TIMEOUTS["test"])
     except subprocess.TimeoutExpired:
-        # Reported as an error rather than a failure, which is what it is: the
-        # suite produced no verdict at all. R2 rejects it outright at RED_GATE,
-        # and VERIFY counts it as a failed attempt and tells the solver why.
+        # 失敗ではなくエラーとして報告する。実際そうで、スイートは判定をまったく
+        # 出していない。RED_GATE では R2 がそのまま拒み、VERIFY は失敗した試行と
+        # 数えて、その理由をソルバーに伝える。
         seconds = TIMEOUTS["test"]
         return TestRun(0, 0, 1, 0, [f"<timeout: no verdict after {seconds}s>"], [],
                        f"The test run did not terminate within {seconds}s. The most "
@@ -666,15 +695,15 @@ def pytest_run(tag: str, files_test: list[str]) -> TestRun:
 
 
 def parse_junit(xml_path: Path, output: str = "") -> TestRun:
-    """The verdict, read out of the report pytest wrote.
+    """テストランナーが書いたレポートから、判定を読む。
 
-    Separate from pytest_run because this is where the gates' arithmetic
-    actually lives, and it is worth being able to hand it a report and check
-    what it says without running a suite to produce one.
+    pytest_run と分けてあるのは、関門の算術が実際にあるのがここだからだ。
+    スイートを走らせてレポートを作らなくても、レポートを渡して何と言うかを
+    確かめられる価値がある。
 
-    Anything unreadable is an error, never an absence: a report that cannot be
-    parsed says nothing about the tests, and a gate that reads it as "no
-    failures" would pass a step on a run that never happened.
+    読めないものは、無いものではなく必ずエラーにする。読み取れないレポートは
+    テストについて何も言っておらず、それを「失敗なし」と読む関門は、起きても
+    いない実行でステップを通してしまう。
     """
     if not xml_path.exists():
         return TestRun(0, 0, 1, 0, ["<no junit report: the test runner did not start>"], [], output)
@@ -684,12 +713,11 @@ def parse_junit(xml_path: Path, output: str = "") -> TestRun:
     except ET.ParseError as exc:
         return TestRun(0, 0, 1, 0, [f"<unparsable junit report: {exc}>"], [], output)
 
-    # EVERY suite, not the first one. pytest writes a single <testsuite> for the
-    # whole run, so reading root.find("testsuite") was indistinguishable from
-    # reading the totals -- until vitest, which writes one per test FILE. VERIFY
-    # hands over the whole of tests/, so on a multi-file suite the first-suite
-    # reading would have counted one file and called the rest green. A gate that
-    # under-counts failures is worse than no gate.
+    # 最初の1つではなく、すべての suite を読む。pytest は実行全体で <testsuite> を
+    # 1つだけ書くので、root.find("testsuite") を読むことは合計を読むことと区別が
+    # つかなかった。vitest はテストファイルごとに1つ書く。VERIFY は tests/ 全体を
+    # 渡すので、複数ファイルのスイートで最初の suite だけを読むと、1ファイルだけを
+    # 数えて残りを緑と呼ぶことになる。失敗を少なく数える関門は、関門が無いより悪い。
     suites = root.findall("testsuite")
     if not suites:
         return TestRun(0, 0, 1, 0, ["<malformed junit report>"], [], output)
@@ -701,17 +729,17 @@ def parse_junit(xml_path: Path, output: str = "") -> TestRun:
     broken: list[str] = []
     no_verdict: list[str] = []
     for case in root.iter("testcase"):
-        # A test file that never compiled. vitest reports a transform failure as
-        # ONE synthetic testcase whose name is the file path itself, carrying a
-        # <failure> -- so from the outside it is indistinguishable from a file
-        # holding a single failing test, and R1 fires on the count before
-        # anything notices that nothing ran. pytest has no such case: a broken
-        # test module is a collection <error> and R2 catches it.
+        # 一度もコンパイルされなかったテストファイル。vitest は変換の失敗を、
+        # ファイルのパスそのものを名前に持つ合成の testcase 1つとして、<failure>
+        # 付きで報告する。外からは、落ちるテストを1つだけ持つファイルと区別が
+        # つかず、何も走っていないことに誰かが気づく前に、R1 が件数で発火する。
+        # pytest にはこの場合が無い。壊れたテストモジュールは収集の <error> に
+        # なり、R2 が捕まえる。
         #
-        # Run 8's S1 hit this with an apostrophe inside a single-quoted test
-        # name, copied out of an acceptance criterion written in English prose.
-        # Twelve tests were in the file; the report said one, and the runner was
-        # about to ask the PLANNER to fix a syntax error.
+        # run 8 の S1 がこれに当たった。英語の文で書かれた受け入れ条件から写した
+        # テスト名が単一引用符で囲まれ、中にアポストロフィがあった。ファイルには
+        # テストが12件あったのに、レポートは1件と言い、ランナーは構文エラーの修正を
+        # プランナーに頼むところだった。
         if case.get("name") and case.get("name") == case.get("classname"):
             uncompiled.append(case.get("name"))
             continue
@@ -727,12 +755,11 @@ def parse_junit(xml_path: Path, output: str = "") -> TestRun:
                               f"::{case.get('name') or '<unnamed>'}")
         for failure in failures + errors:
             kinds.append(failure_kind(failure))
-            # The assertion itself, which is the only part the solver can act
-            # on. It used to be taken from stdout, and that worked only because
-            # pytest prints failures there: vitest's junit reporter prints the
-            # path of the report and nothing else, so the solver was told that
-            # a file had failures and never which, or why. Two different
-            # backends then made the same mistake five times over.
+            # アサーションそのもの。ソルバーが手を打てる唯一の部分だ。標準出力
+            # からは取らない。pytest は失敗をそこに出すが、vitest の junit の
+            # 報告はレポートのパスしか出さない。標準出力から取ると、ソルバーは
+            # ファイルに失敗があることだけを知らされ、どれが、なぜかは知らされ
+            # ない。実際、2つの別のバックエンドが同じ誤りを5回繰り返した。
             message = ANSI.sub("", failure.get("message") or "").strip()
             details.append(f"{case.get('name') or '<unnamed>'}"
                            + (chr(10) + "    " + message.replace(chr(10), chr(10) + "    ")
@@ -741,14 +768,14 @@ def parse_junit(xml_path: Path, output: str = "") -> TestRun:
     def total(attribute: str) -> int:
         return sum(int(suite.get(attribute, 0) or 0) for suite in suites)
 
-    # Counted as errors and removed from the test count, which is what they are:
-    # a file that did not compile ran nothing, so reporting it as one failing
-    # test would be a verdict about tests that never existed.
+    # エラーとして数え、テストの件数から除く。実際そうで、コンパイルされなかった
+    # ファイルは何も走らせていない。落ちたテスト1件として報告すると、存在しな
+    # かったテストについての判定になる。
     if uncompiled:
         kinds.extend(f"<did not compile: {name}>" for name in uncompiled)
-        # The reason lives in the report, not on stdout, so a caller handed
-        # only `output` sees "JUNIT report written to ..." and nothing else --
-        # which is what the first escalation for this looked like.
+        # 理由は標準出力ではなくレポートの中にある。`output` だけを渡された
+        # 呼び出し側には "JUNIT report written to ..." しか見えない。これについての
+        # 最初のエスカレーションは、まさにそういう見た目だった。
         detail = chr(10).join(
             ANSI.sub("", f.get("message") or "")
             for case in root.iter("testcase")
@@ -779,70 +806,146 @@ def parse_junit(xml_path: Path, output: str = "") -> TestRun:
 
 
 # --------------------------------------------------------------------------
-# calling the solver
+# ソルバーを呼ぶ
 # --------------------------------------------------------------------------
 
 
 def agent_command(user: str, script: Path, brief_path: Path, limit: int,
                   backend: str | None = None) -> list[str]:
-    """The argv for one agent call.
+    """エージェントを1回呼ぶための argv。
 
-    Separate from the callers so that "the limit is handed over" is a fact a test
-    can check. solver-run and planner-run both default to 900s when the second
-    argument is missing, so a ceiling raised in TIMEOUTS and not passed here is
-    not a ceiling at all -- which is exactly what happened to run 5, killed twice
-    at 900 while this file said 1800.
+    呼び出し側と分けてあるので、「上限を渡している」ことをテストで確かめられる。
+    solver-run も planner-run も2つ目の引数が無いと 900 秒を使うので、TIMEOUTS で
+    上げてもここで渡さなければ上限にならない。run 5 はまさにそれで、このファイルが
+    1800 と言っているのに 900 秒で2回殺された。
     """
     argv = ["sudo", "-u", user, str(script), str(brief_path), str(limit)]
     if backend is not None:
-        # A name, never a command. solver-run resolves it, and solver-run is
-        # root-owned: the runner cannot add a backend, only ask for one that a
-        # human with sudo has already installed.
+        # 渡すのは名前で、コマンドではない。名前は solver-run が解決し、
+        # solver-run は root の所有だ。ランナーはバックエンドを足せず、sudo を
+        # 持つ人がすでに置いたものを求めることしかできない。
         argv.append(backend)
     return argv
 
 
-def call_solver(phase: str, brief: str, backend: str | None = None) -> str:
-    """Hand the solver one brief and nothing else.
+def quota_problem(out: str) -> str | None:
+    """出力が利用上限か一時的な混雑を示していれば、その種類を返す。"""
+    for kind, pattern in QUOTA_PATTERNS.items():
+        if pattern.search(out):
+            return kind
+    return None
 
-    The brief is written to /srv/loop/brief (runner:solverw 0750): the solver can
-    read it and cannot write it, and it is the only channel that exists. There is
-    no path from here to plan/, which is 0700 runner -- so "the solver must not
-    read tasks.json" is not a rule anyone has to follow.
+
+def unwrap_result(proc: subprocess.CompletedProcess):
+    """`claude -p --output-format json` の出力から、結果の文と JSON を取り出す。
+
+    起動スクリプトは JSON で出力させている。呼び出し側はこれまでどおり文を
+    受け取り、JSON は消費量の記録に回す。JSON として読めない出力は、起動前の
+    エラーや codex のように JSON を出さないバックエンドのもので、そのまま返す。
+    """
+    try:
+        data = json.loads(proc.stdout)
+    except ValueError:
+        return proc, None
+    if not isinstance(data, dict) or not ("result" in data or "usage" in data):
+        return proc, None
+    text = str(data.get("result") or data.get("subtype") or "")
+    return subprocess.CompletedProcess(proc.args, proc.returncode, text + "\n",
+                                       proc.stderr), data
+
+
+def record_usage(who: str, phase: str, data: dict) -> None:
+    """1回の呼び出しで使った枠を台帳に残す。どの役が枠を使ったかを run 後に読む。
+
+    台帳には usage を丸ごと書く。画面には1行に要るものだけを出す。usage の
+    中身は、キャッシュの内訳や iterations まで入っていて、1回の呼び出しで
+    画面を数行占めていた。入力は、キャッシュから読んだ分と書いた分を足す。
+    """
+    usage = data.get("usage") or {}
+    models = sorted(data.get("modelUsage") or {})
+    tokens_in = sum(int(usage.get(k) or 0) for k in (
+        "input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"))
+    tokens_out = int(usage.get("output_tokens") or 0)
+    seconds = (data.get("duration_ms") or 0) / 1000
+    cost = data.get("total_cost_usd")
+    echo = (f"who={who} phase={phase} model={','.join(models) or '-'} "
+            f"in={tokens_in} out={tokens_out} sec={seconds:.0f}"
+            + (f" usd={cost:.2f}" if isinstance(cost, (int, float)) else "")
+            + (" ERROR" if data.get("is_error") else ""))
+    ledger("USAGE", echo=echo, who=who, phase=phase,
+           models=models,
+           usage=data.get("usage"),
+           cost_usd=cost,
+           duration_ms=data.get("duration_ms"),
+           turns=data.get("num_turns"),
+           is_error=data.get("is_error"))
+
+
+def run_agent(who: str, phase: str, invoke) -> subprocess.CompletedProcess:
+    """エージェントを1回呼ぶ。枠が無くて失敗したときだけ、待ってやり直す。
+
+    それ以外の結果は、成功も失敗もそのまま返す。判断は呼び出し側に残す。
+    TimeoutExpired もそのまま上に通す。出力が JSON なら、消費量を台帳に残し、
+    結果の文だけを返す。
+    """
+    for round_no in range(1, QUOTA["waits"] + 2):
+        proc, data = unwrap_result(invoke())
+        if data is not None:
+            record_usage(who, phase, data)
+        kind = quota_problem(proc.stdout + proc.stderr) if proc.returncode != 0 else None
+        if kind is None:
+            return proc
+        if round_no > QUOTA["waits"]:
+            break
+        ledger("QUOTA_WAIT", who=who, phase=phase, kind=kind, round=round_no,
+               of=QUOTA["waits"], seconds=QUOTA["wait_seconds"])
+        time.sleep(QUOTA["wait_seconds"])
+    ledger("QUOTA_EXHAUSTED", who=who, phase=phase, kind=kind)
+    raise QuotaExhausted(who, phase, kind)
+
+
+def call_solver(phase: str, brief: str, backend: str | None = None) -> str:
+    """ソルバーにブリーフを1つだけ渡し、ほかには何も渡さない。
+
+    ブリーフは /srv/loop/brief（runner:solverw 0750）に書く。ソルバーは読めるが
+    書けず、存在する経路はそれだけだ。ここから 0700 runner の plan/ への道は
+    無い。だから「ソルバーは tasks.json を読んではならない」は、誰かが守る必要の
+    ある規則ではない。
     """
     BRIEF_DIR.mkdir(parents=True, exist_ok=True)
     brief_path = BRIEF_DIR / f"{phase.lower()}.md"
     brief_path.write_text(brief, encoding="utf-8")
-    # Set the group explicitly rather than trusting the directory's setgid bit.
-    # A brief the solver cannot read fails as "solver exited 2" -- true, useless,
-    # and three layers away from a missing group.
+    # ディレクトリの setgid ビットに頼らず、グループを明示する。ソルバーが読めない
+    # ブリーフは "solver exited 2" として失敗する。真だが役に立たず、足りない
+    # グループから3層離れている。
     shutil.chown(brief_path, group="solverw")
     brief_path.chmod(0o640)
 
     limit = TIMEOUTS["solver"]
-    # Always named, never left to solver-run's own default. Which backend
-    # produced a green has to be answerable from the ledger afterwards, and a
-    # default applied on the far side of a sudo boundary is not an answer.
+    # 必ず名前を渡し、solver-run の既定には任せない。どのバックエンドが緑を
+    # 出したかは、後で台帳から答えられなければならない。sudo の境界の向こうで
+    # 決まった既定は、答えにならない。
     backend = backend or SOLVER_TIERS[0]
     try:
-        proc = run(agent_command("solver", SOLVER_RUN, brief_path, limit, backend),
-                   timeout=limit + BACKSTOP_MARGIN)
+        proc = run_agent("solver", phase, lambda: run(
+            agent_command("solver", SOLVER_RUN, brief_path, limit, backend),
+            timeout=limit + BACKSTOP_MARGIN))
     except subprocess.TimeoutExpired:
-        # Reaching this means solver-run's own, shorter ceiling did not fire.
-        # Killing the agent from here is not possible -- it belongs to another
-        # uid and the runner has no sudo for that -- so say so plainly instead of
-        # implying the process is gone.
+        # ここに来たのは、solver-run 自身のもっと短い上限が発動しなかったからだ。
+        # ここからエージェントを止めることはできない。別の uid のもので、ランナーは
+        # そのための sudo を持たない。だから、プロセスが消えたとほのめかさず、
+        # はっきりそう言う。
         raise Halt(phase, f"solver still running after {limit + BACKSTOP_MARGIN}s",
                    "solver-run's internal timeout did not fire; a solver process "
                    "may still be alive. Check with: pgrep -a -u solver")
     out = proc.stdout + proc.stderr
     if proc.returncode == 124:
-        raise Halt(phase, "solver hit its own timeout in solver-run", out[-4000:])
+        raise SolverTimeout(phase, "solver hit its own timeout in solver-run", out[-4000:])
     if proc.returncode != 0:
         raise Halt(phase, f"solver exited {proc.returncode}", out[-4000:])
 
-    # Adopt before anything else looks at the tree: from here on the runner must
-    # be able to re-apply modes, and it can only do that to files it owns.
+    # ほかの何かが木を見る前に引き取る。ここから先、ランナーはモードを当て直せ
+    # なければならず、それができるのは自分が所有するファイルだけだ。
     taken = adopt(TESTS, SRC)
     if taken:
         ledger("ADOPT", phase=phase, backend=backend, files=taken)
@@ -850,16 +953,15 @@ def call_solver(phase: str, brief: str, backend: str | None = None) -> str:
 
 
 # --------------------------------------------------------------------------
-# briefs (RUNNER_SPEC section 5)
+# ブリーフ（RUNNER_SPEC 5 章）
 # --------------------------------------------------------------------------
 
 
 def dep_contract_lines(step: dict) -> list[str]:
-    """The provides lines of every step this one depends on, flat.
+    """このステップが依存するすべてのステップの provides の行を、平らに並べる。
 
-    dep_contracts renders the same thing for a brief, where the grouping by
-    step is worth having. The stub generator wants only the names and where
-    they live, so it gets the lines.
+    dep_contracts は同じものをブリーフ用に描く。そこではステップごとのまとまりに
+    価値がある。スタブの生成に要るのは名前と置き場だけなので、行で渡す。
     """
     lines: list[str] = []
     for dep in step.get("depends_on", []):
@@ -903,8 +1005,8 @@ def render_invariants(step: dict) -> str:
 
 
 def brief_test_write(step: dict, context: str, broken: str = "") -> str:
-    # No goal. The tests must come from the acceptance criteria, not from a
-    # description of the implementation the solver is about to be asked for.
+    # goal は渡さない。テストは受け入れ条件から作るもので、これからソルバーに
+    # 頼む実装の説明から作るものではない。
     acceptance = render_acceptance(step)
     return f"""Write tests. Do not write an implementation.
 
@@ -934,13 +1036,12 @@ create the module under test.
 
 
 def compile_failure_section(broken: str) -> str:
-    """The compiler's own words, handed back verbatim.
+    """コンパイラ自身の言葉を、そのまま返す。
 
-    Worth more than the warning that preceded it: the brief had already said
-    not to put an apostrophe in a single-quoted test name, and the solver did
-    it anyway, twice. A rule read before the mistake competes with everything
-    else in the brief; the error message arrives after it, alone, with a line
-    and a column.
+    前もって与えた警告より価値がある。ブリーフはすでに、単一引用符のテスト名に
+    アポストロフィを入れるなと言っていたが、ソルバーはそれでも2回そうした。誤りの
+    前に読んだ規則は、ブリーフのほかのすべてと競り合う。エラーメッセージは誤りの
+    後に、それだけで、行と列を持って届く。
     """
     if not broken:
         return ""
@@ -958,17 +1059,17 @@ several places.
 
 
 def naming_note() -> str:
-    """One trap that is worth naming, because the criteria create it.
+    """名指しする価値のある罠を1つ伝える。条件そのものが作る罠だからだ。
 
-    The criteria above are English prose and English prose contains
-    apostrophes. Copying one into a test name is the obvious thing to do, and
-    in a single-quoted string it ends the string. Run 8's S1 wrote twelve tests
-    and none of them ran: `it('... then the result's resource is exactly 1',`.
+    上の条件は英語の文で、英語の文にはアポストロフィがある。それをテスト名に
+    写すのは自然なことで、単一引用符の文字列の中ではそこで文字列が終わる。run 8 の
+    S1 はテストを12件書き、1件も走らなかった:
+    `it('... then the result's resource is exactly 1',`。
 
-    The file then failed to compile, which vitest reports as one synthetic
-    failing test named after the file -- so the runner saw "1 test, expected
-    12" and was about to send a syntax error to the planner. The reporting side
-    is fixed too, but a trap the brief can remove is better removed.
+    ファイルはコンパイルできず、vitest はそれをファイル名を持つ合成の失敗テスト
+    1件として報告した。ランナーは「1件、期待は12件」と見て、構文エラーを
+    プランナーに送るところだった。報告の側も直してあるが、ブリーフで取り除ける
+    罠は取り除いたほうがよい。
     """
     if LANGUAGE["source_suffix"] != ".ts":
         return ""
@@ -981,31 +1082,26 @@ compiling and not one of your tests runs.
 
 
 # --------------------------------------------------------------------------
-# building the stub instead of asking for one
+# スタブを頼まずに組み立てる
 # --------------------------------------------------------------------------
 #
-# The stub has exactly one job: have the right shape and be wrong about every
-# value, so that RED_GATE can see each test fail for want of an implementation.
-# Nothing about that job needs judgement, and `contracts.provides` already
-# carries everything it needs -- the signatures, the shape of every type, and
-# which file each thing lives in. L14 and L15 exist to make sure of it.
+# スタブの仕事は1つだけだ。形は正しく、値はすべて間違っていること。そうすれば
+# RED_GATE は、各テストが実装が無いために落ちるのを見られる。この仕事に判断は
+# 要らず、`contracts.provides` が必要なものをすべて運んでいる。署名、すべての型の
+# 形、それぞれの置き場。L14 と L15 はそれを保証するためにある。
 #
-# It was a solver call for eight runs, and asking cost more than it bought.
-# Run 8's S1 was rejected four times at RED_GATE on stubs that answered a
-# criterion correctly: `return false` for a boolean, and then, once the
-# temperature came down and the model stopped drawing badly, `return {resource:
-# 0, generators: {}, lastUpdate: 0}` for createGame -- the most plausible
-# answer, which is also the right one. The brief forbids returning a default in
-# so many words. It arrived intact, it was legible, and it was ignored, twice
-# under different settings.
+# 8回の run のあいだソルバーに頼んでいて、頼むことの代償は得るものより大きかった。
+# run 8 の S1 は、条件に正しく答えるスタブのせいで RED_GATE で4回拒まれた。
+# boolean に `return false`、温度を下げてモデルが外れを引かなくなってからは
+# createGame に `return {resource: 0, generators: {}, lastUpdate: 0}`。最も
+# ありそうな答えで、正解でもある。ブリーフは既定値を返すなとはっきり禁じていた。
+# それは欠けずに届き、読めて、設定を変えて2回とも無視された。
 #
-# An instruction a model can ignore is worth less than a rule it cannot reach,
-# which is the same argument as taking sudo away rather than watching for
-# chmod 777. So the runner writes the stub.
+# モデルが無視できる指示は、モデルが届かない規則より価値が低い。chmod 777 を
+# 見張るのではなく sudo を取り上げるのと同じ理屈だ。だからランナーがスタブを書く。
 #
-# Conservative by construction: anything it cannot parse confidently returns
-# None and the solver is asked, exactly as before. A generated stub that does
-# not compile would be worse than the problem it replaces.
+# 作りとして慎重にしてある。自信をもって読み取れないものは None を返し、これまで
+# どおりソルバーに頼む。コンパイルできない生成スタブは、置き換える問題より悪い。
 
 TS_DECLARATION = re.compile(
     r"^(?P<file>[\w./-]+\.ts)\s*:\s*"
@@ -1014,20 +1110,19 @@ TS_SIGNATURE = re.compile(r"^\((?P<args>.*)\)\s*:\s*(?P<returns>.+?)\s*$")
 
 
 def literal_keys(step: dict) -> list[str]:
-    """Identifier-like strings the criteria quote, in the order they appear.
+    """条件が引用している識別子らしい文字列を、現れた順に返す。
 
-    A keyed container's sentinel has to hold the keys a caller will look up,
-    or the test breaks on the lookup instead of failing on the value --
-    `CATALOG.cursor.rate` throws before it compares, and RED_GATE rejects that
-    as R5. The contract cannot say which keys: `Record<string, GeneratorDef>`
-    is a type, not a census. The criteria can, and they are the runner's to
-    read.
-    This is not the leak the STUB brief guards against. That rule keeps the
-    criteria away from the MODEL, so it cannot hardcode an answer it was shown.
-    Here nothing is shown to anything: the runner takes the key names and fills
-    them with sentinels, so every value is still wrong.
-    Over-collecting is harmless. A key nothing looks up only makes a
-    keys-of-the-container assertion differ, which is the outcome wanted anyway.
+    キーを持つコンテナの番兵の値は、呼び出し側が引くキーを持っていなければ
+    ならない。そうでないと、テストは値で落ちる前にキーを引くところで壊れる。
+    `CATALOG.cursor.rate` は比較の前に例外を投げ、RED_GATE はそれを R5 で拒む。
+    契約はどのキーかを言えない。`Record<string, GeneratorDef>` は型であって、
+    名簿ではない。条件は言え、条件はランナーが読んでよいものだ。
+    これは STUB のブリーフが防いでいる漏れではない。あの規則は条件を「モデル」から
+    遠ざけ、見せられた答えを決め打ちさせないためのものだ。ここでは何にも何も
+    見せない。ランナーがキーの名前を取り、番兵の値で埋めるので、値はすべて
+    間違ったままだ。
+    多めに集めても害は無い。誰も引かないキーは、コンテナのキーについての
+    アサーションを食い違わせるだけで、それはどのみち望む結果だ。
     """
     text = " ".join(f"{a.get('given', '')} {a.get('then', '')}"
                     for a in step.get("acceptance", []))
@@ -1037,14 +1132,92 @@ def literal_keys(step: dict) -> list[str]:
     return list(seen)
 
 
-def sentinel_for(kind: str, types: dict, keys: list[str] | None = None) -> str:
-    """A value of that type that no correct implementation returns for any input.
+def split_top(text: str, separators: str) -> list[str]:
+    """括弧の外にある区切り文字だけで分ける。
 
-    The one exception is a boolean, which has no such value -- every boolean is
-    correct somewhere -- so it gets a string wearing a cast. That is the single
-    place the shape rule is broken, and it is broken deliberately: a value of
-    the right type cannot be wrong when every value of the type is right
-    somewhere.
+    `(a: A, b: B) => C` の中の `,` や、`=>` の `>` で分けてはいけない。
+    """
+    parts, current, depth, previous = [], [], 0, ""
+    for ch in text:
+        if ch in "([{<":
+            depth += 1
+        elif ch in ")]}" or (ch == ">" and previous != "="):
+            depth -= 1
+        if ch in separators and depth == 0:
+            parts.append("".join(current))
+            current = []
+        else:
+            current.append(ch)
+        previous = ch
+    parts.append("".join(current))
+    return [p.strip() for p in parts if p.strip()]
+
+
+def split_function_type(kind: str) -> tuple[str, str] | None:
+    """`(args) => returns` を (args, returns) に分ける。関数の型でなければ None。
+
+    正規表現では足りない。引数の中に関数の型があると、最後の `) =>` まで
+    引数として読んでしまう。先頭の括弧に対応する閉じ括弧を数えて探す。
+    """
+    kind = kind.strip()
+    if not kind.startswith("("):
+        return None
+    depth = 0
+    for index, ch in enumerate(kind):
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                rest = kind[index + 1:].lstrip()
+                if rest.startswith("=>"):
+                    return kind[1:index], rest[2:].strip()
+                return None
+    return None
+
+
+def interface_fields(rest: str) -> list[tuple[str, str]]:
+    """interface の中身を (名前, 型) の並びにする。メソッドは関数の型に直す。
+
+    `subscribe(listener: (s: S) => void): () => void` を、名前 `subscribe`、
+    型 `(listener: (s: S) => void) => () => void` として扱う。以前は
+    「名前: 型」の正規表現で読み、メソッドの引数をフィールドと取り違えて、
+    コンパイルできないスタブを書いていた（Claude で回した run 8 の S1 で6回）。
+    """
+    start, end = rest.find("{"), rest.rfind("}")
+    if start < 0 or end < start:
+        return []
+    fields = []
+    for member in split_top(rest[start + 1:end], ";,\n"):
+        method = re.match(r"^(?:readonly\s+)?(\w+)\??\s*\(", member)
+        if method:
+            opened = member.index("(")
+            depth = 0
+            for index in range(opened, len(member)):
+                if member[index] == "(":
+                    depth += 1
+                elif member[index] == ")":
+                    depth -= 1
+                    if depth == 0:
+                        after = member[index + 1:].lstrip()
+                        returns = after[1:].strip() if after.startswith(":") else "void"
+                        fields.append((method.group(1),
+                                       f"({member[opened + 1:index]}) => {returns}"))
+                        break
+            continue
+        prop = re.match(r"^(?:readonly\s+)?(\w+)\??\s*:\s*(.+)$", member, re.S)
+        if prop:
+            fields.append((prop.group(1), prop.group(2).strip()))
+    return fields
+
+
+def sentinel_for(kind: str, types: dict, keys: list[str] | None = None) -> str:
+    """その型の値のうち、正しい実装がどんな入力に対しても返さないもの。
+
+    唯一の例外は boolean で、そういう値が無い。どの boolean もどこかでは正解だ。
+    だからキャストをまとった文字列を返す。形の規則を破るのはここだけで、意図して
+    破っている。型のどの値もどこかで正しいなら、正しい型の値で間違うことは
+    できない。
     """
     kind = kind.strip().rstrip(";")
     if kind in ("void", "undefined"):
@@ -1055,6 +1228,13 @@ def sentinel_for(kind: str, types: dict, keys: list[str] | None = None) -> str:
         return '"__stub__"'
     if kind == "boolean":
         return '"__stub__" as unknown as boolean'
+    # 関数の型は、呼べる関数を返す。キャストした文字列だと、テストが呼んだ
+    # ところで TypeError になり、RED_GATE がそれを赤と認めない（R5）。
+    # `[]` の判定より先に見る。`() => number[]` は配列ではない。
+    function = split_function_type(kind)
+    if function is not None:
+        value = sentinel_for(function[1], types, keys) or "undefined"
+        return f"((..._args: unknown[]) => ({value}))"
     if kind.endswith("[]"):
         return "[" + sentinel_for(kind[:-2], types, keys) + "]"
     match = re.fullmatch(r"(Array|ReadonlyArray)<(.+)>", kind)
@@ -1063,31 +1243,31 @@ def sentinel_for(kind: str, types: dict, keys: list[str] | None = None) -> str:
     match = re.fullmatch(r"(Record|Map)<\s*[^,]+,\s*(.+)>", kind)
     if match:
         value = sentinel_for(match.group(2), types, keys)
-        # __stub__ stays alongside the real names on purpose: with only the
-        # names the criteria mention, an assertion about the container's keys
-        # would MATCH, and a test that passes against the stub stops the step.
+        # __stub__ は本物の名前と並べてあえて残す。条件が挙げる名前だけにすると、
+        # コンテナのキーについてのアサーションが「一致」し、スタブに対して通る
+        # テストがステップを止める。
         names = ["__stub__"] + list(keys or [])
         return "{ " + ", ".join(f'"{n}": {value}' for n in names) + " }"
     if kind in types:
         return types[kind]
-    # A union, a generic the table does not know, an imported name from a step
-    # that is not this one. Casting keeps the shape rule from lying about what
-    # this is, and the test still fails on the comparison.
+    # 合併型、表が知らない総称型、このステップ以外から import した名前。キャスト
+    # すれば、形の規則がこれの正体について嘘をつかずに済み、テストはそれでも
+    # 比較で落ちる。
     return f'"__stub__" as unknown as {kind}'
 
 
 def ts_type_values(declarations: list[dict], keys: list[str] | None = None) -> dict:
-    """Literal sentinels for every named type this step declares.
+    """このステップが宣言する名前付きの型ごとに、番兵の値をリテラルで作る。
 
-    Two passes, because an interface may hold another interface declared after
-    it. Two is enough for anything the linter accepts; a cycle resolves to the
-    cast, which still compiles.
+    2周する。interface は、後で宣言される別の interface を持ちうるからだ。
+    リンタが受け入れるものなら2周で足りる。循環はキャストに落ち、それでも
+    コンパイルできる。
     """
     types: dict = {}
     for _ in range(2):
         for d in declarations:
             if d["kind"] == "interface":
-                fields = re.findall(r"(\w+)\s*:\s*([^;}]+)", d["rest"])
+                fields = interface_fields(d["rest"])
                 if not fields:
                     continue
                 types[d["name"]] = "{ " + ", ".join(
@@ -1100,7 +1280,7 @@ def ts_type_values(declarations: list[dict], keys: list[str] | None = None) -> d
 
 
 def parse_contracts(lines: list[str]) -> list[dict] | None:
-    """Every provides line, split up. None if any line does not fit the form."""
+    """provides の各行を分解する。形に合わない行が1つでもあれば None。"""
     declarations = []
     for line in lines:
         head = line.split(" -- ")[0].split(chr(8212))[0].strip()
@@ -1112,35 +1292,34 @@ def parse_contracts(lines: list[str]) -> list[dict] | None:
 
 
 def generate_stub(step: dict, requires: list[str]) -> dict[str, str] | None:
-    """The whole stub, or None to ask the solver for it after all.
+    """スタブ全体を返す。None なら、やはりソルバーに頼む。
 
-    None is not a failure mode to be ashamed of. It is what keeps this from
-    being a second, worse parser of a language: anything unfamiliar goes back
-    to the path that handled it before.
+    None は恥ずべき失敗ではない。これが言語の2つ目の、より劣った構文解析器に
+    ならずに済むのは None のおかげだ。見慣れないものは、前から扱っていた経路に
+    戻す。
     """
     if LANGUAGE["source_suffix"] != ".ts":
-        return None   # Python still asks; nothing there has needed this yet
+        return None   # Python はいまも頼む。まだこれを要したことが無い
 
     declarations = parse_contracts(step["contracts"]["provides"])
     if declarations is None:
         return None
     if {d["file"] for d in declarations} != set(step["files_write"]):
-        # A file the step must write that no contract describes, or the other
-        # way round. Either way the runner does not know enough to write it.
+        # ステップが書くべきなのにどの契約も述べていないファイルか、その逆。
+        # どちらにしても、ランナーはそれを書けるほど知らない。
         return None
 
-    # The type table has to include what earlier steps declared, not only this
-    # step's own. S2 provides `const CATALOG: Catalog`, and Catalog is S1's
-    # `Record<string, GeneratorDef>`: without S1's line the name is unknown, the
-    # sentinel falls back to a cast, and the first test that reads
-    # CATALOG['cursor'].baseCost gets a TypeError instead of a failed
-    # assertion -- which RED_GATE rejects outright (R2/R5). The brief said this
-    # all along: the sentinel must have the SHAPE the signature states, because
-    # the test takes it apart before it asserts anything.
+    # 型の表には、このステップ自身のものだけでなく、前のステップが宣言したものも
+    # 入れる。S2 は `const CATALOG: Catalog` を提供し、Catalog は S1 の
+    # `Record<string, GeneratorDef>` だ。S1 の行が無いとその名前は分からず、番兵の
+    # 値はキャストに落ち、CATALOG['cursor'].baseCost を読む最初のテストは、
+    # アサーションの失敗ではなく TypeError を受け取る。RED_GATE はそれをそのまま
+    # 拒む（R2/R5）。ブリーフはずっとそう言っていた。テストは確かめる前に値を
+    # 分解するので、番兵の値は署名が述べる「形」を持たなければならない。
     inherited = parse_contracts(requires) or []
     keys = literal_keys(step)
     types = ts_type_values(inherited + declarations, keys)
-    # Where a name imported from elsewhere lives, so the emitted file can say so.
+    # よそから import する名前の置き場。書き出すファイルがそれを言えるようにする。
     elsewhere: dict[str, str] = {}
     for line in requires:
         match = TS_DECLARATION.match(line.split(" -- ")[0].split(chr(8212))[0].strip())
@@ -1156,9 +1335,9 @@ def generate_stub(step: dict, requires: list[str]) -> dict[str, str] | None:
 
         for d in mine:
             if d["kind"] in ("interface", "type"):
-                # An interface body needs no semicolon after it and a type
-                # alias does; emitting one after `}` is legal but reads wrong
-                # in a file a person may open.
+                # interface の本体の後にセミコロンは要らず、型の別名には要る。
+                # `}` の後に書いても正しいが、人が開くかもしれないファイルでは
+                # 読みにくい。
                 line = f"export {d['kind']} {d['name']}{d['rest']}".rstrip().rstrip(";")
                 body.append(line if line.endswith("}") else line + ";")
                 continue
@@ -1176,7 +1355,7 @@ def generate_stub(step: dict, requires: list[str]) -> dict[str, str] | None:
                 f"export function {d['name']}({signature.group('args')}): {returns} {{"
                 + (f"{chr(10)}  return {value};{chr(10)}}}" if value else f"{chr(10)}}}"))
 
-        # Imports: every name this file mentions that another file declares.
+        # import: このファイルが口にし、別のファイルが宣言している名前すべて。
         text = chr(10).join(body)
         for name, source in elsewhere.items():
             if name in declared_here or not re.search(rf"(?<!\w){name}(?!\w)", text):
@@ -1196,17 +1375,17 @@ def generate_stub(step: dict, requires: list[str]) -> dict[str, str] | None:
 
 
 def relative_module(importer: str, target: str) -> str:
-    """How `importer` refers to `target`, as TypeScript wants it written."""
+    """`importer` が `target` をどう指すか。TypeScript が求める書き方で返す。"""
     rel = os.path.relpath(Path(target).with_suffix("").as_posix(),
                           Path(importer).parent.as_posix()).replace(os.sep, "/")
     return rel if rel.startswith(".") else "./" + rel
 
 
 def brief_stub(step: dict) -> str:
-    # Signatures only -- no goal, no acceptance, and no invariants. Anything
-    # here that carries meaning rather than shape gets faithfully implemented,
-    # and the criterion it covers then passes at RED_GATE without ever having
-    # been observed to fail (found the hard way on step S1, 2026-08-18).
+    # 署名だけを渡す。goal も acceptance も invariants も渡さない。形ではなく意味を
+    # 運ぶものがここにあると、それは忠実に実装され、それが覆う条件は一度も落ちる
+    # のを見られないまま RED_GATE を通る（2026-08-18 にステップ S1 で痛い目を見て
+    # 分かった）。
     return f"""Create stubs only.
 
 # Signatures to provide
@@ -1319,18 +1498,47 @@ def frozen_tests_text(step: dict) -> str:
     return "\n\n".join(parts)
 
 
+def absorb_timeout(step: dict, attempt: int, backend: str,
+                   manifest: dict[str, str], last_failure: str) -> str:
+    """IMPL の時間切れを、試行1回分の失敗として片付ける。次のブリーフに渡す文を返す。
+
+    書きかけの作業は捨てる。途中で止まったファイルは、半分だけ書き換わっている
+    かもしれず、次の試行が修理の土台にするには信用できない。
+
+    それでも、成功した試行と同じ検査は通す。時間切れの前に、凍結したテストや許可
+    リストの外に手を出していれば、それは試行の失敗ではなく柵の違反で、今までどおり
+    止める。引き取りを先にするのは、solver が書いたファイルを runner が扱えるように
+    するためだ（adopt を参照）。
+    """
+    adopt(TESTS, SRC)
+    for rel, digest in manifest.items():
+        if sha256(PROJECT / rel) != digest:
+            raise Halt("VERIFY", f"frozen test was modified: {rel}")
+    assert_touched("IMPL", step["files_test"] + step["files_write"])
+    dropped = discard_attempt(step["files_write"])
+    seconds = TIMEOUTS["solver"]
+    ledger("SOLVER_TIMEOUT", step=step["id"], attempt=attempt, backend=backend,
+           seconds=seconds, files=dropped)
+    return (f"Your previous attempt ran out of time: it was stopped after {seconds}s, "
+            "before it finished. Nothing it wrote was kept -- the files you may "
+            "modify are back to what they were before it started.\n\n"
+            "Do not try to do everything in one pass. Make the smallest change "
+            "that addresses the failures below, write it, and stop.\n\n"
+            + (last_failure or "(nothing recorded)"))
+
+
 # --------------------------------------------------------------------------
-# escalation
+# エスカレーション
 # --------------------------------------------------------------------------
 
 
 def escalation_count(step_id: str) -> int:
-    """How many times this step has already escalated, read from the ledger.
+    """このステップがすでに何回エスカレーションしたか。台帳から読む。
 
-    From the ledger and not from a counter in memory, because the point of the
-    cap is to survive the things that end the process: the VM stopping, a reset,
-    a run resumed tomorrow. This is also why `reset` had to stop rolling the
-    ledger back -- a cap counted from records that reset destroys is not a cap.
+    メモリの中の数ではなく台帳から数える。上限の要点は、プロセスを終わらせる
+    出来事（VM の停止、reset、明日再開する走行）を越えて残ることだからだ。
+    `reset` が台帳を巻き戻さないのもこのためだ。reset が消す記録から数える上限は、
+    上限にならない。
     """
     if not LEDGER.exists():
         return 0
@@ -1349,12 +1557,18 @@ def escalation_count(step_id: str) -> int:
 
 def escalate(step: dict, halt: Halt, attempt: int, run_: TestRun | None) -> None:
     failed = "\n".join(f"- {k}" for k in (run_.failure_kinds if run_ else [])) or "(none recorded)"
-    n = escalation_count(step["id"]) + 1          # including this one
+    n = escalation_count(step["id"]) + 1          # 今回の分を含む
     cap = LIMITS["escalations"]
 
-    # RUNNER_SPEC 6-2 requires this constraint to be stated in the file itself,
-    # so that it holds even if whoever reads it has forgotten the rule. It is
-    # also enforced in cmd_run_all, which does not ask.
+    # R4 で止まったなら、スタブに対して通ったテストの数を残す。プランナーが消して
+    # よい条件の数は、この数から決まる（check_proposal を参照）。
+    r4_passing = len(run_.passed_names) \
+        if run_ is not None and halt.phase == "RED_GATE" and halt.reason.startswith("R4") \
+        else 0
+
+    # RUNNER_SPEC 6-2 は、この制約をファイルそのものに書くことを求めている。読む者が
+    # 規則を忘れていても成り立つようにだ。cmd_run_all でも強制しており、そちらは
+    # 訊かない。
     if n > cap:
         constraint = f"""- This is escalation {n} of at most {cap} for this step, so **(a) is no
   longer available**. Only (b) rewriting the acceptance criteria, or (c)
@@ -1366,6 +1580,12 @@ def escalate(step: dict, halt: Halt, attempt: int, run_: TestRun | None) -> None
 - This is escalation {n} of at most {cap} for this step. Permitted responses are
   (a) tighten the goal, or escalate. Rewriting the acceptance criteria is case
   (b) and is a decision for the human, not the planner (RUNNER_SPEC 6-2)."""
+        if r4_passing:
+            constraint += f"""
+- One exception, because this stopped at R4: you may DELETE up to {r4_passing}
+  acceptance entr{"y" if r4_passing == 1 else "ies"} of this step whose tests
+  cannot fail against any stub, and lower expected_tests by at most the same
+  number. Entries you keep must stay word for word."""
 
     ESCALATION.write_text(
         f"""# ESCALATION: step {step["id"]}
@@ -1390,40 +1610,39 @@ def escalate(step: dict, halt: Halt, attempt: int, run_: TestRun | None) -> None
 """,
         encoding="utf-8",
     )
+    extra = {"r4_passing": r4_passing} if r4_passing else {}
     ledger("ESCALATED", step=step["id"], phase=halt.phase, reason=halt.reason,
-           escalation_no=n)
+           escalation_no=n, **extra)
     print(f"\nESCALATION written to {ESCALATION}", file=sys.stderr)
 
 
 # --------------------------------------------------------------------------
-# the step
+# ステップ
 # --------------------------------------------------------------------------
 
 
 # --------------------------------------------------------------------------
-# the plan linter (RUNNER_SPEC section 8)
+# 計画のリンタ（RUNNER_SPEC 8 章）
 # --------------------------------------------------------------------------
 
-# The name a contract line declares. Both keywords matter: a step that
-# introduces the data model provides `class GameState(...)`, and matching only
-# `def` made every later step's `requires` fail L3 against a name the linter
-# could not see. Found the first time a real plan had a data-model step.
-# What a contract line calls the thing it declares. Language-shaped, and the
-# reason it has to be is that L3 compares names: "does anything this step
-# depends on provide what it requires?"
+# 契約の行が宣言するものの名前。言語ごとの形を持ち、そうでなければならない
+# 理由は、L3 が名前を比べるからだ。「このステップが依存するものの中に、求める
+# ものを提供するものはあるか」。
 #
-# The Python-only version made L3 UNSATISFIABLE in TypeScript, and the two
-# sides failed differently, which is what hid it. The provides side DROPPED
-# every line the pattern missed, so it built an empty set; the requires side
-# fell back to the whole line and looked for it in that empty set. Every
-# requires entry was a violation, always, and no plan could ever answer it.
-# Run 8's bootstrap spent two attempts and fifty-six minutes on it before the
-# pattern was visible -- the first attempt's feedback looked like an ordinary
-# inconsistency, and the planner "fixed" it into an identical failure.
+# Python では def と class の両方を見る。データモデルを導入するステップは
+# `class GameState(...)` を提供し、`def` だけを照合すると、後のステップの
+# `requires` がすべて、リンタに見えない名前について L3 で落ちる。実際の計画が
+# 初めてデータモデルのステップを持ったときに見つかった。
 #
-# Third time a rule written in Python's grammar has cost paid attempts, after
-# L14's vocabulary and L15's name boundary. The rule was never wrong; its
-# expression was.
+# Python だけの版は、TypeScript で L3 を「満たせない」ものにし、両側が違う
+# 落ち方をしたので気づけなかった。provides の側はパターンに合わない行を「捨て」、
+# 空の集合を作った。requires の側は行全体に戻り、それをその空の集合から探した。
+# requires の項目はすべて、常に違反で、どの計画も答えようがなかった。run 8 の
+# bootstrap は、このパターンが見えるまでに試行2回と56分を使った。1回目の
+# フィードバックはよくある食い違いに見え、プランナーはそれを同じ失敗へと「直した」。
+#
+# Python の文法で書いた規則が、有料の試行を使わせたのは、L14 の語彙、L15 の
+# 名前の境界に続いて3度目だ。規則は一度も誤っていなかった。誤っていたのは表現だ。
 PROVIDES_PATTERNS = {
     ".py": re.compile(r"(?:def|class)" + chr(92) + r"s+([A-Za-z_]" + chr(92) + r"w*)"),
     ".ts": re.compile(
@@ -1432,23 +1651,29 @@ PROVIDES_PATTERNS = {
 
 
 def declared_name(line: str) -> str:
-    """The name a contract line declares, or the whole line if it declares none.
+    """契約の行が宣言する名前。何も宣言していなければ行全体。
 
-    The fallback is the same on both sides of L3 now, and that symmetry is the
-    fix. Dropping unmatched lines from `provides` while keeping them in
-    `requires` does not make the rule stricter -- it makes it unanswerable.
+    L3 の両側で、名前が取れないときの扱いを同じにしてある。その対称性が修正の
+    中身だ。合わない行を `provides` から捨てて `requires` には残すと、規則が
+    厳しくなるのではなく、答えようのないものになる。
     """
     pattern = PROVIDES_PATTERNS.get(LANGUAGE["source_suffix"])
     match = pattern.search(line) if pattern else None
     return match.group(1) if match else line.strip()
-# "concrete" for L8: a number, a quoted literal, or an exception type. An
-# acceptance criterion made only of adjectives cannot be turned into a test that
-# two people would write the same way.
+# L8 の「具体的」: 数、引用符で囲んだリテラル、例外の型。形容詞だけでできた
+# 受け入れ条件は、2人が同じように書けるテストにならない。
 #
-# A NUMBER, not a digit. `\d` alone was satisfied by the "2" in a variable name
-# called `s2`, which let "s2 == p.state exactly" through as a concrete result --
-# the criterion that then passed against the stub and stopped the step at R4.
-CONCRETE = re.compile(r"(?<![\w.])\d+(?:\.\d+)?(?!\w)|'[^']*'|\"[^\"]*\"|\b[A-Z]\w*(?:Error|Exception)\b")
+# 数字ではなく数を見る。`\d` だけだと、`s2` という変数名の "2" で満たされ、
+# "s2 == p.state exactly" が具体的な結果として通った。その条件はスタブに対して
+# 通り、ステップを R4 で止めた。
+#
+# 空のコレクションと Python の定数もリテラルとして数える。境界のケースで一番
+# よく出る答えは `returns exactly []` や `{}` や `None` で、どれも具体的な値だ。
+# 数えないと、プランナーは `len(tokenize(""))` → `0` のように言い換えて逃げるか、
+# 書き直しで呼び出しを1回使う。TypeScript の true / false / null / undefined は
+# 数えない。英語の単語と見分けがつかず、"is true for every" のような形容が通る。
+CONCRETE = re.compile(r"(?<![\w.])\d+(?:\.\d+)?(?!\w)|'[^']*'|\"[^\"]*\"|\b[A-Z]\w*(?:Error|Exception)\b"
+                      r"|\[\]|\{\}|\(\)|\b(?:True|False|None)\b")
 
 CASES = {"normal", "boundary", "error"}
 REQUIRED_KEYS = {
@@ -1459,15 +1684,15 @@ REQUIRED_KEYS = {
 
 
 def modules_of(files_write: list[str]) -> list[str]:
-    """The importable module names a step's own files create.
+    """ステップ自身のファイルが作る、import できるモジュール名。
 
     src/incgame/engine.py     -> incgame.engine       (Python)
     src/incgame/__init__.py   -> incgame
     src/idlegame/engine.ts    -> idlegame/engine      (TypeScript)
     src/idlegame/index.ts     -> idlegame
 
-    The two languages spell the same idea differently: a separator, and a name
-    that means "the directory itself". Nothing else about L15 changes.
+    2つの言語は同じ考えを違う綴りで書く。区切り文字と、「ディレクトリそのもの」を
+    意味する名前だ。L15 のほかの部分は何も変わらない。
     """
     suffix = LANGUAGE["source_suffix"]
     separator = LANGUAGE["module_separator"]
@@ -1485,18 +1710,17 @@ def modules_of(files_write: list[str]) -> list[str]:
 
 
 def adopt_language(tasks: dict) -> None:
-    """Take the language from the plan being judged.
+    """判定する計画から言語を取る。
 
-    Several rules are expressed in one language's grammar, so judging a plan
-    means judging it in ITS language -- and leaving that to the caller has now
-    been forgotten three times. `plan apply` ran on the default and rejected
-    all twenty-two of a TypeScript plan's contracts because `modules_of` found
-    no `.py` files; `validate` did the same a moment later. Both were correct
-    plans and the wrong grammar.
+    いくつかの規則は1つの言語の文法で表されているので、計画を判定するとは、その
+    計画の言語で判定することだ。それを呼び出し側に任せたら、3回忘れられた。
+    `plan apply` は既定の言語で走り、`modules_of` が `.py` を見つけられないせいで
+    TypeScript の計画の契約22件をすべて拒んだ。直後に `validate` も同じことをした。
+    どちらも正しい計画で、文法が違っていた。
 
-    A global that every caller must remember to set is a global that someone
-    will not set. The plan carries the answer, so the function that reads the
-    plan reads it.
+    呼び出し側が毎回設定を覚えておかなければならないグローバル変数は、誰かが
+    設定し忘れるグローバル変数だ。答えは計画が持っているので、計画を読む関数が
+    それを読む。
     """
     language = tasks.get("language") if isinstance(tasks, dict) else None
     if language in LANGUAGES:
@@ -1505,16 +1729,15 @@ def adopt_language(tasks: dict) -> None:
 
 
 def validate_plan(tasks: dict) -> list[str]:
-    """Return every violation. The planner's output is checked before it is
-    obeyed -- this is the only objective gate on the planning side, and it runs
-    without calling any model."""
+    """違反をすべて返す。プランナーの出力は、従う前に確かめる。計画の側で唯一の
+    客観的な関門で、どのモデルも呼ばずに走る。"""
     adopt_language(tasks)
     problems: list[str] = []
     steps = tasks.get("steps")
     if not isinstance(steps, list) or not steps:
         return ["L1: tasks.json has no non-empty `steps` array"]
 
-    # L1 -- shape
+    # L1 -- 形
     for i, s in enumerate(steps):
         where = f"step[{i}]" if not isinstance(s.get("id"), str) else f"step {s['id']}"
         for key, typ in REQUIRED_KEYS.items():
@@ -1535,7 +1758,7 @@ def validate_plan(tasks: dict) -> list[str]:
             problems.append(f"L1: {where}.contracts.provides must be a list of signature strings")
 
     if problems:
-        return problems  # later rules assume the shape holds
+        return problems  # 後の規則は、形が成り立っていることを前提にする
 
     ids = [s["id"] for s in steps]
     seen: set[str] = set()
@@ -1547,13 +1770,13 @@ def validate_plan(tasks: dict) -> list[str]:
     for s in steps:
         sid = s["id"]
 
-        # L2 -- dependencies point backwards only, so cycles cannot exist
+        # L2 -- 依存は前だけを指す。だから循環は起こりえない
         for dep in s["depends_on"]:
             if dep not in seen:
                 problems.append(f"L2: step {sid} depends on {dep}, which is not an earlier step")
         seen.add(sid)
 
-        # L3 -- everything required is provided by something it depends on
+        # L3 -- 求めるものはすべて、依存先のどれかが提供している
         available = set().union(*(provides_by_step[d] for d in s["depends_on"] if d in provides_by_step)) \
             if s["depends_on"] else set()
         for req in s["contracts"].get("requires", []):
@@ -1561,25 +1784,24 @@ def validate_plan(tasks: dict) -> list[str]:
             if name not in available:
                 problems.append(f"L3: step {sid} requires `{name}`, which no dependency provides")
 
-        # L5 -- a file is either written or tested, never both
+        # L5 -- ファイルは書くか試すかのどちらかで、両方にはならない
         overlap = set(s["files_write"]) & set(s["files_test"])
         if overlap:
             problems.append(f"L5: step {sid} lists {sorted(overlap)} in both files_write and files_test")
 
-        # L12 -- the write fence only covers src/ and tests/
+        # L12 -- 書き込みの柵が覆うのは src/ と tests/ だけ
         #
-        # set_writable() chmods exactly those two directories, and adopt() walks
-        # exactly those two. A step that writes anywhere else is not fenced at
-        # all: the workspace root is group-writable (the solver's patch tool
-        # needs it), so the solver could create a package beside src/ and write
-        # to it during the phase where writing code is supposed to be
-        # impossible. assert_touched would still catch it afterwards, but that
-        # turns the primary mechanism into a tripwire, and files created there
-        # stay solver-owned -- which the runner can neither chmod nor clean up.
+        # set_writable() が chmod するのはちょうどその2つのディレクトリで、adopt()
+        # がたどるのもその2つだ。ほかの場所に書くステップは、まったく柵の中に
+        # いない。ワークスペースの根はグループで書ける（ソルバーのパッチの道具が
+        # 要る）ので、ソルバーは src/ の隣にパッケージを作り、コードを書けない
+        # はずの位相でそこに書ける。assert_touched は後でそれを捕まえるが、それでは
+        # 主な仕組みがトリップワイヤになり、そこに作られたファイルは solver の
+        # 所有のまま残る。ランナーはそれを chmod も片付けもできない。
         #
-        # A first plan gets this wrong by default, because "put the package at
-        # the repository root" is ordinary Python layout. So it is a rule the
-        # linter holds, not advice in a brief.
+        # 最初の計画はふつうこれを誤る。「パッケージはリポジトリの根に置く」は
+        # 普通の Python の配置だからだ。だからブリーフの助言ではなく、リンタが
+        # 持つ規則にする。
         for f in s["files_write"]:
             if not f.startswith("src/"):
                 problems.append(f"L12: step {sid} writes {f}, which is outside src/")
@@ -1587,32 +1809,30 @@ def validate_plan(tasks: dict) -> list[str]:
             if not f.startswith("tests/"):
                 problems.append(f"L12: step {sid} tests {f}, which is outside tests/")
 
-        # L14 -- a contract states the shape of what it hands over
+        # L14 -- 契約は、渡すものの形を述べる
         #
-        # BOOTSTRAP 1-5: contracts are the ONLY thing passed to a later step.
-        # `-> tuple` is a contract that cannot be discharged from the contract:
-        # the arity is nowhere in it, so the caller cannot destructure what it
-        # gets back and the stub cannot know what to return.
+        # BOOTSTRAP 1-5: 後のステップに渡るのは契約「だけ」だ。`-> tuple` は、
+        # 契約からは果たせない契約だ。要素の数がどこにも無いので、呼び出し側は
+        # 受け取ったものを分解できず、スタブは何を返せばよいか分からない。
         #
-        #     def buy_max_affordable(...) -> tuple      arity not stated
-        #     stub:  return ("__stub__",)               one element
+        #     def buy_max_affordable(...) -> tuple      要素の数が無い
+        #     stub:  return ("__stub__",)               要素は1つ
         #     test:  result, count = buy_max_affordable(...)
         #            ValueError: not enough values to unpack
         #
-        # RED_GATE stops that correctly (R5: the call itself is broken, not the
-        # value), but nothing downstream can repair it. The solver only ever
-        # sees the signature during STUB -- showing it the tests would let it
-        # hardcode the answers -- and the planner spent two escalations on it
-        # without being able to fix it, because the defect is in a contract it
-        # had already written and P5 will not let it edit a green step.
+        # RED_GATE はそれを正しく止める（R5: 壊れているのは値ではなく呼び出し
+        # そのもの）が、その先の何もそれを直せない。ソルバーは STUB のあいだ署名
+        # しか見ない（テストを見せると答えを決め打ちできてしまう）。プランナーは
+        # エスカレーションを2回使っても直せなかった。欠陥はすでに書いた契約に
+        # あり、P5 は緑のステップの編集を許さないからだ。
         #
-        # So the rule sits here, before any of that can happen. Same move as
-        # taking sudo away rather than watching for chmod 777: make the
-        # unstatable contract unwritable instead of handling its consequences.
+        # だから規則を、そのどれかが起きる前のここに置く。chmod 777 を見張るの
+        # ではなく sudo を取り上げるのと同じ手で、述べようのない契約の後始末を
+        # するのではなく、それを書けなくする。
         #
-        # This is a Python-shaped expression of a language-independent rule --
-        # "the contract determines the shape". A second language re-states it in
-        # its own type syntax; the rule itself does not change.
+        # これは、言語に依存しない規則「契約が形を決める」を Python の形で
+        # 表したものだ。2つ目の言語は自分の型の構文で言い直す。規則そのものは
+        # 変わらない。
         for provided in s["contracts"]["provides"]:
             shapeless = LANGUAGE["shapeless"]
             opener = LANGUAGE["shape_bracket"]
@@ -1627,26 +1847,24 @@ def validate_plan(tasks: dict) -> list[str]:
                     f"be in it ({LANGUAGE['shape_example']}). "
                     f"A named type is better still where the shape has meaning")
 
-        # L15 -- a contract says where the thing it declares lives
+        # L15 -- 契約は、宣言するものの置き場を言う
         #
-        # The brief for writing tests does not include the goal, on purpose: the
-        # tests have to come from the acceptance criteria, not from a
-        # description of the implementation. What it does include is `provides`.
-        # So if `provides` does not say which module a function is in, the
-        # module name is nowhere in the brief and the solver guesses:
+        # テストを書くためのブリーフには、あえて goal を入れない。テストは実装の
+        # 説明からではなく、受け入れ条件から作るものだからだ。入れるのは
+        # `provides` だ。だから `provides` が関数の置き場のモジュールを言わないと、
+        # モジュール名はブリーフのどこにも無く、ソルバーは推測する:
         #
         #     def new_game(now: float) -> GameState
-        #     -> from incgame.game import new_game   (game.py belongs to S10)
-        #     -> collected 1 test, expected 4        (R1, and an escalation gone)
+        #     -> from incgame.game import new_game   （game.py は S10 のもの）
+        #     -> collected 1 test, expected 4        （R1。エスカレーションを1回失う）
         #
-        # The runner does know the modules -- files_write lists them -- and the
-        # cheaper-looking fix is to append them to the brief. It was rejected:
-        # a step that writes four files still leaves which-symbol-lives-where to
-        # a guess, and a LATER step sees none of this. dep_contracts renders the
-        # frozen `provides` strings and nothing else, so a contract that does not
-        # carry its module cannot be repaired downstream at all. The information
-        # belongs in the contract, which is 1-5 again: the one channel between
-        # steps has to be sufficient on its own.
+        # ランナーはモジュールを知っている（files_write に並んでいる）ので、
+        # 安上がりに見える直し方はそれをブリーフに足すことだ。それは採らなかった。
+        # 4つのファイルを書くステップでは、どの名前がどこにあるかがやはり推測に
+        # なり、しかも「後の」ステップにはどれも見えない。dep_contracts は凍結した
+        # `provides` の文字列しか描かないので、モジュールを運ばない契約は、後から
+        # 一切直せない。その情報は契約の中にあるべきだ。これも 1-5 で、ステップ間の
+        # 唯一の経路は、それだけで足りなければならない。
         for provided in s["contracts"]["provides"]:
             boundary = LANGUAGE["name_boundary"]
             if not any(re.search(rf"(?<!{boundary}){re.escape(m)}(?!{boundary})",
@@ -1660,7 +1878,7 @@ def validate_plan(tasks: dict) -> list[str]:
                     f"in the line, e.g. `... -- defined in "
                     f"{(modules_of(s['files_write']) or ['pkg.mod'])[0]}`")
 
-        # L6 -- normal, boundary and error are all covered
+        # L6 -- normal、boundary、error がすべてそろっている
         missing = CASES - {a["case"] for a in s["acceptance"]}
         if missing:
             problems.append(f"L6: step {sid} has no acceptance case of type {sorted(missing)}")
@@ -1671,20 +1889,18 @@ def validate_plan(tasks: dict) -> list[str]:
                 f"L7: step {sid} expects {s['expected_tests']} tests for "
                 f"{len(s['acceptance'])} acceptance criteria")
 
-        # L8 -- skipping human review requires criteria a machine can check
+        # L8 -- 人間のレビューを省くには、機械が確かめられる条件が要る
         #
-        # The `then` is checked ALONE. It used to be concatenated with the
-        # `given`, and a criterion whose expected result was stated as a
-        # comparison against another call passed on the strength of a number in
-        # its setup:
+        # `then` は「単独で」確かめる。`given` とつなげて確かめると、期待する
+        # 結果を別の呼び出しとの比較で述べた条件が、前提の中の数のおかげで通る:
         #
         #     given  state = new_game(0.0); p = buy(state, ...)
         #     then   advance(p.state, ..., 0.0) == p.state exactly
         #
-        # Both sides of that come out of the stub, so both are the same sentinel
-        # and the test PASSES at RED_GATE -- R4 stops the step for a test that
-        # never showed it could fail. The expected result has to be a value, not
-        # a relationship between two things the code under test produced.
+        # 両辺ともスタブから出てくるので同じ番兵の値になり、テストは RED_GATE で
+        # 「通る」。落ちうることを一度も示さなかったテストのために、R4 がステップを
+        # 止める。期待する結果は値でなければならず、テスト対象のコードが作った
+        # 2つのものの関係であってはならない。
         if not s["review_gate"]:
             for a in s["acceptance"]:
                 if not CONCRETE.search(a["then"]):
@@ -1692,7 +1908,7 @@ def validate_plan(tasks: dict) -> list[str]:
                         f"L8: step {sid} has review_gate false but the [{a['case']}] criterion "
                         f"states no concrete value")
 
-    # L4 -- one owner per file, across the whole plan
+    # L4 -- 計画全体を通して、ファイルの持ち主は1つ
     owners: dict[str, str] = {}
     for s in steps:
         for f in s["files_write"]:
@@ -1700,44 +1916,41 @@ def validate_plan(tasks: dict) -> list[str]:
                 problems.append(f"L4: {f} is written by both {owners[f]} and {s['id']}")
             owners[f] = s["id"]
 
-    # L9 / L10 -- something joined-up early, and a join at the end
-    # L9 asked for an integration or skeleton step within the first three. L13
-    # requires the FIRST step to be a skeleton, which satisfies L9 by
-    # construction -- it could never fire again. Retired 2026-08-21 rather than
-    # left as a rule nobody could make fail. The number is not reused: L-numbers
-    # are identifiers, and the ledger of past runs refers to them.
+    # L9 / L10 -- 早いうちにつながったものがあり、最後につなぐ
+    # L9 は、最初の3つのうちに integration か skeleton のステップを求めていた。
+    # L13 は「最初の」ステップを skeleton にすることを求め、それは作りの上で L9 を
+    # 満たすので、L9 はもう発火しえない。誰も落とせない規則として残さず、
+    # 2026-08-21 に廃止した。番号は使い回さない。L の番号は識別子で、過去の
+    # 走行の台帳がそれを参照している。
     kinds = [s["kind"] for s in steps]
     if kinds[-1] != "integration":
         problems.append("L10: the final step is not an integration step")
 
-    # L13 -- the plan begins with a walking skeleton
+    # L13 -- 計画は walking skeleton から始まる
     #
-    # L9 asked for an integration step early and its comment claimed that was a
-    # walking skeleton. It was not. "Integration" here only means a step that
-    # ties modules together, and a plan can satisfy it -- can satisfy every rule
-    # above, go green on all ten steps, and pass its whole suite -- while the
-    # thing it built cannot be reached from the state it starts in. That is what
-    # the first real plan did: an incremental game whose only source of
-    # resources was production, whose production required generators, and whose
-    # generators had to be bought with resources. Nothing was wrong with any
-    # step. There was no step about starting.
+    # L9 は早いうちに integration のステップを求め、そのコメントはそれが
+    # walking skeleton だと言っていた。そうではなかった。ここで言う
+    # "integration" はモジュールをつなぐステップというだけで、計画はそれを
+    # 満たしつつ（上の規則をすべて満たし、10ステップすべてで緑になり、スイート
+    # 全体を通しつつ）、作ったものに初期状態から届かないことがありうる。最初の
+    # 実際の計画がまさにそうだった。資源の唯一の出どころが生産で、生産には
+    # 発電機が要り、発電機は資源で買うしかないインクリメンタルゲーム。どの
+    # ステップにも誤りは無かった。始まりについてのステップが無かった。
     #
-    # A skeleton step is the thin end-to-end slice: from the system's initial
-    # state, through the public API, to something a person would recognise as
-    # the product working. Built first, and thin -- later steps deepen it.
+    # skeleton のステップは、端から端までの薄い切り口だ。システムの初期状態から、
+    # 公開 API を通って、人が製品として動いていると認めるものまで。最初に作り、
+    # 薄くする。後のステップがそれを厚くする。
     #
-    # What this rule can enforce is structural: a plan begins with one, and has
-    # exactly one. It cannot check that the criteria inside it are honest. What
-    # it does buy is that the criteria have to be WRITTEN, at the point where the
-    # plan is being made -- and "given a new game, when ..., then the player
-    # has ..." cannot be written without deciding how the first resource is
-    # earned. The omission stops being something a human notices afterwards and
-    # becomes something the planner walks into while planning.
+    # この規則が強制できるのは構造だ。計画は skeleton から始まり、ちょうど1つ
+    # 持つ。中の条件が誠実かは確かめられない。この規則が買うのは、計画を作る
+    # 時点で条件を「書かせる」ことだ。「新しいゲームで、……すると、プレイヤーは
+    # ……を持つ」は、最初の資源をどう得るかを決めずには書けない。その抜けは、
+    # 後で人間が気づくものから、プランナーが計画中に行き当たるものに変わる。
     #
-    # Once green, the skeleton stays green: PASS_TO_PASS runs its tests at every
-    # later VERIFY. That is the standing end-to-end test of double-loop TDD,
-    # arrived at from the other side -- green from the first step rather than red
-    # until the last, which is the shape this runner can actually enforce.
+    # 一度緑になった skeleton は緑のままだ。PASS_TO_PASS が後の VERIFY のたびに
+    # そのテストを走らせる。二重ループの TDD の、常設の端から端までのテストに、
+    # 反対側からたどり着いた形だ。最後まで赤ではなく最初のステップから緑で、
+    # それがこのランナーが実際に強制できる形だ。
     skeletons = [s["id"] for s in steps if s["kind"] == "skeleton"]
     if kinds[0] != "skeleton":
         problems.append(
@@ -1749,9 +1962,8 @@ def validate_plan(tasks: dict) -> list[str]:
             f"L13: a plan has exactly one skeleton step, not {len(skeletons)}"
             + (f" ({', '.join(skeletons)})" if skeletons else ""))
 
-    # L11 -- nothing is built that nothing uses. Integration and skeleton steps
-    # are exempt: tying the pieces together is the deliverable there, not an
-    # input to a later step.
+    # L11 -- 何も使わないものは作らない。integration と skeleton のステップは
+    # 除く。そこでは部品をつなぐこと自体が成果物で、後のステップへの入力ではない。
     used = set().union(*[
         {declared_name(r) for r in s["contracts"].get("requires", [])}
         for s in steps
@@ -1775,18 +1987,18 @@ def load_plan(step_id: str) -> tuple[dict, str]:
 
 
 # --------------------------------------------------------------------------
-# the planner channel (BOOTSTRAP 1-4, RUNNER_SPEC section 2)
+# プランナーの経路（BOOTSTRAP 1-4、RUNNER_SPEC 2 章）
 # --------------------------------------------------------------------------
 
 
 def canon(obj) -> str:
-    """Order-independent comparison key. Reindenting tasks.json must not read as
-    a change, and reordering the keys of a step must not read as one either."""
+    """順序に依存しない比較用のキー。tasks.json の字下げを変えても、ステップの
+    キーを並べ替えても、変更と読まれてはならない。"""
     return json.dumps(obj, sort_keys=True, ensure_ascii=False)
 
 
 def green_steps() -> set[str]:
-    """Step ids that have already gone green, read from the ledger."""
+    """すでに緑になったステップの id。台帳から読む。"""
     done: set[str] = set()
     if not LEDGER.exists():
         return done
@@ -1803,12 +2015,12 @@ def green_steps() -> set[str]:
 
 
 def clear_proposal() -> None:
-    """Empty out/ before asking for a new proposal.
+    """新しい提案を頼む前に out/ を空にする。
 
-    A leftover file from a previous call would otherwise be applied as if the
-    planner had just written it. The runner can do this despite the files
-    belonging to `planner`: out/ is sticky, and sticky permits deletion by the
-    owner of the file OR the owner of the directory, which is the runner.
+    そうしないと、前の呼び出しの残りのファイルが、プランナーがいま書いたものと
+    して適用される。ファイルは `planner` のものだが、ランナーはこれができる。
+    out/ はスティッキーで、スティッキーはファイルの所有者「または」ディレクトリの
+    所有者（ランナー）に削除を許す。
     """
     PLANNER_OUT.mkdir(parents=True, exist_ok=True)
     for entry in PLANNER_OUT.iterdir():
@@ -1820,15 +2032,29 @@ def clear_proposal() -> None:
         entry.unlink()
 
 
-def call_planner(brief: str) -> str:
-    """Hand the planner one brief. Same shape as call_solver, same reasons.
+def restore_proposal(files: dict[str, str]) -> None:
+    """out/ を控えておいた提案に戻す。
 
-    Note what the brief contains: the whole current plan, acceptance criteria
-    included. That is not a leak. The planner is the AUTHOR of the criteria --
-    BOOTSTRAP 1-1 separates the account that writes them from the account that
-    writes the code, and the planner is in neither `solverw` nor `runner`. What
-    the 0700 on plan/ buys is that the planner cannot WRITE tasks.json: every
-    change it wants has to come back through check_proposal below.
+    plan refine は改訂を頼む前に out/ を空にする。改訂が失敗したり、プランナーが
+    エスカレーションしたりすると、リンタを通っていた改訂前の提案が失われる。
+    それを防ぐために、ランナーが控えから書き戻す。書き戻したファイルは runner の
+    所有になるが、次の clear_proposal で消せるので支障はない。
+    """
+    clear_proposal()
+    for name, text in files.items():
+        path = PLANNER_OUT / name
+        path.write_text(text, encoding="utf-8")
+        path.chmod(0o644)
+
+
+def call_planner(brief: str) -> str:
+    """プランナーにブリーフを1つ渡す。形も理由も call_solver と同じ。
+
+    ブリーフが何を含むかに注意する。受け入れ条件を含む、いまの計画全体だ。それは
+    漏れではない。プランナーは条件の「書き手」だ。BOOTSTRAP 1-1 は条件を書く
+    アカウントとコードを書くアカウントを分けており、プランナーは `solverw` にも
+    `runner` にもいない。plan/ の 0700 が買うのは、プランナーが tasks.json を
+    「書けない」ことだ。望む変更はすべて、下の check_proposal を通って戻る。
     """
     PLANNER_BRIEF.mkdir(parents=True, exist_ok=True)
     brief_path = PLANNER_BRIEF / "plan.md"
@@ -1838,10 +2064,11 @@ def call_planner(brief: str) -> str:
 
     limit = TIMEOUTS["planner"]
     try:
-        # The limit is passed, not assumed: planner-run defaults to 900s, so a
-        # value set here and not handed over is a ceiling that never applies.
-        proc = run(agent_command("planner", PLANNER_RUN, brief_path, limit),
-                   timeout=limit + BACKSTOP_MARGIN)
+        # 上限は前提にせず渡す。planner-run の既定は 900 秒なので、ここで決めて
+        # 渡さない値は、決して効かない上限になる。
+        proc = run_agent("planner", "PLAN_PROPOSE", lambda: run(
+            agent_command("planner", PLANNER_RUN, brief_path, limit),
+            timeout=limit + BACKSTOP_MARGIN))
     except subprocess.TimeoutExpired:
         raise Halt("PLAN_PROPOSE", f"planner still running after {limit + BACKSTOP_MARGIN}s",
                    "planner-run's internal timeout did not fire; check with: "
@@ -1855,12 +2082,11 @@ def call_planner(brief: str) -> str:
 
 
 def read_proposal() -> dict[str, str]:
-    """Whatever is in out/, checked as a set of filenames before it is read.
+    """out/ にあるもの。読む前に、ファイル名の集合として確かめる。
 
-    This is the "the change is confined to three files" rule, and it is a
-    filename allowlist rather than a diff inspection on purpose: there is no
-    proposal that touches a fourth file and then has to be argued about, because
-    there is nowhere for a fourth file to go.
+    「変更は3つのファイルに限る」の規則で、差分の検査ではなくファイル名の
+    許可リストにしてあるのは意図的だ。4つ目のファイルに触れて、その是非を議論
+    しなければならない提案は存在しない。4つ目のファイルの行き先が無いからだ。
     """
     if not PLANNER_OUT.is_dir():
         raise Halt("PLAN_APPLY", f"no proposal directory at {PLANNER_OUT}")
@@ -1890,20 +2116,69 @@ def read_proposal() -> dict[str, str]:
     return proposal
 
 
+def removed_entries(old: list, new: list) -> int | None:
+    """new が old から項目を消しただけのものなら、消した数を返す。違えば None。
+
+    残った項目は、順番も中身も old のままでなければならない。書き換えや追加が
+    1つでもあれば、消しただけとは言えない。
+    """
+    kept = 0
+    for entry in old:
+        if kept < len(new) and canon(entry) == canon(new[kept]):
+            kept += 1
+    if kept != len(new):
+        return None
+    return len(old) - len(new)
+
+
+def r4_allowance() -> tuple[str, int] | None:
+    """いま開いているエスカレーションが R4 なら、(ステップ, 通ったテストの数)。
+
+    開いているかは ESCALATION.md の有無で決める。plan apply が答えると消え、
+    reset でも消える。台帳の最後の ESCALATED を見て、R4 で、通ったテストの数が
+    残っているときだけ返す。
+    """
+    if not ESCALATION.exists() or not LEDGER.exists():
+        return None
+    last = None
+    for line in LEDGER.read_text(encoding="utf-8").splitlines():
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if record.get("event") == "ESCALATED":
+            last = record
+    if not last or last.get("phase") != "RED_GATE" \
+            or not str(last.get("reason", "")).startswith("R4"):
+        return None
+    passing = int(last.get("r4_passing") or 0)
+    return (last.get("step"), passing) if passing > 0 else None
+
+
 def check_proposal(old: dict, new: dict) -> list[str]:
-    """Everything the planner may not change about a step that already exists.
+    """すでにあるステップについて、プランナーが変えてはならないものすべて。
 
-    BOOTSTRAP 1-4 lets the planner answer an escalation with case (a) -- tighten
-    the goal, re-plan the approach -- and reserves (b) and (c), which rewrite or
-    discard acceptance criteria, for the human. That distinction is enforced
-    here, mechanically, because "do not weaken the criteria to make the tests
-    pass" is exactly the instruction a stuck agent has the most reason to
-    reinterpret.
+    BOOTSTRAP 1-4 は、プランナーがエスカレーションに (a)（goal を締め、進め方を
+    計画し直す）で答えることを許し、受け入れ条件を書き直すか捨てる (b) と (c) を
+    人間に残している。その区別を、ここで機械的に強制する。「テストを通すために
+    条件を緩めるな」は、詰まったエージェントが読み替える理由を最も多く持つ指示
+    だからだ。
 
-    Adding steps is allowed; that is how a plan grows.
+    ステップを足すのは許す。計画はそうやって育つ。
+
+    例外は1つだけある。RED_GATE の R4（スタブに対して通るテスト）で止まった
+    ステップでは、条件を「消す」ことを許す。スタブに対して通るテストは、落ちうる
+    ことを一度も示しておらず、どの実装でも同じ結果になる。そういう条件は緩める
+    対象ではなく、最初から何も確かめていない。run 8 の S10 では、環境が置いた
+    index.html の中身を確かめる条件のために、人間が計画を手で直した。
+
+    許すのは消すことだけで、残す条件は一字も変えない。消せる数は R4 で通った
+    テストの数まで、expected_tests を下げられるのも消した数までにする。どれを
+    消したかまでは機械で確かめられないので、数で縛る。
     """
     problems: list[str] = []
     done = green_steps()
+    allowance = r4_allowance()
     old_steps = {s["id"]: s for s in old.get("steps", [])}
     new_steps = {s["id"]: s for s in new.get("steps", [])}
 
@@ -1914,23 +2189,39 @@ def check_proposal(old: dict, new: dict) -> list[str]:
                 f"P1: step {sid} was removed. Deleting a step deletes its acceptance "
                 f"criteria, which is case (c) and belongs to the human")
             continue
+        dropped = 0
         if canon(o.get("acceptance")) != canon(n.get("acceptance")):
-            problems.append(
-                f"P2: step {sid} has different acceptance criteria. That is case (b) "
-                f"and belongs to the human")
-        # expected_tests is what RED_GATE R1 counts against, so lowering it asks
-        # for fewer tests over the same criteria. The linter's L7 already forbids
-        # dropping below the number of criteria; this forbids drifting down at all.
-        if int(n.get("expected_tests", 0)) < int(o.get("expected_tests", 0)):
+            removed = removed_entries(o.get("acceptance") or [], n.get("acceptance") or [])
+            limit = allowance[1] if allowance and allowance[0] == sid else 0
+            if not limit:
+                problems.append(
+                    f"P2: step {sid} has different acceptance criteria. That is case (b) "
+                    f"and belongs to the human")
+            elif removed is None:
+                problems.append(
+                    f"P2: step {sid} rewrites or adds acceptance criteria. After R4 you "
+                    f"may only delete entries; the ones you keep must stay word for word")
+            elif removed > limit:
+                problems.append(
+                    f"P2: step {sid} deletes {removed} acceptance entries, but R4 found "
+                    f"only {limit} test(s) passing against the stub")
+            else:
+                dropped = removed
+        # expected_tests は RED_GATE の R1 が照らす数なので、下げることは同じ条件に
+        # 対してテストを減らせと頼むことになる。リンタの L7 は条件の数を下回ることを
+        # すでに禁じている。これは、少しでも下がることを禁じる。R4 の例外で条件を
+        # 消したときだけ、消した数まで下げてよい。
+        if int(n.get("expected_tests", 0)) < int(o.get("expected_tests", 0)) - dropped:
             problems.append(
                 f"P3: step {sid} lowers expected_tests from {o.get('expected_tests')} "
-                f"to {n.get('expected_tests')}")
+                f"to {n.get('expected_tests')}"
+                + (f"; deleting {dropped} entr{'y' if dropped == 1 else 'ies'} allows "
+                   f"at most {int(o.get('expected_tests', 0)) - dropped}" if dropped else ""))
         if o.get("review_gate") and not n.get("review_gate"):
             problems.append(f"P4: step {sid} turns review_gate off")
-        # A step that is already green was measured against a definition that is
-        # now history. Rewriting it does not change the code -- the runner will
-        # not re-run it -- it only makes the ledger describe something that never
-        # happened.
+        # すでに緑のステップは、いまでは過去となった定義に対して測られた。書き
+        # 直してもコードは変わらない（ランナーは走らせ直さない）。台帳が、起きても
+        # いないことを記述するようになるだけだ。
         if sid in done and canon(o) != canon(n):
             problems.append(
                 f"P5: step {sid} is already green; its definition is a record of what "
@@ -1946,6 +2237,29 @@ def brief_plan_revise(step: dict | None, escalation: str, feedback: str = "") ->
     tasks = (PLAN / "tasks.json").read_text(encoding="utf-8")
     done = sorted(green_steps())
     focus = f"step {step['id']}" if step else "the plan"
+    # R4 で止まったときだけ、条件を消す手を伝える。check_proposal が許す範囲と
+    # 同じことを言う。
+    allowance = r4_allowance()
+    r4_section = "" if not allowance else f"""
+# When a test already passed against the stub (R4)
+
+Step {allowance[0]} stopped because {allowance[1]} test(s) passed against the stub,
+before anything was implemented. A test that passes there has never shown that
+it can fail. Usually the criterion behind it checks something no step's code
+decides: a file the environment provides, or what a tool such as a development
+server produces. No implementation can make that criterion fail, so the step
+stops at R4 every time, however the goal is written.
+
+For this step only, you may DELETE such acceptance entries:
+- at most {allowance[1]} of them, and only ones that cannot fail against any stub
+- keep every other entry word for word, in the same order
+- lower expected_tests by at most the number you delete
+- keep a "normal", a "boundary" and an "error" case (L6)
+
+If the criterion is about this step's own behaviour and the stub happened to
+satisfy it, do not delete it. Tighten the goal or the contract instead so that a
+stub cannot satisfy it, or escalate.
+"""
     return f"""You are the planner. Revise the plan so that {focus} can succeed.
 
 You do not write code and you cannot reach the repository. You write files into
@@ -1985,7 +2299,7 @@ That is: how the step is approached, and how it is described to the solver.
 - lowering `expected_tests`, or turning `review_gate` off
 - any change at all to a step that is already green
 - a plan that fails the linter (RUNNER_SPEC section 8)
-
+{r4_section}
 This is BOOTSTRAP 1-4. Case (a) -- the implementation is what is wrong, so
 tighten the goal -- is yours. Case (b) -- the acceptance criteria themselves are
 wrong or unreachable -- and case (c) -- the upstream design is wrong -- are
@@ -2001,14 +2315,14 @@ Output nothing but the files. Do not restate the plan in your final message.
 """
 
 # --------------------------------------------------------------------------
-# bootstrapping a plan from the human's requirements (BOOTSTRAP Phase 0..3)
+# 人間の要件から計画を起こす（BOOTSTRAP Phase 0〜3）
 # --------------------------------------------------------------------------
 
 
-# Everything the planner needs to produce a plan this runner will accept. It is
-# a plain string rather than an f-string because it contains JSON braces, and
-# every rule in it is one the runner enforces anyway -- stating them here only
-# saves a round trip, it does not make them true.
+# このランナーが受け入れる計画を作るのに、プランナーが要るものすべて。JSON の
+# 波括弧を含むので、f-string ではなく普通の文字列にしてある。中の規則はどれも
+# ランナーがどのみち強制するもので、ここに書くのは往復を1回省くためだけだ。
+# 書いたからといって、それが真になるわけではない。
 BOOTSTRAP_RULES = """
 # What to write, into the current directory
 
@@ -2106,7 +2420,8 @@ yourself first.
          acceptance case
     L7   expected_tests is at least the number of acceptance criteria
     L8   with review_gate false, the `then` of every criterion states a concrete
-         value ON ITS OWN: a number, a quoted literal, or an exception type
+         value ON ITS OWN: a number, a quoted literal, an exception type, an
+         empty collection ([] {} ()), or True / False / None
     L10  the LAST step is kind "integration"
     L11  a "unit" step may not provide something that no later step requires
     L12  files_write is under src/, files_test is under tests/
@@ -2210,16 +2525,15 @@ Output nothing but the files. Do not restate the plan in your final message.
 
 
 def environment_facts() -> str:
-    """What the project actually looks like, read off the machine.
+    """プロジェクトが実際にどうなっているかを、機械から読み取る。
 
-    The rules in BOOTSTRAP_RULES are a transcription of what the runner
-    enforces, which means they are only as complete as whoever wrote them
-    remembered -- L12 was missing from the first version and a plan was built
-    against the gap. Facts about the tree, the interpreter and the test command
-    have no such failure mode, so they are gathered rather than written down.
+    BOOTSTRAP_RULES の規則は、ランナーが強制するものの書き写しだ。つまり、書いた
+    者が覚えていた分しか揃わない。最初の版には L12 が無く、その隙間に向けて
+    計画が作られた。木、インタプリタ、テストのコマンドについての事実には、その
+    失敗の仕方が無いので、書き写さずに集める。
 
-    The retry loop below is the real answer to that problem: anything the brief
-    forgets to mention, the linter still catches, and the planner is told.
+    その問題への本当の答えは、下のやり直しのループだ。ブリーフが言い忘れたことも、
+    リンタが捕まえ、プランナーに伝わる。
     """
     def version(binary: Path) -> str:
         try:
@@ -2228,8 +2542,16 @@ def environment_facts() -> str:
         except (OSError, IndexError):
             return "(not installed)"
 
+    typescript = LANGUAGE["source_suffix"] == ".ts"
+
     skip = {".git", ".venv", ".runner", "plan", "__pycache__", ".pytest_cache",
             "node_modules"}
+    # index.html と vitest.config.mjs は、35-node.sh が言語に関係なく置く。
+    # 箱は計画の言語を知らないからだ。Python の計画に見せると、クリティックは
+    # 「人が開く index.html からこの計画のコードに届かない」と指摘し、
+    # プランナーはそれに答えられない。TypeScript のときだけ見せる。
+    if not typescript:
+        skip |= {"index.html", "vitest.config.mjs"}
     listing = []
     for child in sorted(PROJECT.rglob("*")):
         if any(part in skip for part in child.relative_to(PROJECT).parts):
@@ -2238,19 +2560,43 @@ def environment_facts() -> str:
         listing.append(f"  {rel}/" if child.is_dir() else f"  {rel}")
     tree = "\n".join(listing) or "  (empty apart from the directories above)"
 
-    # The file that decides what the tests can reach. Different name per
-    # language, same job, and in both cases the planner has to see it: a plan
-    # that fights the import path loses.
+    # 根に置かれたファイルは環境の持ち物で、どのステップも書かない。最初の
+    # ステップより前に完成しているので、中身だけを確かめる条件はスタブの時点で
+    # 通り、RED_GATE の R4 で必ず止まる。run 8 の S10 は index.html の中身を
+    # 確かめる条件で止まり、プランナーは人間に差し戻した。名前は書き写さず、
+    # 実際に置かれているものから取る。
+    provided = sorted(child.name for child in PROJECT.iterdir()
+                      if child.is_file() and child.name not in skip) \
+        if PROJECT.is_dir() else []
+    provided_text = ""
+    if provided:
+        provided_text = f"""
+These files at the root belong to the environment: {", ".join(provided)}.
+No step writes them, and each is already in its final form before the first
+step runs. So a criterion that checks only one of them -- what it says, what it
+imports, that it exists -- is already true against the stub. RED_GATE runs every
+test before anything is implemented, sees that one pass, and stops the step
+(R4). Every criterion has to stay false until this step's own code under src/
+is written. Where one of these files matters, test the code it calls, not the
+file.
+"""
+        if "index.html" in provided:
+            provided_text += """For the page: call `start` on an element and check what it puts there. Do not
+write a criterion about the text of index.html.
+"""
+
+    # テストが何に届くかを決めるファイル。言語ごとに名前は違うが仕事は同じで、
+    # どちらでもプランナーに見せる必要がある。import のパスに逆らう計画は負ける。
     wiring = PROJECT / ("vitest.config.mjs" if LANGUAGE["source_suffix"] == ".ts"
                         else "conftest.py")
     wiring_text = wiring.read_text(encoding="utf-8") if wiring.exists() else "(none)"
 
-    # The launch wiring, shown in full rather than described. The prose version
-    # was enough for a planner writing against it, but not for a critic reading
-    # a finished plan: the first production critique reported twice that nothing
-    # creates index.html or calls start(), because the plan does not create it --
-    # the environment does, and nobody had told the critic that. Two of its five
-    # findings were about a file sitting at the root the whole time.
+    # 起動のつなぎを、説明ではなく全文で見せる。文章の説明は、それに向けて書く
+    # プランナーには足りたが、出来上がった計画を読むクリティックには足りなかった。
+    # 最初の本番の批評は、index.html を作るものも start() を呼ぶものも無いと2度
+    # 報告した。計画は index.html を作らない。作るのは環境で、誰もクリティックに
+    # それを伝えていなかった。5件の指摘のうち2件が、ずっと根にあったファイルに
+    # ついてのものだった。
     page = PROJECT / "index.html"
     page_text = ("""
 `index.html` at the root, which the environment provides and no step writes.
@@ -2258,16 +2604,33 @@ It is what a person opens, and it is already wired:
 
 """
                  f"{page.read_text(encoding='utf-8')}"
-                 ) if page.is_file() else ""
+                 ) if typescript and page.is_file() else ""
 
-    # Gathered rather than written down, like everything else here, and for the
-    # same reason -- but this one has teeth. A criterion such as "the window
-    # opens" produces a test that fails with TclError, which is a real red and
-    # passes RED_GATE cleanly. Nothing the solver can write will turn it green,
-    # so the step spends every attempt of every tier and then an escalation, and
-    # the cause is nowhere in what any of them can see.
+    # 開発サーバで開けることも環境の持ち物だ。run 8 の S10 は、Vite が index.html を
+    # 変換した結果に /src/main.ts が含まれることを確かめる条件を持っていた。Vite は
+    # インラインのモジュールスクリプトを別のモジュールに切り出すので、含まれない。
+    # どの実装でも変わらず、ソルバーは時間切れまで考えた。開けることは箱の検査が
+    # 確かめ、計画には start が何を組み立てるかだけを書かせる。
+    if page_text:
+        page_text += """
+Opening the page through a development server (Vite, for example) is also the
+environment's job. The server serves index.html, and index.html loads `start`
+from src/main.ts; that path is checked when the machine is provisioned. If the
+requirements say the page must open from a dev server, a step that exports
+`start` satisfies it. Write criteria about what `start` puts in the document.
+
+Do not write criteria that start a development server, transform index.html, or
+check what a server sends back. That output is decided by the server, not by
+any code a step writes: no implementation can change it, and the step spends
+every attempt on it.
+"""
+
+    # ここのほかのものと同じ理由で、書き写さずに集める。ただし、これは効き目が
+    # 大きい。「窓が開く」のような条件は TclError で落ちるテストになり、それは
+    # 本物の赤で、RED_GATE をきれいに通る。ソルバーが何を書いても緑にならない
+    # ので、ステップはすべての段の試行を使い、エスカレーションまで使い、その原因は
+    # どれにも見えるところに無い。
     interpreter = PROJECT / ".venv" / "bin" / "python"
-    typescript = LANGUAGE["source_suffix"] == ".ts"
 
     def imports(module: str) -> bool:
         try:
@@ -2278,6 +2641,22 @@ It is what a person opens, and it is already wired:
     display = os.environ.get("DISPLAY", "")
     argv, _ = test_argv(["<the step's files_test>"], STATE / "report.xml")
     command = " ".join(a.replace(str(PROJECT) + "/", "") for a in argv)
+
+    # ソルバーが何をできるかも、書き写さずに使うバックエンドから決める。
+    # テストのコマンドだけを見せると、プランナーは CONTEXT.md に「このコマンドで
+    # 確かめてから終えよ」と書く。claude と local はファイルの読み書きしか
+    # できないので、ソルバーは実行を試みて断られ、試行の一部をそれに使う。
+    if any(tier in SOLVERS_THAT_RUN_COMMANDS for tier in SOLVER_TIERS):
+        solver_tools = ""
+    else:
+        solver_tools = """
+The solver cannot run commands -- not the test command above, and not anything
+else. It reads files and writes files, and that is all it can do. The runner
+runs the tests after the solver has finished and hands the failures to the next
+attempt. So do not tell the solver, in CONTEXT.md or anywhere else, to run the
+tests, to check its work by running something, or to install anything: it will
+try, be refused, and spend part of its attempt on it.
+"""
 
     if typescript:
         runtime = f"Runtime: {version(Path('node'))}"
@@ -2324,12 +2703,12 @@ Graphical display: {f"DISPLAY={display}" if display else "NONE. DISPLAY is not s
 {screen}
 The runner executes the tests itself, as:
     {command}
-
+{solver_tools}
 Everything under the project root, except plan/, .git/ and the frozen
 toolchain -- this is the whole of what exists today:
 
 {tree}
-
+{provided_text}
 {wiring.name} at the root, which the test runner loads automatically:
 
 {wiring_text}
@@ -2338,12 +2717,12 @@ toolchain -- this is the whole of what exists today:
 
 
 def prune_proposal() -> list[str]:
-    """Delete anything in out/ that is not one of the names a proposal may use.
+    """out/ の中で、提案が使ってよい名前でないものをすべて消す。
 
-    Used only between retries. The planner has no way to remove a file it
-    wrote -- it can create and edit, and that is all -- so telling it "delete
-    that" would be advice it cannot follow. The runner owns the directory, so
-    it does the deleting and says so in the feedback.
+    やり直しのあいだにだけ使う。プランナーは自分が書いたファイルを消す手段を
+    持たない（作ることと編集することしかできない）ので、「それを消せ」と伝えても
+    従えない助言になる。ディレクトリはランナーの所有なので、ランナーが消し、
+    フィードバックでそう伝える。
     """
     allowed = set(PROPOSAL_FILES) | {ESCALATE_NAME}
     removed = []
@@ -2359,25 +2738,25 @@ def prune_proposal() -> list[str]:
 
 
 def proposal_problems(proposal: dict[str, str]) -> list[str]:
-    """Everything wrong with this proposal, as the runner will judge it.
+    """この提案のおかしな点すべて。ランナーが判定するとおりに返す。
 
-    Shared by `plan apply`, `plan show` and the retry loop, so that what the
-    planner is told to fix is exactly what would have rejected it -- not a
-    second implementation of the same rules that can drift from the first.
+    `plan apply`、`plan show`、やり直しのループで共有する。プランナーが直せと
+    言われるものが、それを拒んだはずのものとちょうど一致するようにだ。同じ規則を
+    2つ目に実装すると、1つ目からずれうる。
 
-    The language comes from the plan itself; see adopt_language, which
-    validate_plan calls. It is not this function's job and it is not the
-    caller's either -- three callers forgot in a row.
+    言語は計画そのものから取る。validate_plan が呼ぶ adopt_language を参照。
+    それはこの関数の仕事でも、呼び出し側の仕事でもない。3つの呼び出し側が
+    続けて忘れた。
     """
     existing = PLAN / "tasks.json"
     if existing.exists():
         old = json.loads(existing.read_text(encoding="utf-8"))
     else:
-        # With no plan on disk this is a bootstrap: P1..P5 are all about what may
-        # not CHANGE, so they have nothing to compare against. In their place, a
-        # first plan has to be complete -- no project starts with acceptance
-        # criteria and no spec that a human agreed to, nor with a plan whose
-        # solver has no background to work from.
+        # ディスクに計画が無ければ、これは bootstrap だ。P1〜P5 はどれも「変えては
+        # ならない」ものについてなので、比べる相手が無い。代わりに、最初の計画は
+        # そろっていなければならない。人間が合意した仕様の無いまま受け入れ条件
+        # だけで始まるプロジェクトも、ソルバーが拠る背景の無い計画で始まる
+        # プロジェクトも無い。
         incomplete = sorted(set(PROPOSAL_FILES) - set(proposal))
         if incomplete:
             return [f"B1: a first plan must include {name}" for name in incomplete]
@@ -2394,20 +2773,18 @@ def proposal_problems(proposal: dict[str, str]) -> list[str]:
     return check_proposal(old, new) + validate_plan(new)
 
 
-def plan_with_retry(brief_for, tag: str) -> int:
-    """Call the planner, check what it wrote, and hand back the violations.
+def plan_with_retry(brief_for, tag: str, keep: dict[str, str] | None = None) -> int:
+    """プランナーを呼び、書いたものを確かめ、違反を返す。
 
-    This is what lets the planner meet the environment on its own terms rather
-    than the human having to know the environment in advance. The runner already
-    owns the only authoritative statement of the rules -- it is the code that
-    rejects a plan -- so instead of hoping the brief described them completely,
-    it runs them and says what failed.
+    これのおかげで、人間が前もって環境を知っていなくても、プランナーが自分で
+    環境に合わせられる。規則を述べる唯一の正式なものは、すでにランナーが持って
+    いる。計画を拒むコードそのものだ。だから、ブリーフが規則を漏れなく説明した
+    ことに期待するのではなく、規則を走らせて、何が落ちたかを伝える。
 
-    The planner gets no new privilege from this. It does not run the linter and
-    could not; it is told the result. Between attempts its previous files are
-    LEFT IN PLACE, so it edits a plan it can see rather than inventing a fresh
-    one from a prohibition -- which is both cheaper and less likely to trade one
-    violation for another.
+    プランナーはこれで新しい権限を得ない。リンタを走らせず、走らせることも
+    できない。結果を伝えられるだけだ。試行のあいだ、前のファイルは「そのまま
+    残す」。プランナーは禁止事項から新しい計画を作り直すのではなく、見える
+    計画を編集する。そのほうが安く、ある違反を別の違反と取り替えにくい。
     """
     limit = LIMITS["revisions"]
     clear_proposal()
@@ -2422,24 +2799,38 @@ def plan_with_retry(brief_for, tag: str) -> int:
             return 2
 
         removed = prune_proposal()
+
+        # keep: プランナーが書かなかったファイルを補う控え。改訂のブリーフは
+        # CONTEXT.md と SYSTEM_SPEC.md を「変えるときだけ書け」と伝えている。
+        # ところが out/ は呼ぶ前に空にしてあり、未適用の計画は B1 で3ファイル
+        # すべてを要求される。補わないと、ブリーフに従ったプランナーが落ちる
+        # （run 8 の改訂で2回、プランナーの呼び出しを1回ずつ無駄にした）。
+        # エスカレーションには補わない。ESCALATE.md は他のファイルと並べられない。
+        if keep and ESCALATE_NAME not in names:
+            carried = sorted(n for n in keep if not (PLANNER_OUT / n).exists())
+            for name in carried:
+                path = PLANNER_OUT / name
+                path.write_text(keep[name], encoding="utf-8")
+                path.chmod(0o644)
+            if carried:
+                ledger("PLAN_CARRIED", attempt=attempt, files=carried)
+
         proposal = read_proposal()
 
-        # An escalation is an answer, not a draft. Nothing to check and nothing
-        # to fix: it is addressed to the human and `plan apply` will surface it.
+        # エスカレーションは下書きではなく答えだ。確かめるものも直すものも無い。
+        # 宛先は人間で、`plan apply` がそれを表に出す。
         if ESCALATE_NAME in proposal:
             return 0
 
         problems = proposal_problems(proposal)
-        # A stray file is already fully remedied: prune_proposal deleted it, and
-        # read_proposal only ever looks at the three allowed names, so nothing
-        # about it can reach `plan apply`. Making it a violation on top of that
-        # spends an attempt on a condition that no longer exists -- run 7 lost
-        # one of its four that way, on a plan that was otherwise valid. So it is
-        # a note, carried into the feedback of an attempt that is failing for
-        # some other reason, and never a reason to fail by itself. The case
-        # where the stray file mattered -- the plan written under a misspelled
-        # name -- still fails, because deleting it leaves a required file
-        # missing and proposal_problems says so.
+        # 紛れ込んだファイルは、すでに片付いている。prune_proposal が消し、
+        # read_proposal は許された3つの名前しか見ないので、それについての何も
+        # `plan apply` に届かない。そのうえで違反にすると、もう存在しない状態の
+        # ために試行を1回使う。run 7 は4回のうち1回をそれで失った。ほかは正しい
+        # 計画だった。だからこれは注記で、別の理由で落ちている試行のフィード
+        # バックに添えるだけで、それ自体を落ちる理由にはしない。紛れ込んだ
+        # ファイルが問題になる場合（綴りを誤った名前で計画を書いた場合）はやはり
+        # 落ちる。消すと必要なファイルが欠け、proposal_problems がそう言うからだ。
         notes = [f"B3: {n} is not a filename a proposal may use; the "
                  f"runner deleted it" for n in removed]
         if removed:
@@ -2460,7 +2851,7 @@ def plan_with_retry(brief_for, tag: str) -> int:
 
         feedback = "\n".join(notes + problems)
 
-    return 2   # unreachable; the loop always returns
+    return 2   # 届かない。ループは必ず戻る
 
 
 def feedback_section(feedback: str) -> str:
@@ -2481,17 +2872,16 @@ with them and no partial credit: fix all of them, then stop.
 
 
 def stamp_language(name: str) -> None:
-    """Write the language into the accepted proposal, as the runner's own act.
+    """受け入れた提案に、ランナー自身の行為として言語を書き込む。
 
-    The planner never writes this, for the same reason it never writes
-    solver_tiers: which languages this machine has is a property of the box, and
-    which one a project uses is the human's decision before anyone is asked for
-    a plan. Neither is the planner's to choose, and a planner that could choose
-    would sometimes choose the toolchain that is not installed.
+    プランナーはこれを書かない。solver_tiers を書かないのと同じ理由だ。この機械が
+    どの言語を持つかは箱の性質で、プロジェクトがどれを使うかは、誰かに計画を頼む
+    前に人間が決めることだ。どちらもプランナーが選ぶものではなく、選べる
+    プランナーは、入っていないツールチェーンを選ぶことがある。
 
-    Stamped after the linter has passed rather than before, which is safe only
-    because no rule reads this key -- it selects the vocabulary the rules are
-    expressed in, and that selection was already made when the brief was built.
+    リンタが通った後に書き込む。安全なのは、どの規則もこのキーを読まないから
+    だけだ。このキーは規則を表す語彙を選ぶもので、その選択はブリーフを組み
+    立てたときにすでに済んでいる。
     """
     path = PLANNER_OUT / "tasks.json"
     try:
@@ -2502,15 +2892,14 @@ def stamp_language(name: str) -> None:
         return
     tasks["language"] = name
     body = (json.dumps(tasks, ensure_ascii=False, indent=2) + chr(10)).encode("utf-8")
-    # Written WITHOUT O_CREAT, which is not a detail. out/ is sticky and
-    # group-writable, the file belongs to `planner`, and the kernel's
-    # fs.protected_regular (2 here) refuses an O_CREAT open of another user's
-    # existing file in exactly that shape of directory -- the protection that
-    # stops one user pre-creating a file another is about to write in /tmp.
-    # pathlib's write_text opens "w", which is O_WRONLY|O_CREAT|O_TRUNC, so it
-    # is refused with EACCES while an ordinary O_WRONLY|O_TRUNC on the same file
-    # by the same process succeeds. Anything here that rewrites a file the
-    # planner wrote has to do it this way.
+    # O_CREAT を付けずに書く。これは細かい話ではない。out/ はスティッキーで
+    # グループが書け、ファイルは `planner` のものだ。カーネルの
+    # fs.protected_regular（ここでは 2）は、まさにその形のディレクトリで、他人の
+    # 既存のファイルを O_CREAT で開くことを拒む。/tmp で、ほかの人が書こうと
+    # しているファイルを先に作らせないための保護だ。pathlib の write_text は "w"、
+    # つまり O_WRONLY|O_CREAT|O_TRUNC で開くので EACCES で拒まれ、同じプロセスが
+    # 同じファイルを普通の O_WRONLY|O_TRUNC で開くと通る。プランナーが書いた
+    # ファイルをここで書き直すものは、すべてこの方法で行う。
     fd = os.open(path, os.O_WRONLY | os.O_TRUNC)
     try:
         os.write(fd, body)
@@ -2519,43 +2908,40 @@ def stamp_language(name: str) -> None:
 
 
 # --------------------------------------------------------------------------
-# the critic
+# クリティック
 # --------------------------------------------------------------------------
 #
-# A fourth role, and the reason it exists is a measurement rather than a
-# theory. Run 7 finished with ten green steps and forty-two passing tests, and
-# the artifact accepted no input at all: resource started at 0.0, production
-# summed an empty dict, both purchases cost more than zero. Every gate was
-# correct. Every criterion genuinely checked something. Nothing in the machine
-# was positioned to ask whether the result was any good.
+# 4つ目の役。あるのは理屈ではなく測った結果のためだ。run 7 は緑のステップ10と
+# 通ったテスト42で終わり、成果物は入力をまったく受け付けなかった。資源は 0.0
+# から始まり、生産は空の dict を足し、どちらの購入も 0 より高かった。どの関門も
+# 正しかった。どの条件も本当に何かを確かめていた。機械の中に、結果が良いかを
+# 問える位置にあるものが無かった。
 #
-# The gates check the SHAPE OF THE WORK -- were tests written first, do they
-# fail against a stub and fail for the right reason, was anything else touched,
-# did something that passed stop passing. None of that mentions what is being
-# built, and it should not: that is what makes them work for any subject in any
-# language. The critic is the other half. It never decides that anything is
-# finished; it can only say that something is wrong.
+# 関門が確かめるのは「作業の形」だ。テストを先に書いたか、スタブに対して正しい
+# 理由で落ちるか、ほかに何かを触ったか、通っていたものが落ちたか。どれも何を
+# 作るかには触れず、触れるべきでもない。だからどんな題材、どんな言語でも働く。
+# クリティックはもう半分だ。何かが終わったと決めることは決してなく、何かが
+# おかしいと言えるだけだ。
 #
-# TWO MODES, because one question does not find both kinds of defect. Measured
-# on run 7's plan, with the findings disjoint:
+# モードを2つにするのは、1つの問いでは両方の種類の欠陥を見つけられないからだ。
+# run 7 の計画で測り、指摘は重ならなかった:
 #
-#   coverage  found: the reset feature is unreachable from the screen; nothing
-#             verifies the launch command; a required per-generator figure is
-#             not merely absent but actively asserted against, so a correct
-#             implementation would FAIL the criteria
-#   trace     found: the initial state is a fixed point under every available
-#             action; whole modules are dead on arrival; invariants that hold
-#             only because the function they describe is never called
+#   coverage  見つけたもの: リセットの機能に画面から届かない。起動のコマンドを
+#             確かめるものが無い。求められた発電機ごとの数値が、欠けているだけで
+#             なく反対の値で確かめられていて、正しい実装が条件に「落ちる」
+#   trace     見つけたもの: 初期状態が、どの操作でも動かない不動点。モジュール
+#             まるごとが最初から死んでいる。記述する関数が一度も呼ばれないから
+#             こそ成り立つ不変条件
 #
-# Neither found the other's. So they are separate calls with separate briefs
-# rather than one brief with two sections -- a single framing dominated, which
-# is exactly how the first attempt at this missed the fixed point.
+# どちらも、もう片方の指摘を見つけなかった。だから、2つの節を持つ1つの
+# ブリーフではなく、別々のブリーフで別々に呼ぶ。1つの枠組みにすると片方が
+# 支配し、最初の試みはまさにそれで不動点を見逃した。
 
 CRITIQUE_MODES = ("coverage", "trace")
 
 
 def brief_critique_coverage(requirements: str, tasks: str) -> str:
-    """Does this plan, fully satisfied, give the human what they asked for?"""
+    """この計画を完全に満たしたとき、人間が求めたものが手に入るか。"""
     return f"""You are the critic. Your only job is to answer one question about
 a piece of work that has not been built yet.
 
@@ -2609,12 +2995,11 @@ implementation would fail. A plan can test against its own requirements.
 
 
 def brief_critique_trace(tasks: str) -> str:
-    """Starting from the initial state, what can a user actually reach?
+    """初期状態から始めて、使う人は実際にどこまで届くか。
 
-    Deliberately NOT given the requirements. On run 7's plan this mode derived
-    the deadlock from the criteria alone -- which means it can catch a product
-    that cannot work even when the requirements never said the thing it is
-    missing. Run 7's requirements never mentioned a starting state.
+    あえて要件を渡さない。run 7 の計画で、このモードは条件だけから行き詰まりを
+    導いた。つまり、欠けているものについて要件が何も言っていなくても、動かない
+    製品を捕まえられる。run 7 の要件は、初期状態に一言も触れていなかった。
     """
     return f"""You are the tracer. You read a plan for something that has not
 been built yet, and you work out what a user of the finished thing would
@@ -2662,6 +3047,23 @@ Then say plainly:
 - Are there states the artifact is evidently built to handle that no sequence
   of user actions can ever reach? Name them and show why.
 
+  This question is about the artifact's OWN logic: a goal that can never be
+  met, a purchase that can never be afforded, a screen that can never be
+  shown. It is not about input that arrives from outside the user's actions --
+  saved data read back from storage, storage that was edited or corrupted, a
+  save written by an older version, a clock that moved, a file or response
+  from elsewhere. That input is real even though no click produces it, and a
+  test that feeds it in is checking a defence, not exercising dead code. Do
+  not report it.
+
+  That exemption covers the DEFENCE, not the thing being read. If the
+  artifact reads something back -- a save, a setting, a record -- check that
+  some step in the plan also writes it. Something the artifact reads that no
+  step ever writes, and that the plan does not say comes from elsewhere (a
+  file the user supplies, a response from a server), is a defect in the
+  artifact's own logic: the read path is reachable, and what it finds is
+  always nothing. Report that.
+
 Show your derivation with the actual numbers from the criteria, so that someone
 can check each step. Do not describe what the plan intends -- describe what it
 specifies. If your derivation contradicts what the prose in `goal` or
@@ -2671,12 +3073,12 @@ specifies. If your derivation contradicts what the prose in `goal` or
 
 
 def findings_contract() -> str:
-    """What the critic writes, and the one filename it may write it to.
+    """クリティックが書くものと、書いてよい唯一のファイル名。
 
-    Prose inside structured slots, on purpose. The runner needs to count
-    findings to decide whether to continue; the planner needs to read them to
-    act. A bare number cannot carry "the plan tests against its own
-    requirement", and free prose cannot be counted.
+    あえて、構造を持った枠の中に文章を入れる。ランナーは続けるかを決めるために
+    指摘を数える必要があり、プランナーは手を打つために指摘を読む必要がある。
+    数だけでは「計画が自分の要件に逆らって確かめている」を運べず、自由な文章は
+    数えられない。
     """
     return f"""# What to write
 
@@ -2715,11 +3117,11 @@ Output nothing but the file. Do not restate the findings in your final message.
 
 
 def clear_critique() -> None:
-    """Empty out/ before asking for a critique.
+    """批評を頼む前に out/ を空にする。
 
-    Same reason as clear_proposal: a file left from a previous call would be
-    read as this call's answer, and "the critic found nothing" and "the critic
-    never ran" must never look alike.
+    clear_proposal と同じ理由だ。前の呼び出しの残りのファイルは、今回の答えと
+    して読まれる。「クリティックは何も見つけなかった」と「クリティックは走ら
+    なかった」は、決して同じに見えてはならない。
     """
     CRITIC_OUT.mkdir(parents=True, exist_ok=True)
     for entry in CRITIC_OUT.iterdir():
@@ -2732,14 +3134,13 @@ def clear_critique() -> None:
 
 
 def call_critic(brief: str, mode: str) -> str:
-    """Hand the critic one brief.
+    """クリティックにブリーフを1つ渡す。
 
-    Note what the brief contains and what it does not. It carries the plan,
-    because a critique of a plan needs the plan. It does not carry the tests,
-    the ledger, or anything about what passed -- and the critic could not reach
-    those anyway: tests/ and src/ are 2770 runner:solverw and the critic is in
-    neither. The point is measured, not decorative: a critic that can see what
-    already passed reports that it passed.
+    ブリーフが何を含み、何を含まないかに注意する。計画は運ぶ。計画の批評には
+    計画が要るからだ。テスト、台帳、何が通ったかについては何も運ばない。そして
+    クリティックはどのみちそれに届かない。tests/ と src/ は 2770 runner:solverw で、
+    クリティックはどちらのグループにもいない。これは飾りではなく測った結果だ。
+    すでに通ったものが見えるクリティックは、通ったと報告する。
     """
     CRITIC_BRIEF.mkdir(parents=True, exist_ok=True)
     brief_path = CRITIC_BRIEF / f"{mode}.md"
@@ -2749,8 +3150,9 @@ def call_critic(brief: str, mode: str) -> str:
 
     limit = TIMEOUTS["critic"]
     try:
-        proc = run(agent_command("critic", CRITIC_RUN, brief_path, limit),
-                   timeout=limit + BACKSTOP_MARGIN)
+        proc = run_agent("critic", "CRITIQUE", lambda: run(
+            agent_command("critic", CRITIC_RUN, brief_path, limit),
+            timeout=limit + BACKSTOP_MARGIN))
     except subprocess.TimeoutExpired:
         raise Halt("CRITIQUE", f"critic still running after {limit + BACKSTOP_MARGIN}s",
                    "critic-run's internal timeout did not fire; check with: "
@@ -2764,12 +3166,11 @@ def call_critic(brief: str, mode: str) -> str:
 
 
 def read_findings() -> list[dict]:
-    """The findings, read out of the file the critic wrote.
+    """クリティックが書いたファイルから、指摘を読む。
 
-    Anything unreadable is an error and never an absence, for the same reason
-    parse_junit refuses to read a broken report as zero failures: a critique
-    that cannot be read has said nothing about the plan, and treating that as
-    "clean" would let work through on a check that never happened.
+    読めないものは、無いものではなく必ずエラーにする。parse_junit が壊れた
+    レポートを失敗ゼロと読まないのと同じ理由だ。読めない批評は計画について何も
+    言っておらず、それを「問題なし」と扱うと、起きてもいない確認で作業が通る。
     """
     removed = [p.name for p in CRITIC_OUT.iterdir() if p.name != FINDINGS_NAME]
     for name in removed:
@@ -2798,7 +3199,7 @@ def read_findings() -> list[dict]:
 
 
 def render_findings(by_mode: dict[str, list[dict]]) -> str:
-    """The findings as the human and the planner read them."""
+    """人間とプランナーが読む形の指摘。"""
     lines = []
     for mode, findings in by_mode.items():
         lines.append(f"## {mode}")
@@ -2819,14 +3220,13 @@ def render_findings(by_mode: dict[str, list[dict]]) -> str:
 
 def brief_plan_refine(requirements: str, tasks: str, findings: str,
                       feedback: str = "") -> str:
-    """Hand the planner a critique of its own unapplied plan.
+    """まだ適用していない自分の計画への批評を、プランナーに渡す。
 
-    A different situation from `plan propose`, and the brief says so rather than
-    reusing that one. Nothing has been built, nothing is green, and P5 therefore
-    does not bite: every part of this plan can still change, including the
-    acceptance criteria. That is the whole reason this happens before `plan
-    apply` -- afterwards the criteria are what the loop is measured against and
-    rewriting them is case (b), which belongs to the human.
+    `plan propose` とは違う状況なので、あちらのブリーフを使い回さず、違いを
+    ブリーフに書く。何も作られておらず、何も緑でないので、P5 は効かない。受け
+    入れ条件を含めて、この計画のどこでもまだ変えられる。これが `plan apply` の
+    前に行う理由のすべてだ。適用した後は、条件はループが測られる基準になり、
+    それを書き直すのは (b) で、人間のものになる。
     """
     return f"""You are the planner. A critic read the plan you wrote and found
 problems with it. Revise the plan so those problems are gone.
@@ -2891,12 +3291,17 @@ Output nothing but the files. Do not restate the plan in your final message.
 
 
 def run_critique(modes: list[str], tasks: str) -> dict[str, list[dict]]:
-    """Every mode, once, against one plan text."""
+    """1つの計画の本文に対して、各モードを1回ずつ走らせる。"""
     requirements = REQUIREMENTS.read_text(encoding="utf-8") \
         if REQUIREMENTS.is_file() else ""
     by_mode: dict[str, list[dict]] = {}
     for mode in modes:
         if mode == "coverage" and not requirements:
+            # 飛ばしたことを黙らない。飛ばしたモードは by_mode に入らないので、
+            # 呼び出し側から見ると「走って何も見つけなかった」と区別できない。
+            ledger("CRITIQUE_SKIPPED", mode=mode, reason=f"no requirements at {REQUIREMENTS}")
+            print(f"coverage skipped: no requirements at {REQUIREMENTS}",
+                  file=sys.stderr)
             continue
         brief = (brief_critique_coverage(requirements, tasks) if mode == "coverage"
                  else brief_critique_trace(tasks))
@@ -2910,22 +3315,35 @@ def run_critique(modes: list[str], tasks: str) -> dict[str, list[dict]]:
     return by_mode
 
 
+def no_critique_ran(modes: list[str]) -> int:
+    """頼んだモードが1つも走らなかったときの終わり方。
+
+    指摘ゼロとは別の結果として扱う。clean と表示すると、批評を1回も受けて
+    いない計画が、批評を通った計画と同じに見える。返す 1 は「ランナーが仕事を
+    できなかった」で、cmd_critique の 0（指摘なし）と 4（指摘あり）のどちらとも
+    重ならない。
+    """
+    ledger("CRITIQUE_NONE", requested=list(modes))
+    print(f"no critique ran (requested: {', '.join(modes)}). This is not a clean "
+          f"result: nothing looked at the plan.\nFor coverage, put the "
+          f"requirements at {REQUIREMENTS}.", file=sys.stderr)
+    return 1
+
+
 def cmd_plan_refine(modes: list[str]) -> int:
-    """Critique the pending plan, hand the findings back, and do it again.
+    """保留中の計画を批評し、指摘を返し、それを繰り返す。
 
-    This is the outer loop closing. Without it a critique is a report that a
-    person reads and acts on, which leaves the human inside the cycle at exactly
-    the point the machine was built to handle -- and the findings are addressed
-    to the planner anyway, not to them.
+    これで外側の輪が閉じる。これが無いと批評は人が読んで手を打つ報告になり、
+    機械が扱うために作られたちょうどその場所で、人間が輪の中に残る。しかも指摘の
+    宛先は、どのみち人間ではなくプランナーだ。
 
-    It runs on the PENDING proposal and stops before `plan apply`, so nothing
-    it does can touch a criterion anything has been measured against yet.
+    「保留中の」提案に対して走り、`plan apply` の前で止まる。だから、これが何を
+    しても、何かを測った基準に触れることはない。
 
-    Capped by limits.critiques, counted here rather than from the ledger because
-    this loop lives inside one invocation. The cap is what stops "it could
-    always be a little better" from running forever, and it is not a small
-    consideration: a revision costs a full planner call, which on the
-    TypeScript brief measured twenty-eight minutes.
+    limits.critiques で上限を掛ける。このループは1回の呼び出しの中にあるので、
+    台帳ではなくここで数える。上限は「もう少し良くできる」が永遠に続くのを止める。
+    これは小さな話ではない。改訂1回はプランナーの呼び出し1回で、TypeScript の
+    ブリーフでは28分かかった。
     """
     pending = PLANNER_OUT / "tasks.json"
     if not pending.is_file():
@@ -2944,6 +3362,8 @@ def cmd_plan_refine(modes: list[str]) -> int:
         language = json.loads(tasks).get("language", "python")
 
         by_mode = run_critique(modes, tasks)
+        if not by_mode:
+            return no_critique_ran(modes)
         total = sum(len(f) for f in by_mode.values())
         report = render_findings(by_mode)
         print(f"\n=== critique {round_no} of at most {cap + 1} ===")
@@ -2963,37 +3383,55 @@ def cmd_plan_refine(modes: list[str]) -> int:
             return 4
 
         ledger("PLAN_REFINE", round=round_no, findings=total)
+        # 改訂前の提案を控える。plan_with_retry は最初に out/ を空にするので、
+        # 控えが無いと、改訂が失敗したときやエスカレーションしたときに、
+        # リンタを通っていた提案まで失われる。
+        draft = {name: text for name, text in read_proposal().items()
+                 if name in PROPOSAL_FILES}
+        # tasks.json は補わない。プランナーが書かなければ、改訂が無いということだ。
         code = plan_with_retry(
             lambda feedback: brief_plan_refine(requirements, tasks, report, feedback),
-            "PLAN_REFINE_DRAFT")
+            "PLAN_REFINE_DRAFT",
+            keep={name: text for name, text in draft.items() if name != "tasks.json"})
         if code != 0:
+            restore_proposal(draft)
+            ledger("REFINE_RESTORED", round=round_no, reason="revision failed",
+                   files=sorted(draft))
+            print(f"the revision failed; the draft from before round {round_no} "
+                  f"is back in {PLANNER_OUT}", file=sys.stderr)
             return code
-        if ESCALATE_NAME in read_proposal():
-            print("the planner escalated rather than revising; run `plan apply` "
-                  "to record it", file=sys.stderr)
+        proposal = read_proposal()
+        if ESCALATE_NAME in proposal:
+            REFINE_ESCALATION.write_text(proposal[ESCALATE_NAME], encoding="utf-8")
+            restore_proposal(draft)
+            ledger("REFINE_RESTORED", round=round_no, reason="planner escalated",
+                   files=sorted(draft))
+            print("The planner escalated to you rather than revising:\n")
+            print(proposal[ESCALATE_NAME])
+            print(f"\nthe draft from before round {round_no} is back in "
+                  f"{PLANNER_OUT}, and the escalation is kept at "
+                  f"{REFINE_ESCALATION}.\nRun `plan apply` to apply the draft as "
+                  f"it is, or `plan bootstrap` to start over.", file=sys.stderr)
             return 3
-        # The planner rewrites the whole file, so the stamp goes back on. It is
-        # the runner's mark, not the planner's, and a plan that lost it would
-        # quietly be read as Python.
+        # プランナーはファイル全体を書き直すので、言語の印を付け直す。これは
+        # プランナーではなくランナーの印で、失った計画は黙って Python と読まれる。
         stamp_language(language)
 
-    return 4   # unreachable; the loop always returns
+    return 4   # 届かない。ループは必ず戻る
 
 
 def cmd_critique(modes: list[str]) -> int:
-    """Ask the critic about the plan on disk, in each mode, and report.
+    """ディスクにある計画について、各モードでクリティックに訊き、報告する。
 
-    Returns 0 when nothing was found and 4 when something was. Not 1 or 2:
-    those already mean "the runner could not do its job", and a critique that
-    worked perfectly and found a problem is a different outcome from a critique
-    that failed. `run --all` needs to tell them apart.
+    何も見つからなければ 0、何か見つかれば 4 を返す。1 や 2 にはしない。それらは
+    すでに「ランナーが仕事をできなかった」を意味し、完璧に動いて問題を見つけた
+    批評は、失敗した批評とは別の結果だ。`run --all` はそれらを見分ける必要がある。
     """
-    # The pending proposal first, and that ordering is the point. The moment a
-    # critique is worth most is BEFORE `plan apply`, while the criteria are
-    # still a draft -- once applied they are what the loop is measured against,
-    # and changing them is case (b), which belongs to the human. Reading only
-    # the applied plan would have made this verb arrive exactly one step too
-    # late. Falls back to the applied plan so a revision can be re-examined.
+    # 保留中の提案を先に見る。その順番が要点だ。批評が最も価値を持つのは
+    # `plan apply` の「前」、条件がまだ下書きのうちだ。適用した後は、条件はループが
+    # 測られる基準になり、それを変えるのは (b) で、人間のものになる。適用済みの
+    # 計画だけを読むと、この動詞はちょうど1歩遅れて届く。改訂を見直せるよう、
+    # 保留中が無ければ適用済みの計画に戻る。
     pending = PLANNER_OUT / "tasks.json"
     applied = PLAN / "tasks.json"
     tasks_path = pending if pending.is_file() else applied
@@ -3013,6 +3451,8 @@ def cmd_critique(modes: list[str]) -> int:
               file=sys.stderr)
 
     by_mode = run_critique(modes, tasks)
+    if not by_mode:
+        return no_critique_ran(modes)
     total = sum(len(f) for f in by_mode.values())
     print(render_findings(by_mode))
     if total == 0:
@@ -3026,15 +3466,13 @@ def cmd_critique(modes: list[str]) -> int:
 
 
 def cmd_plan_bootstrap(source: str | None, language: str = "python") -> int:
-    """Ask the planner for a first plan, from a requirements file the human wrote.
+    """人間が書いた要件のファイルから、最初の計画をプランナーに頼む。
 
-    This is the only path by which a plan comes into existence, and it is
-    deliberately the same shape as every other planner call: brief in, proposal
-    out, runner decides. The human's authority here is the requirements file --
-    not an ability to write plan/ directly, and not a duty to know how the
-    runner works. Requirements are about the thing being built; making a plan
-    that this machine will accept is the planner's job, and the retry loop is
-    what makes that true rather than aspirational.
+    計画が生まれる唯一の経路で、あえてほかのプランナー呼び出しと同じ形にして
+    ある。ブリーフを入れ、提案が出て、ランナーが決める。ここでの人間の権限は
+    要件のファイルで、plan/ を直接書く力でも、ランナーの仕組みを知る義務でも
+    ない。要件は作るものについて述べる。この機械が受け入れる計画を作るのは
+    プランナーの仕事で、やり直しのループがそれを願望ではなく事実にしている。
     """
     path = Path(source) if source else REQUIREMENTS
     if not path.is_file():
@@ -3042,9 +3480,9 @@ def cmd_plan_bootstrap(source: str | None, language: str = "python") -> int:
         print("write them there, or pass --from <path>", file=sys.stderr)
         return 1
 
-    # A bootstrap replaces the whole plan. If steps are already green, that
-    # would leave the ledger describing work against criteria that no longer
-    # exist -- the same reason the guard refuses to edit a green step (P5).
+    # bootstrap は計画全体を置き換える。すでに緑のステップがあると、台帳は
+    # もう存在しない条件に対する作業を記述することになる。検査が緑のステップの
+    # 編集を拒む（P5）のと同じ理由だ。
     done = green_steps()
     if done:
         print(f"refusing: {', '.join(sorted(done))} already green", file=sys.stderr)
@@ -3052,10 +3490,10 @@ def cmd_plan_bootstrap(source: str | None, language: str = "python") -> int:
               "fresh project directory instead.", file=sys.stderr)
         return 1
 
-    # Set before the brief is built, not after: environment_facts reports the
-    # test command and the toolkit, and the layout paragraph tells the planner
-    # what a source file even looks like. A brief written for the wrong language
-    # produces a plan that is wrong in every step.
+    # ブリーフを組み立てる後ではなく前に設定する。environment_facts はテストの
+    # コマンドとツールキットを報告し、配置の段落はソースファイルがそもそもどんな
+    # ものかをプランナーに伝える。違う言語向けに書いたブリーフからは、どの
+    # ステップも誤った計画が出てくる。
     load_settings({"language": language})
 
     requirements = path.read_text(encoding="utf-8")
@@ -3100,19 +3538,18 @@ def cmd_plan_show() -> int:
 
 
 def cmd_plan_apply() -> int:
-    """Check the proposal, then apply it. A rejection leaves out/ exactly as it
-    was, so the human can read what was refused."""
+    """提案を確かめてから適用する。拒んだときは out/ をそのまま残し、人間が
+    拒まれたものを読めるようにする。"""
     proposal = read_proposal()
 
     if ESCALATE_NAME in proposal:
-        # The runner's escalation reaches the human by a route that was built
-        # deliberately: plan/ESCALATION.md is committed, published, pulled to
-        # the host and shown on the dashboard. The planner's escalation had no
-        # route at all -- it was printed to whichever terminal ran this command
-        # and existed nowhere else, because planner/out/ is not in the
-        # repository. A question addressed to the human that only one terminal
-        # ever sees is not addressed to the human. Found by running the path:
-        # the planner declined correctly, and the answer was invisible.
+        # ランナーのエスカレーションは、意図して作った経路で人間に届く。
+        # plan/ESCALATION.md はコミットされ、送られ、ホストに引かれ、
+        # ダッシュボードに出る。プランナーのエスカレーションにはその経路が無い。
+        # planner/out/ はリポジトリの外なので、このコマンドを走らせた端末に出る
+        # だけで、ほかのどこにも残らない。1つの端末にしか見えない人間宛ての問いは、
+        # 人間宛てになっていない。だからここで plan/ に写してコミットする。経路を
+        # 走らせて見つけた。プランナーは正しく断り、その答えが見えなかった。
         PLANNER_ESCALATION.write_text(proposal[ESCALATE_NAME], encoding="utf-8")
         PLANNER_ESCALATION.chmod(0o644)
         ledger("PLAN_ESCALATE", note="the planner declined; this is case (b) or (c)")
@@ -3144,18 +3581,17 @@ def cmd_plan_apply() -> int:
         dest.chmod(0o644)
         applied.append(str(dest.relative_to(PROJECT)))
 
-    # The escalation has been answered, so it stops existing. This is what makes
-    # the state readable at a glance and safe to drive from a script:
-    # ESCALATION.md is present exactly when there is an open escalation, and
-    # `plan propose` refuses to run without one. Leaving it behind would let a
-    # second propose answer a question that was already answered.
+    # エスカレーションには答えたので、それは消す。これで状態がひと目で読め、
+    # スクリプトから安全に動かせる。ESCALATION.md があるのは未解決の
+    # エスカレーションがあるときだけで、`plan propose` はそれが無いと走らない。
+    # 残すと、2回目の propose が答え済みの問いに答えてしまう。
     escalation_tracked = bool(
         run(["git", "ls-files", "--", str(ESCALATION.relative_to(PROJECT))]).stdout.strip())
     ESCALATION.unlink(missing_ok=True)
 
-    # A plan that applies is an answer to whatever the planner asked, so its
-    # question stops existing too -- same reason, and the dashboard reads the
-    # file's presence as "someone is waiting on you".
+    # 適用される計画は、プランナーが訊いたことへの答えなので、その問いも消す。
+    # 理由は同じで、ダッシュボードはこのファイルがあることを「誰かがあなたを
+    # 待っている」と読む。
     planner_escalation_tracked = bool(
         run(["git", "ls-files", "--",
              str(PLANNER_ESCALATION.relative_to(PROJECT))]).stdout.strip())
@@ -3163,18 +3599,18 @@ def cmd_plan_apply() -> int:
 
     ledger("PLAN_APPLY", files=applied)
 
-    # Commit exactly the plan and nothing else. A proposal normally arrives with
-    # a halted step still dirty in the working tree, and sweeping that into the
-    # same commit would record an abandoned attempt as part of the plan change.
+    # 計画だけをコミットし、ほかは何も含めない。提案はふつう、止まったステップの
+    # 変更が作業ツリーに残ったまま届く。それを同じコミットに入れると、捨てた試行を
+    # 計画の変更の一部として記録してしまう。
     paths = applied + [str(LEDGER.relative_to(PROJECT))]
     if escalation_tracked:
         paths.append(str(ESCALATION.relative_to(PROJECT)))
     if planner_escalation_tracked:
         paths.append(str(PLANNER_ESCALATION.relative_to(PROJECT)))
-    # `git commit -- <paths>` stages tracked paths only, so on a first plan --
-    # where all three files are new -- it commits nothing and exits 1. Add them
-    # explicitly first. (Missed until the first bootstrap, because in the
-    # fixture project these files had always existed.)
+    # `git commit -- <paths>` は追跡中のパスしか入れないので、3つのファイルが
+    # すべて新しい最初の計画では何もコミットせず 1 で終わる。先に明示して add
+    # する。（最初の bootstrap まで気づかなかった。見本のプロジェクトでは、これらの
+    # ファイルが常に存在していたからだ。）
     run(["git", "add", "--"] + paths, check=True)
     run(["git", "commit", "-q", "-m", "plan: apply planner proposal", "--"] + paths,
         check=True)
@@ -3187,8 +3623,8 @@ def cmd_plan_apply() -> int:
 
 
 def load_settings(tasks: dict) -> None:
-    """Let the plan raise or lower the ceilings, for the keys that exist and no
-    others. An unknown key here would be a silently ignored setting."""
+    """計画が上限を上げ下げできるようにする。対象は存在するキーだけで、ほかは
+    無視しない。知らないキーは、黙って無視される設定になるからだ。"""
     TIMEOUTS.update({k: int(v) for k, v in (tasks.get("timeouts") or {}).items()
                      if k in TIMEOUTS})
     LIMITS.update({k: int(v) for k, v in (tasks.get("limits") or {}).items()
@@ -3200,19 +3636,17 @@ def load_settings(tasks: dict) -> None:
                          f"not {POLICY['retry']!r}")
     tiers = tasks.get("solver_tiers")
     if tiers:
-        # Rejected rather than filtered. A backend name that quietly disappeared
-        # would leave the loop running entirely on the tier it was meant to be
-        # sparing, and the ledger would say so only by omission.
+        # 取り除かずに拒む。黙って消えたバックエンドの名前があると、ループは
+        # 節約するはずだった段だけで走り、台帳はそれを書かないことでしか示さない。
         bad = [t for t in tiers
                if not (isinstance(t, str) and re.fullmatch(r"[a-z0-9]+", t))]
         if bad:
             raise SystemExit(f"solver_tiers: not usable as a backend name: {bad}")
         SOLVER_TIERS[:] = list(tiers)
 
-    # The language, and it is rejected rather than defaulted when unknown. A
-    # plan that asked for "js" and silently got Python would be checked by the
-    # wrong test runner against the wrong suffixes, and every gate would report
-    # confidently about files it never read.
+    # 言語。知らない値は既定に落とさず拒む。"js" を求めて黙って Python になった
+    # 計画は、誤ったテストランナーで誤った拡張子に対して確かめられ、どの関門も
+    # 読んでもいないファイルについて自信をもって報告する。
     language = tasks.get("language")
     if language is not None:
         if language not in LANGUAGES:
@@ -3223,32 +3657,30 @@ def load_settings(tasks: dict) -> None:
 
 
 def publish(what: str) -> None:
-    """Mirror the repository to the bare origin. Never fatal.
+    """リポジトリを bare の origin に写す。失敗しても止めない。
 
-    What this buys is narrow but real. `reset` and `clean` act on the working
-    tree, and a commit that has reached the bare repo is out of their reach --
-    so a green step stops depending on nothing going wrong afterwards.
+    これが買うものは狭いが本物だ。`reset` と `clean` は作業ツリーに働き、bare
+    リポジトリに届いたコミットはその手の外にある。だから緑のステップは、その後に
+    何も起きないことに頼らずに済む。
 
-    What it does NOT buy is a backup: repo.git sits in the same VHDX as
-    everything else. Copying it off the machine is the host's job, pulling over
-    SSH, and it is the host's job on purpose -- nothing inside the sandbox
-    should hold a credential that reaches the outside, because the sandbox is
-    where generated code runs.
+    バックアップにはならない。repo.git はほかのすべてと同じ VHDX にある。機械の
+    外に写すのはホストの仕事で、SSH で引く。ホストの仕事にしているのは意図的だ。
+    サンドボックスは生成したコードが走る場所なので、その中に外へ届く資格情報を
+    置いてはならない。
 
-    A failure here is reported and stepped over. The step is green because the
-    tests passed, not because a mirror accepted the commit; halting the loop
-    over an unreachable mirror would discard work that actually succeeded.
+    ここでの失敗は報告してまたぐ。ステップが緑なのはテストが通ったからで、写しが
+    コミットを受け取ったからではない。届かない写しのためにループを止めると、
+    実際に成功した作業を捨てることになる。
     """
     failures = []
-    # The branch is pushed WITHOUT --force. Nothing in the runner rewrites
-    # history -- `reset` returns to HEAD, which is the last green -- so a
-    # non-fast-forward means something happened that this code does not know
-    # about, and clobbering it is the wrong answer.
+    # ブランチは --force を付けずに送る。ランナーの中に履歴を書き換えるものは無い
+    # （`reset` は最後の緑である HEAD に戻る）。だから早送りできないのは、この
+    # コードの知らない何かが起きたということで、それを上書きするのは誤った答えだ。
     branch = run(["git", "push", "--quiet", "origin", "HEAD"])
     if branch.returncode != 0:
         failures.append((branch.stdout + branch.stderr).strip()[-400:])
-    # Tags do move: `git tag -f step-<id>` re-points one when a step is reset
-    # and run again. So they are forced, and only they.
+    # タグは動く。ステップを reset して走らせ直すと、`git tag -f step-<id>` が
+    # 指す先を変える。だからタグだけは強制して送る。
     tags = run(["git", "push", "--quiet", "--force", "origin", "--tags"])
     if tags.returncode != 0:
         failures.append((tags.stdout + tags.stderr).strip()[-400:])
@@ -3264,12 +3696,12 @@ def publish(what: str) -> None:
 
 
 def complete_green(step_id: str, goal: str, attempts: int) -> None:
-    """Commit the proof of GREEN with the code it describes.
+    """GREEN の証拠を、それが述べるコードと一緒にコミットする。
 
-    GREEN used to be appended after the step commit.  The next step happened
-    to carry that record into its commit, but the final step had no successor,
-    so a host mirror always looked one step behind.  The ledger fact must be in
-    the same commit as the implementation whose result it records.
+    台帳の事実は、その結果を記録する実装と同じコミットに入れる。GREEN を
+    ステップのコミットの後に追記すると、その記録は次のステップのコミットに
+    入る。最後のステップには次が無いので、ホストの写しは常に1ステップ遅れて
+    見える。
     """
     ledger("GREEN", step=step_id, attempts=attempts)
     run(["git", "add", "-A"], check=True)
@@ -3290,21 +3722,20 @@ def has_all_green(lines: list[str], plan_digest: str) -> bool:
 
 
 def completion_recorded(plan_digest: str) -> bool:
-    """Whether this plan's ALL_GREEN has reached a commit.
+    """この計画の ALL_GREEN がコミットに届いているか。
 
-    Deliberately not "whether the record exists in the file". Writing the
-    record and committing it are two steps, and a failure between them left
-    this unrecoverable: the ledger said ALL_GREEN, so every later run returned
-    early, and the commit that carries the fact to a host mirror was never
-    made -- which is the exact defect complete_run exists to prevent. So the
-    question asked is whether git has it, and the answer is read out of git.
+    あえて「ファイルに記録があるか」を訊かない。記録を書くこととコミットする
+    ことは2つの手順で、その間で失敗すると取り返せなくなる。台帳は ALL_GREEN と
+    言うので、後の走行はすべて早く戻り、その事実をホストの写しに運ぶコミットは
+    いつまでも作られない。complete_run が防ぐための欠陥そのものだ。だから問いは
+    git が持っているかで、答えは git から読む。
     """
     shown = run(["git", "show", f"HEAD:{LEDGER.relative_to(PROJECT).as_posix()}"])
     return shown.returncode == 0 and has_all_green(shown.stdout.splitlines(), plan_digest)
 
 
 def completion_written(plan_digest: str) -> bool:
-    """Whether the record is in the working file, committed or not."""
+    """コミットされたかに関係なく、作業中のファイルに記録があるか。"""
     try:
         return has_all_green(LEDGER.read_text(encoding="utf-8").splitlines(), plan_digest)
     except OSError:
@@ -3312,16 +3743,15 @@ def completion_written(plan_digest: str) -> bool:
 
 
 def complete_run(done: set[str], tasks: dict) -> None:
-    """Make completion visible in the bare repository and therefore the GUI."""
+    """完了を bare リポジトリに、したがって GUI に見えるようにする。"""
     plan_digest = hashlib.sha256(
         json.dumps(tasks, ensure_ascii=False, sort_keys=True).encode("utf-8")
     ).hexdigest()
     if completion_recorded(plan_digest):
         return
-    # Not recorded in git. Either this run just finished, or an earlier one
-    # wrote the record and failed before committing it; in the second case the
-    # record is already in the file and appending it again would say the run
-    # completed twice.
+    # git に記録が無い。この走行がいま終わったか、前の走行が記録を書いてから
+    # コミットの前に失敗したかのどちらかだ。後者なら記録はすでにファイルにあり、
+    # もう一度追記すると、走行が2回完了したことになる。
     if not completion_written(plan_digest):
         ledger("ALL_GREEN", steps=sorted(done), plan_sha256=plan_digest)
     ledger_path = LEDGER.relative_to(PROJECT).as_posix()
@@ -3339,9 +3769,9 @@ def run_step(step_id: str, unvalidated: bool = False) -> int:
         if not unvalidated:
             raise Halt("PLAN_LOAD", f"plan has {len(problems)} lint violation(s)",
                        "\n".join(problems))
-        # Bypassing the linter is allowed and is never silent. A green produced
-        # from a plan that failed its own lint has to say so in the ledger, for
-        # the same reason a green produced without human review does.
+        # リンタを飛ばすことは許すが、決して黙っては飛ばさない。リンタに落ちた
+        # 計画から出た緑は、人間のレビューなしで出た緑と同じ理由で、台帳にそう
+        # 書かなければならない。
         ledger("PLAN_LINT", skipped=True, violations=problems,
                note="ran with --unvalidated; these violations were not fixed")
 
@@ -3357,18 +3787,17 @@ def run_step(step_id: str, unvalidated: bool = False) -> int:
     try:
         # --- TEST_WRITE -------------------------------------------------
         #
-        # Retried here, on one condition only: the test file did not compile.
-        # That is the solver's mistake and nobody else can repair it -- the
-        # planner cannot fix a syntax error, and escalating one spends a
-        # twenty-eight minute call to be told so. Run 8's S1 did it twice, both
-        # times on an apostrophe copied out of a criterion into a
-        # single-quoted test name, and the second time the brief had already
-        # warned about exactly that. An instruction the solver can ignore is
-        # worth less than a retry that hands it the compiler's own words.
+        # ここでやり直すのは、テストファイルがコンパイルできなかったときだけだ。
+        # それはソルバーの誤りで、ほかの誰にも直せない。プランナーは構文エラーを
+        # 直せず、エスカレーションすれば、それを言われるために28分の呼び出しを
+        # 使う。run 8 の S1 は2回これをやった。どちらも条件から単一引用符の
+        # テスト名にアポストロフィを写したもので、2回目はブリーフがまさにそれを
+        # 警告していた。ソルバーが無視できる指示は、コンパイラ自身の言葉を渡す
+        # やり直しより価値が低い。
         #
-        # Deliberately NOT a retry for anything else. A test that fails, or
-        # that passes against the stub, is about what was asked for, and asking
-        # again would just be paying to sample the same misunderstanding.
+        # ほかの理由ではやり直さない。意図したことだ。落ちるテストや、スタブに
+        # 対して通るテストは、頼んだ内容の問題で、もう一度頼んでも同じ誤解を引き
+        # 直すために払うだけだ。
         broken = ""
         for write_attempt in range(1, LIMITS["test_writes"] + 1):
             set_writable(tests=True, src=False)
@@ -3399,20 +3828,18 @@ def run_step(step_id: str, unvalidated: bool = False) -> int:
             if not broken:
                 break
 
-            # The compile check has to come AFTER the stub, not before it: the
-            # module under test does not exist yet at TEST_WRITE, so a perfectly
-            # good test file fails to resolve its import and looks exactly like
-            # a syntax error. Checking early threw away correct work and asked
-            # for it again -- which is worse than the problem it was added for.
+            # コンパイルの確認はスタブの前ではなく後でなければならない。
+            # TEST_WRITE の時点ではテスト対象のモジュールがまだ無いので、
+            # まったく正しいテストファイルでも import を解決できず、構文エラーと
+            # まったく同じに見える。早く確かめると、正しい作業を捨ててもう一度
+            # 頼むことになる。それは、この確認で防ぎたかった問題より悪い。
             ledger("TEST_WRITE", step=step_id, ok=False, attempt=write_attempt,
                    reason=broken)
-            # Stripped here too, not only where the report is read. vitest
-            # wraps transform errors ONE CHARACTER AT A TIME in colour codes,
-            # so `it('given cli` arrives as forty escape sequences and the
-            # tail slice cut the line and column off the front. The solver was
-            # handed three rounds of that and could not fix what it could not
-            # read -- which looked exactly like a model that cannot write
-            # TypeScript.
+            # レポートを読む場所だけでなく、ここでも色を取り除く。vitest は変換
+            # エラーを「1文字ずつ」色コードで包むので、`it('given cli` が40個の
+            # エスケープシーケンスになって届き、末尾を切り出すと先頭の行と列が
+            # 落ちる。ソルバーはそれを3回渡され、読めないものは直せなかった。
+            # それは、TypeScript を書けないモデルとまったく同じに見えた。
             broken = broken + chr(10) + chr(10) + ANSI.sub("", red.output)[-2000:]
             set_writable(tests=True, src=True)
             for path in step["files_test"] + step["files_write"]:
@@ -3427,11 +3854,11 @@ def run_step(step_id: str, unvalidated: bool = False) -> int:
         # --- RED_GATE (RUNNER_SPEC 4-1, R1..R5) --------------------------
         last_run = red
         expected = step["expected_tests"]
-        # R2 before R1, and the order matters. When a test file does not compile
-        # the count is wrong BECAUSE nothing ran, and saying "collected 1,
-        # expected 12" describes the symptom while hiding the cause -- it reads
-        # like a planning mistake and gets escalated to the planner, who cannot
-        # fix a syntax error.
+        # R1 より先に R2 を見る。順番に意味がある。テストファイルがコンパイル
+        # できないとき、件数が合わないのは何も走らなかった「から」だ。
+        # 「collected 1, expected 12」と言うと、原因を隠して症状だけを述べる
+        # ことになる。計画の誤りに見え、構文エラーを直せないプランナーに
+        # エスカレーションされる。
         if red.errors:                                                     # R2
             raise Halt("RED_GATE", f"R2: {red.errors} test(s) errored instead of failing",
                        (chr(10).join(red.failure_details)
@@ -3472,34 +3899,31 @@ def run_step(step_id: str, unvalidated: bool = False) -> int:
         retry_mode = step.get("retry", POLICY["retry"])
         schedule = attempt_schedule(step)
 
-        # pytest names a test's home as a dotted module path, so this is what
-        # "tests/test_models.py" looks like in the report it writes.
-        # Both spellings, because the two test runners name a file differently
-        # in their reports: pytest writes the dotted module path
-        # (tests.test_models) and vitest writes the path as given
-        # (tests/engine.test.ts). Only the dotted form was built, so under
-        # TypeScript a step's OWN failing tests never matched and were all
-        # reported to the solver as regressions -- "tests that passed before
-        # this step are now failing", on the first step, where nothing had.
+        # このステップ自身のテストファイルを、両方の綴りで持つ。2つのテスト
+        # ランナーはレポートでファイルを違う形で呼ぶ。pytest はドット区切りの
+        # モジュールのパス（tests.test_models）、vitest は渡したままのパス
+        # （tests/engine.test.ts）だ。ドットの形だけにすると、TypeScript では
+        # ステップ「自身の」落ちたテストが一致せず、すべてソルバーに回帰として
+        # 伝わる。「このステップの前に通っていたテストがいま落ちている」と、
+        # 何も通っていなかった最初のステップで言われる。
         own_tests = {Path(p).with_suffix("").as_posix().replace("/", ".")
                      for p in step["files_test"]} | set(step["files_test"])
 
+        timeouts = 0
         while attempt < len(schedule):
             backend = schedule[attempt]
             handover = attempt > 0 and backend != schedule[attempt - 1]
             attempt += 1
-            set_writable(tests=None, src=True)   # tests/ stays frozen; see set_writable
+            set_writable(tests=None, src=True)   # tests/ は凍結したまま。set_writable を参照
 
-            # A clean tree for an attempt that is not a repair. Two different
-            # things arrive here. `resample` wants an independent draw rather
-            # than a repair of the last one. A handover means a DIFFERENT
-            # backend is starting, and inheriting the previous one's
-            # half-finished work is not what handing a step over means.
+            # 修理ではない試行には、きれいな木を用意する。ここには2つの別のものが
+            # 来る。`resample` は、前の試行の修理ではなく独立した抽選を求める。
+            # 引き継ぎは「別の」バックエンドが始めることを意味し、前任の書きかけを
+            # 継ぐことは、ステップを引き継ぐことの意味ではない。
             #
-            # The failure text survives a handover and does not survive a
-            # resample, and that difference is the point of having both: a
-            # resample is trying to be a fresh draw, a handover is trying to be
-            # a better solver given everything already known.
+            # 失敗の文面は、引き継ぎでは残り、resample では残らない。その違いが
+            # 両方を持つ理由だ。resample は新しい抽選であろうとし、引き継ぎは、
+            # 分かっていることをすべて渡されたより良いソルバーであろうとする。
             if attempt > 1 and (handover or retry_mode == "resample"):
                 dropped = discard_attempt(step["files_write"])
                 ledger("DISCARD", step=step_id, attempt=attempt, backend=backend,
@@ -3507,34 +3931,39 @@ def run_step(step_id: str, unvalidated: bool = False) -> int:
                 if not handover:
                     last_failure = red_baseline
 
-            call_solver("IMPL", brief_impl(step, context, tests_text, last_failure),
-                        backend=backend)
+            try:
+                call_solver("IMPL", brief_impl(step, context, tests_text, last_failure),
+                            backend=backend)
+            except SolverTimeout:
+                # 試行を1回使っただけで、ステップは止めない。残りの試行があれば
+                # 次へ進み、使い切れば下の else がいつもどおりエスカレーションする。
+                last_failure = absorb_timeout(step, attempt, backend, manifest,
+                                              last_failure)
+                timeouts += 1
+                continue
 
-            # Freeze tripwire before anything else: if tests changed, nothing
-            # the run says about passing means anything.
+            # 何よりも先に凍結のトリップワイヤを見る。テストが変わっていれば、
+            # 通ったかについて走行が言うことは、何の意味も持たない。
             for rel, digest in manifest.items():
                 if sha256(PROJECT / rel) != digest:
                     raise Halt("VERIFY", f"frozen test was modified: {rel}")
 
             assert_touched("VERIFY", step["files_test"] + step["files_write"])
 
-            # The WHOLE suite, not just this step's tests. A step is done when
-            # its own tests pass and every test that already passed still does
-            # -- the two halves that benchmarks call FAIL_TO_PASS and
-            # PASS_TO_PASS. Only the first half was ever checked here, so a step
-            # could break an earlier one and the loop would call it green and
-            # move on. Nothing detected that; the whole suite simply happened
-            # not to break.
+            # このステップのテストだけでなく、スイート「全体」を走らせる。
+            # ステップが終わるのは、自身のテストが通り、かつすでに通っていた
+            # テストがすべてまだ通るときだ。ベンチマークが FAIL_TO_PASS と
+            # PASS_TO_PASS と呼ぶ2つの半分だ。前半しか確かめないと、ステップが
+            # 前のステップを壊しても、ループは緑と呼んで先へ進む。それを検知する
+            # ものは無く、スイート全体がたまたま壊れていなかっただけになる。
             #
-            # This adds no judgement to the gate. "Did anything that passed stop
-            # passing" is a measurement, which is the only kind of question a
-            # gate in this design is allowed to ask.
+            # これは関門に判断を足さない。「通っていたものが落ちたか」は測定で、
+            # この設計で関門が訊いてよいのは、その種類の問いだけだ。
             green = pytest_run(f"verify-{attempt}", [TESTS.relative_to(PROJECT).as_posix()])
             last_run = green
             regressions = [f for f in green.failed_files if f not in own_tests]
-            # skipped is in the record because a green has to be provable after
-            # the fact from the ledger alone, and "no failures" does not prove
-            # the tests ran.
+            # skipped を記録に入れる。緑は後から台帳だけで証明できなければ
+            # ならず、「失敗なし」はテストが走ったことを証明しないからだ。
             ledger("VERIFY", step=step_id, attempt=attempt, backend=backend,
                    tests=green.tests,
                    failures=green.failures, errors=green.errors,
@@ -3542,15 +3971,15 @@ def run_step(step_id: str, unvalidated: bool = False) -> int:
                    regressions=regressions)
             if green.green:
                 break
-            # The assertions, not the stdout. vitest's junit reporter prints
-            # only the path of the report it wrote, and the report is under
-            # .runner (0700 runner), so the solver could not have read it
-            # either. It was being asked to fix failures it was never shown.
+            # 標準出力ではなくアサーションを渡す。vitest の junit の報告は、
+            # 書いたレポートのパスしか出さず、レポートは .runner（0700 runner）
+            # の下にあるので、ソルバーはそれも読めない。標準出力を渡すと、
+            # 一度も見せていない失敗を直せと頼むことになる。
             last_failure = (chr(10).join(green.failure_details)
                             or ANSI.sub("", green.output)[-3000:])
             if green.skipped and not (green.failures or green.errors):
-                # pytest calls this run a success, so the output alone would
-                # leave the solver with nothing to work from.
+                # pytest はこの走行を成功と呼ぶので、出力だけではソルバーは
+                # 手がかりを何も持てない。
                 last_failure = (
                     "The suite reported no failures, but "
                     f"{green.skipped} test(s) never ran:\n  "
@@ -3560,9 +3989,9 @@ def run_step(step_id: str, unvalidated: bool = False) -> int:
                       "whatever condition makes them skip has to stop being "
                       "true.\n\n" + last_failure)
             if regressions:
-                # Worth saying outright, because the obvious repair is one the
-                # solver cannot make: tests/ is frozen, so the earlier tests are
-                # not editable and the implementation is the only thing left.
+                # はっきり言う価値がある。すぐ思いつく直し方は、ソルバーには
+                # できないものだからだ。tests/ は凍結しているので、前のテストは
+                # 編集できず、残るのは実装だけだ。
                 last_failure = (
                     "Tests that passed before this step are now failing:\n  "
                     + "\n  ".join(regressions)
@@ -3574,13 +4003,16 @@ def run_step(step_id: str, unvalidated: bool = False) -> int:
             tried = ", ".join(dict.fromkeys(schedule))
             reason = (f"still failing after {attempt} attempts"
                       + (f" across {tried}" if len(SOLVER_TIERS) > 1 else ""))
+            if timeouts:
+                # プランナーに届く理由に残す。全部が時間切れなら、実装が難しいの
+                # ではなく、ステップが大きすぎるか、条件が満たせないことを疑う。
+                reason += f"; {timeouts} of them ran out of time"
             if broke:
-                # Named separately in the reason because it reaches the planner
-                # through ESCALATION.md, and "this step cannot be built without
-                # breaking an earlier one" is a different problem from "this
-                # step is not built yet" -- possibly a contradiction between two
-                # sets of acceptance criteria, which is not the solver's to
-                # resolve.
+                # 理由の中で別に名指しする。これは ESCALATION.md を通って
+                # プランナーに届き、「このステップは前のステップを壊さずには
+                # 作れない」は「このステップはまだできていない」とは別の問題だ
+                # からだ。2組の受け入れ条件の矛盾かもしれず、それはソルバーが
+                # 解くものではない。
                 reason += "; and it now breaks " + ", ".join(broke)
             raise Halt("IMPL", reason, last_run.output[-4000:] if last_run else "")
 
@@ -3600,15 +4032,14 @@ def run_step(step_id: str, unvalidated: bool = False) -> int:
 
 
 # --------------------------------------------------------------------------
-# the outer loop (RUNNER_SPEC section 9, `run --all`)
+# 外側のループ（RUNNER_SPEC 9 章、`run --all`）
 # --------------------------------------------------------------------------
 
 
-# What stops the outer loop. Every one of these is an objective fact about the
-# repository or the ledger; none of them is a judgement about whether things are
-# going well. BOOTSTRAP 1-6: the stopping conditions are fixed in advance,
-# because "ask when unsure" delegates the frequency to the model and ends in
-# approving everything out of habit.
+# 外側のループを止めるもの。どれもリポジトリか台帳についての客観的な事実で、
+# うまくいっているかについての判断は1つも無い。BOOTSTRAP 1-6: 止まる条件は
+# 前もって固定する。「迷ったら訊く」は訊く頻度をモデルに委ね、習慣ですべてを
+# 承認するところで終わるからだ。
 ALL_GREEN = "every step in the plan is green"
 CAP_REACHED = "the escalation cap for this step is spent (RUNNER_SPEC 6-2)"
 PLAN_REFUSED = "the planner's proposal was refused"
@@ -3617,14 +4048,14 @@ BUDGET_SPENT = "the wall-clock budget is spent"
 
 
 def cmd_run_all(unvalidated: bool = False, budget_minutes: int = 0) -> int:
-    """Run steps in plan order until something in the list above stops it.
+    """上の一覧のどれかが止めるまで、計画の順にステップを走らせる。
 
-    The loop is: run a step; if it goes green, move on; if it escalates, let the
-    planner answer once and try again; if it escalates past its cap, stop.
+    ループはこうだ。ステップを走らせる。緑なら次へ進む。エスカレーションしたら、
+    プランナーに1回答えさせてやり直す。上限を超えてエスカレーションしたら止まる。
 
-    Nothing here decides whether a proposal was reasonable -- `plan apply` does
-    that, mechanically, and this only reads its exit code. That separation is the
-    reason the outer loop can be allowed to run unattended at all.
+    提案が妥当かはここでは何も決めない。決めるのは `plan apply` で、機械的に
+    決め、ここはその終了コードを読むだけだ。この分離があるから、外側のループを
+    人の目なしで走らせてよいことになる。
     """
     deadline = time.monotonic() + budget_minutes * 60 if budget_minutes else None
 
@@ -3636,17 +4067,15 @@ def cmd_run_all(unvalidated: bool = False, budget_minutes: int = 0) -> int:
         print(f"\nstopped: {reason}", file=sys.stderr)
         return code
 
-    # Load the plan's settings before announcing them. Reporting the built-in
-    # defaults here while the loop below runs on the plan's values would make the
-    # ledger disagree with what actually happened.
+    # 設定を告げる前に、計画の設定を読み込む。ここで組み込みの既定を報告し、
+    # 下のループが計画の値で走ると、台帳が実際に起きたことと食い違う。
     load_settings(json.loads((PLAN / "tasks.json").read_text(encoding="utf-8")))
     ledger("RUN_ALL_START", budget_minutes=budget_minutes or "none",
            escalation_cap=LIMITS["escalations"])
 
     while True:
-        # Re-read the plan every time round: a proposal applied in the previous
-        # iteration may have rewritten the step that is about to run, and may
-        # have added steps after it.
+        # 毎周、計画を読み直す。前の周で適用された提案が、これから走るステップを
+        # 書き換え、その後にステップを足しているかもしれない。
         tasks = json.loads((PLAN / "tasks.json").read_text(encoding="utf-8"))
         load_settings(tasks)
         problems = validate_plan(tasks)
@@ -3669,7 +4098,7 @@ def cmd_run_all(unvalidated: bool = False, budget_minutes: int = 0) -> int:
         if run_step(step_id, unvalidated=unvalidated) == 0:
             continue
 
-        # The step escalated. run_step has already written ESCALATION.md.
+        # ステップがエスカレーションした。run_step はすでに ESCALATION.md を書いた。
         spent = escalation_count(step_id)
         if spent > LIMITS["escalations"]:
             return stop(f"{CAP_REACHED}: {step_id} escalated {spent} time(s); "
@@ -3686,9 +4115,9 @@ def cmd_run_all(unvalidated: bool = False, budget_minutes: int = 0) -> int:
         if applied != 0:
             return stop(f"{PLAN_REFUSED} for {step_id}; {PLANNER_OUT} has it", 2)
 
-        # Back to the last green before retrying, so the next attempt starts from
-        # a clean tree rather than inheriting the files that failed. The revised
-        # plan survives this: `plan apply` committed it, so it is part of HEAD.
+        # やり直す前に最後の緑へ戻す。次の試行が、落ちたファイルを継がずに
+        # きれいな木から始まるようにだ。改訂した計画はこれで消えない。
+        # `plan apply` がコミットしたので、HEAD の一部になっている。
         cmd_reset(step_id)
 
 
@@ -3702,29 +4131,28 @@ def cmd_validate() -> int:
 
 
 def cmd_reset(step_id: str) -> int:
-    """Put the tree back to the last green so a halted step can be re-run.
+    """止まったステップを走らせ直せるよう、木を最後の緑に戻す。
 
-    A step that stops at RED_GATE leaves tests/ frozen and the working tree
-    dirty, and the next attempt refuses to start. Undoing that by hand means
-    chmod, git reset and git clean in the right order -- easy to get wrong, and
-    wrong in a way that silently carries the previous attempt's files into the
-    next one.
+    RED_GATE で止まったステップは、tests/ を凍結したまま、作業ツリーに変更を
+    残し、次の試行は始まるのを拒む。手で戻すには chmod、git reset、git clean を
+    正しい順に行う必要がある。間違えやすく、しかも前の試行のファイルを黙って次に
+    持ち込む形で間違える。
 
-    Order matters here: adopt before chmod (the runner cannot chmod what it does
-    not own), and chmod before git (FREEZE leaves tests/ read-only, and git
-    cannot delete a file it cannot write through).
+    順番に意味がある。chmod の前に引き取る（ランナーは所有しないものを chmod
+    できない）。git の前に chmod する（FREEZE は tests/ を読み取り専用にし、git は
+    書けないディレクトリの中のファイルを消せない）。
     """
     adopt(TESTS, SRC)
     set_writable(tests=True, src=True)
 
-    # The ledger is tracked by git (GREEN commits it), so `reset --hard` would
-    # roll it back to the last green and take with it every record of the
-    # attempt being discarded -- including the ESCALATED entry that says why.
-    # An append-only ledger that loses exactly the failures is worse than none.
+    # 台帳は git の管理下にある（GREEN がコミットする）ので、`reset --hard` は
+    # 台帳を最後の緑まで戻し、捨てようとしている試行の記録を、理由を書いた
+    # ESCALATED も含めて一緒に消す。失敗の記録だけを失う追記専用の台帳は、
+    # 無いより悪い。
     kept = LEDGER.read_bytes() if LEDGER.exists() else b""
 
     run(["git", "reset", "--hard", "HEAD"], check=True)
-    run(["git", "clean", "-fdq"], check=True)   # no -x: .venv and .runner stay
+    run(["git", "clean", "-fdq"], check=True)   # -x は付けない。.venv と .runner は残す
 
     if kept:
         LEDGER.write_bytes(kept)
@@ -3739,30 +4167,29 @@ def cmd_reset(step_id: str) -> int:
     return 0
 
 
-# The directories the solver must not be able to read: the plan (every step's
-# acceptance criteria, the spec, the ledger), the freeze manifests and the
-# contracts, and git history. BOOTSTRAP 1-5 -- the solver receives one step's
-# worth of information and no more -- is a claim about these three modes.
+# solver が読めてはならないディレクトリ。計画（全ステップの受け入れ条件、仕様、
+# 台帳）、凍結のマニフェストと契約、git の履歴。BOOTSTRAP 1-5（solver は
+# 1ステップ分の情報を受け取り、それ以上は受け取らない）は、この3つのモードに
+# ついての主張だ。
 PRIVATE_DIRS = (PLAN, STATE, PROJECT / ".git")
 
 
 def fence_is_open() -> bool:
-    """Refuse to run if anyone but runner can read the private directories.
+    """runner 以外が非公開のディレクトリを読めるなら、走るのを拒む。
 
-    This exists because the fence was found standing open. `20-layout.sh`
-    created plan/ and .runner/ at 0755 and `40-perms.sh` tightened them to
-    0700 afterwards, so the mode was correct only if both ran, in order. The
-    project was rebuilt for a new subject without the second one, and ten steps
-    then ran with every acceptance criterion, the whole spec and every frozen
-    contract readable by the solver.
+    柵が開いたままなのを見つけたので、これがある。`20-layout.sh` が plan/ と
+    .runner/ を 0755 で作り、`40-perms.sh` が後から 0700 に締めていたので、
+    モードが正しいのは両方が順に走ったときだけだった。新しい題材のために後者を
+    流さずにプロジェクトを作り直し、10ステップのあいだ、受け入れ条件のすべて、
+    仕様の全体、凍結した契約のすべてが solver から読める状態で走った。
 
-    A provisioning script runs once, at build time, and cannot notice that. The
-    runner runs every time, so the check belongs here.
+    プロビジョニングのスクリプトは構築時に1回走るだけで、それに気づけない。
+    ランナーは毎回走るので、確認はここに置く。
 
-    It refuses rather than repairing. The runner owns these directories and
-    could chmod them itself, but a wrong mode means the information may already
-    have been readable during earlier runs -- which is a fact about what those
-    runs are worth, and it should stop a human rather than be tidied away.
+    直さずに拒む。ランナーはこれらのディレクトリを所有しており、自分で chmod
+    できる。しかしモードが誤っているなら、前の走行ですでに情報が読めたかもしれ
+    ない。それはその走行の価値についての事実で、黙って片付けるのではなく、
+    人間を止めるべきだ。
     """
     open_dirs = []
     for path in PRIVATE_DIRS:
@@ -3801,10 +4228,9 @@ def main() -> int:
     reset_cmd = sub.add_parser("reset", help="discard a halted step and return to the last green")
     reset_cmd.add_argument("step_id")
 
-    # The planner channel. Deliberately three separate verbs rather than one:
-    # `propose` spends money and `apply` changes what the loop is measured
-    # against, and a human who wants to read a proposal before it lands must be
-    # able to do that without either happening.
+    # プランナーの経路。1つではなく、あえて3つの動詞に分ける。`propose` は
+    # お金を使い、`apply` はループが測られる基準を変える。提案が入る前に読みたい
+    # 人間は、そのどちらも起こさずに読めなければならない。
     plan_cmd = sub.add_parser("plan", help="the planner channel")
     plan_sub = plan_cmd.add_subparsers(dest="plan_cmd", required=True)
     boot_cmd = plan_sub.add_parser(
@@ -3821,10 +4247,9 @@ def main() -> int:
     plan_sub.add_parser("show", help="print the pending proposal without applying it")
     plan_sub.add_parser("apply", help="check the pending proposal and apply it if it passes")
 
-    # The critic. A separate verb rather than a step of `plan apply`, for the
-    # reason the planner channel is three verbs: it spends money, and a human
-    # who wants to read a plan before paying for an opinion about it must be
-    # able to.
+    # クリティック。`plan apply` の一手順ではなく別の動詞にする。プランナーの
+    # 経路を3つの動詞にしたのと同じ理由で、お金を使い、意見に払う前に計画を
+    # 読みたい人間は、読めなければならない。
     critique_cmd = sub.add_parser(
         "critique", help="ask the critic what is wrong with the plan on disk")
     critique_cmd.add_argument("--mode", action="append", choices=list(CRITIQUE_MODES),
@@ -3876,9 +4301,19 @@ def main() -> int:
     except Halt as halt:
         print(f"HALT [{halt.phase}] {halt.reason}\n{halt.detail}", file=sys.stderr)
         return 2
+    except QuotaExhausted as quota:
+        # エスカレーションはしていない。計画にもソルバーにも落ち度は無く、
+        # 枠が戻れば同じところからやり直せる。
+        waited = QUOTA["waits"] * QUOTA["wait_seconds"] // 60
+        print(f"QUOTA [{quota.phase}] {quota.who} is still out of quota ({quota.kind}) "
+              f"after waiting {waited} minutes. Nothing was escalated.\n"
+              f"When the limit has reset: if a step was in progress, run "
+              f"`reset <step-id>` first, then run the same command again.",
+              file=sys.stderr)
+        return 5
     except FileNotFoundError as missing:
-        # Almost always one thing: a fresh project with no plan in it yet. Say
-        # so, rather than printing a traceback about tasks.json.
+        # ほぼ必ず、まだ計画の無い新しいプロジェクトだ。tasks.json についての
+        # トレースバックを出さず、そう言う。
         print(f"missing: {missing.filename}", file=sys.stderr)
         if str(missing.filename or "").endswith("tasks.json"):
             print(f"there is no plan yet. Write the requirements to "

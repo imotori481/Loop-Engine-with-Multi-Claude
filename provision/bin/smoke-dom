@@ -1,21 +1,19 @@
 #!/usr/bin/env bash
-# Does a machine with no screen actually catch a dead user interface?
+# 画面の無い機械は、本当に死んだユーザーインターフェイスを捕まえられるか。
 #
 #     sudo -u runner /srv/loop/bin/smoke-dom
 #
-# The claim behind the whole Node track is that a DOM can be driven without a
-# display, so "there is nothing the player can press" becomes a red test rather
-# than something only a human notices. This checks the claim in both
-# directions, which is the part that matters: a gate that passes everything is
-# indistinguishable from a gate that works, until the day it is not.
+# Node の道筋全体を支える主張は、DOM は画面なしで動かせるので、「プレイヤーが
+# 押せるものが何も無い」が人間しか気づかないものではなく赤いテストになる、と
+# いうことだ。これはその主張を両方向で確かめる。そこが肝心だ。何でも通す関門は、
+# ある日そうでなくなるまで、働いている関門と見分けがつかない。
 #
-#   the working UI    -> 3 passed
-#   run 7's UI        -> 2 failed, one of them "expected 0 to be greater than 0"
+#   動く UI        -> 3 件通る
+#   run 7 の UI    -> 2 件落ちる。1つは "expected 0 to be greater than 0"
 #
-# The second shape is not invented. It is what run 7 shipped: a window whose
-# every button was disabled from the first frame, past ten green steps and 42
-# passing tests, because nothing the runner could see had an opinion about the
-# screen.
+# 2つ目の形は作り話ではない。run 7 が出荷したものだ。最初の1フレームから全部の
+# ボタンが無効な窓が、緑のステップ10と通ったテスト42をすり抜けた。ランナーに
+# 見えるものの中に、画面について意見を持つものが無かったからだ。
 set -euo pipefail
 
 TOOLS=/srv/loop/node
@@ -32,7 +30,7 @@ cat > "$WORK/vitest.config.mjs" <<'EOF'
 export default { test: { environment: "happy-dom", include: ["tests/**/*.test.mjs"] } };
 EOF
 
-# The subject, in two versions. Only `mount` differs.
+# 検査する対象を2つの版で用意する。違うのは `mount` だけ。
 cat > "$WORK/alive.mjs" <<'EOF'
 export function mount(root, state) {
   const total = document.createElement("p");
@@ -49,7 +47,7 @@ export function mount(root, state) {
 EOF
 
 cat > "$WORK/dead.mjs" <<'EOF'
-// run 7's shape: the window opens and nothing in it can ever be pressed.
+// run 7 の形: 窓は開くが、中のものは何ひとつ押せない。
 export function mount(root, state) {
   const total = document.createElement("p");
   total.id = "total";
@@ -57,7 +55,7 @@ export function mount(root, state) {
   const buy = document.createElement("button");
   buy.id = "buy";
   buy.textContent = "Buy cursor (15)";
-  buy.disabled = state.resource < 15;      // 0 < 15, now and forever
+  buy.disabled = state.resource < 15;      // 0 < 15 は、いまも、この先もずっと成り立つ
   root.append(total, buy);
   return root;
 }
@@ -110,8 +108,8 @@ grep -o 'message="[^"]*"' "$WORK/dead.xml" | sed 's/^/  /' || true
 fail=0
 [ "$alive_failures" = "0" ] || { echo "FAIL: the working UI should pass" >&2; fail=1; }
 [ "$alive_tests" = "3" ]    || { echo "FAIL: expected 3 tests, got $alive_tests" >&2; fail=1; }
-# The exact count is not the point; catching it at all is. Pinning it to
-# "more than zero" keeps this from breaking when a test is added above.
+# 正確な件数は要点ではない。捕まえられるかどうかが要点だ。「0 より多い」に
+# しておけば、上にテストを足しても壊れない。
 [ "${dead_failures:-0}" -gt 0 ] || { echo "FAIL: a dead UI went unnoticed" >&2; fail=1; }
 
 if [ "$fail" -eq 0 ]; then

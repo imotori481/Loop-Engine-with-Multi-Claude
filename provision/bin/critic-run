@@ -1,25 +1,24 @@
 #!/usr/bin/env bash
-# Start the critic agent, non-interactively, on one brief.
+# クリティックのエージェントを、1つのブリーフに対して非対話で起動する。
 #
 #     sudo -u critic /srv/loop/bin/critic-run <brief-file> [seconds]
 #
-# Same shape as planner-run and solver-run, and for the same reason: the runner
-# has no sudo, and /etc/sudoers.d/93-runner-to-critic names this script and no
-# other, limited to Runas (critic). Sideways, never up.
+# 形も理由も planner-run、solver-run と同じ。ランナーは sudo を持たず、
+# /etc/sudoers.d/93-runner-to-critic はこのスクリプトだけを名指しし、Runas (critic)
+# に限る。横への移動で、昇格ではない。
 #
-# What makes this account worth having is what it cannot reach, and none of that
-# is enforced here:
+# このアカウントの価値は届かないものにあり、そのどれもここでは強制しない:
 #
-#   plan/          0700 runner  -- it cannot read the plan it is judging
-#   tests/         not in its groups -- it cannot read the tests that passed
-#   planner/out    plannerw     -- it cannot see the proposal being written
-#   brief/         solverw      -- it cannot see what the solver was told
+#   plan/          0700 runner  -- 判定する計画を読めない
+#   tests/         グループに無い -- 通ったテストを読めない
+#   planner/out    plannerw     -- 書かれている最中の提案を見られない
+#   brief/         solverw      -- ソルバーに伝えた内容を見られない
 #
-# All four were measured before this file existed. A critic that reads the plan
-# reports "every acceptance criterion is met", which is true and worthless; a
-# critic that reads the tests reports that the tests pass. The whole value of
-# the role is the ignorance, so the ignorance is a filesystem fact rather than a
-# line in a prompt that a future brief might soften.
+# 4つとも、このファイルより前に実測した。計画を読むクリティックは「受け入れ
+# 条件はすべて満たされている」と報告する。真だが無価値だ。テストを読む
+# クリティックはテストが通ると報告する。この役の価値はすべて無知にある。だから
+# 無知を、後のブリーフが緩めうるプロンプトの1行ではなく、ファイルシステムの
+# 事実にする。
 set -euo pipefail
 
 BRIEF="${1:?usage: critic-run <brief-file> [seconds]}"
@@ -28,10 +27,9 @@ LIMIT="${2:-900}"
 
 OUT=/srv/loop/critic/out
 
-# Its own credentials, in its own file, readable by one uid. Same argument as
-# the planner's: a role that has burned through its quota must not be able to
-# stop another role from running, and a breach of one must not hand over the
-# credential of another.
+# 自分の資格情報を、自分のファイルに置き、1つの uid だけが読める。プランナーと
+# 同じ理屈で、利用枠を使い切った役が別の役の実行を止められてはならず、1つが
+# 破られても別の役の資格情報が渡ってはならない。
 if [ -r /etc/loop/critic.env ]; then
   set -a
   . /etc/loop/critic.env
@@ -49,10 +47,23 @@ if [ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
 fi
 unset ANTHROPIC_API_KEY_CONSOLE
 
-# A throwaway HOME for every invocation, exactly as planner-run does it. Here it
-# carries a second meaning: two critiques of the same plan must not be able to
-# agree with each other by remembering. Each one starts from the brief and
-# nothing else.
+# モデルと effort。critic.env の LOOP_MODEL を --model で、LOOP_EFFORT を
+# --effort で渡す。空ならアカウントの既定。effort の値が間違っていたら、claude を
+# 呼ぶ前に止める。
+role_args=()
+if [ -n "${LOOP_MODEL:-}" ]; then
+  role_args+=(--model "$LOOP_MODEL")
+fi
+if [ -n "${LOOP_EFFORT:-}" ]; then
+  case "$LOOP_EFFORT" in
+    low|medium|high|xhigh|max) role_args+=(--effort "$LOOP_EFFORT") ;;
+    *) echo "critic-run: bad LOOP_EFFORT in critic.env: $LOOP_EFFORT" >&2; exit 5 ;;
+  esac
+fi
+
+# planner-run と同じく、呼び出しごとに使い捨ての HOME を作る。ここでは2つ目の
+# 意味もある。同じ計画への2つの批評が、覚えていることで互いに合わせられては
+# ならない。どれもブリーフだけから始める。
 HOME="$(mktemp -d)"
 export HOME
 trap 'rm -rf "$HOME"' EXIT
@@ -60,12 +71,17 @@ trap 'rm -rf "$HOME"' EXIT
 cd "$OUT"
 
 # --safe-mode / --setting-sources "" / --no-session-persistence
-#     the brief is the only input, as for the planner (RUNNER_SPEC section 5).
+#     プランナーと同じく、ブリーフだけを入力にする（RUNNER_SPEC 5 章）。
+# --output-format json
+#     結果の文と消費量を1つの JSON で返す。ランナーが消費量を台帳に残し、
+#     結果の文だけを取り出す。
 # --allowedTools "Read Write"
-#     it reads its brief on stdin and writes one findings file here. No Edit:
-#     there is nothing here it should be revising.
+#     標準入力でブリーフを読み、ここに指摘のファイルを1つ書く。Edit は許さない。
+#     ここに書き直すべきものは無い。
 set +e
 timeout --kill-after=30 "$LIMIT" claude -p \
+  "${role_args[@]}" \
+  --output-format json \
   --safe-mode \
   --setting-sources "" \
   --no-session-persistence \
