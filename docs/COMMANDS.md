@@ -7,15 +7,30 @@
 | ホスト | Windows の cmd、PowerShell、Git Bash。`host\` のスクリプトと git を使う |
 | 箱 | `ssh loop-dev` で入った保守ユーザーの端末。`loop` コマンドを使う |
 
-ホストの `loop` は `host\loop.cmd` のこと。PATH の通った場所（`C:\Users\<you>\bin` など）に
-置けば `loop` だけで呼べる。中身は `ssh -t loop-dev loop <args>` で、ディストロの起動と
-sshd の待機も先に済ませる。だから下の `loop` の行は、ホストと箱のどちらで打っても同じに動く。
+ホストの `loop` は `host\loop.cmd` のこと。中身は `ssh -t loop-dev loop <args>` で、ディストロの
+起動と sshd の待機も先に済ませる。だから下の `loop` の行は、ホストと箱のどちらで打っても同じに動く。
+
+ホストで `loop` だけで打つには、`host` ディレクトリをユーザーの PATH に足す。PowerShell で1回だけ
+打ち、端末を開き直す。`loop-pull` と `loop-dashboard` も同じく名前だけで打てるようになる。
+
+```powershell
+$hostDir = "<repo-dir>\host"
+$userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+[Environment]::SetEnvironmentVariable("Path", "$userPath;$hostDir", "User")
+```
+
+VS Code のターミナルは、VS Code 本体が起動したときの PATH を受け継ぐ。足したあとは、ターミナルでは
+なく VS Code を全部閉じて起動し直す。Git Bash は拡張子を補わないので、`loop` ではなく `loop.cmd` と打つ。
+
+PATH に足していなければ、`<repo-dir>` でパスごと呼ぶ。cmd なら `host\loop.cmd <args>`、
+PowerShell なら `.\host\loop.cmd <args>`、Git Bash なら `./host/loop.cmd <args>`。
 
 `<...>` は自分の値に置き換える。
 
 | 記号 | 何を入れるか |
 |---|---|
-| `<requirements>` | 要件のファイルのパス |
+| `<repo-dir>` | ホストにクローンした Loop Engine のリポジトリ |
+| `<requirements>` | 要件のファイルのパス。手元だけで使うものは `<repo-dir>\requirements\local\` に置く |
 | `<step>` | ステップの ID（`S3` など） |
 | `<project>` | 箱の中でのプロジェクトの名前。英小文字、数字、`.` `_` `-` |
 | `<repo-url>` | 対象のリポジトリの GitHub の URL |
@@ -146,14 +161,14 @@ git push origin <pr-branch>
 
 | やりたいこと | 場所 | コマンド |
 |---|---|---|
-| 成果物をホストに写す | ホスト | `host\loop-pull.cmd` |
-| ダッシュボードを開く | ホスト | `host\loop-dashboard.cmd` のあと <http://127.0.0.1:8443> |
+| 成果物をホストに写す | ホスト | `loop-pull` |
+| ダッシュボードを開く | ホスト | `loop-dashboard` のあと <http://127.0.0.1:8443> |
 | スマホからダッシュボードを見る | ホスト | `tailscale serve --bg --https=8443 http://127.0.0.1:8443` |
 | VS Code で箱に入る | ホスト | `loop-dev` |
 | 端末で箱に入る | ホスト | `ssh loop-dev` |
 
 ダッシュボードの「いまの作業」と「ステップ」は箱から直接読む。それ以外の欄はホストの写しを読む。
-`loop-dashboard.cmd` は写しが無いと起動しないので、初回は先に `host\loop-pull.cmd` を流す。
+`loop-dashboard` は写しが無いと起動しないので、初回は先に `loop-pull` を流す。
 
 ## 箱を保守する
 

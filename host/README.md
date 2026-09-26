@@ -9,7 +9,7 @@ WSL2 では起動と生存管理がホスト側の責務になった（`RUNNER_S
 | ファイル | 置き場所 | 役割 |
 |---|---|---|
 | `loop-dev.cmd` | `C:\Users\<you>\bin\loop-dev.cmd`（PATH の通った場所） | ディストロ起動 → sshd 待機 → VS Code Remote-SSH 起動 |
-| `loop.cmd` | `C:\Users\<you>\bin\loop.cmd`（PATH の通った場所） | ディストロ起動 → sshd 待機 → 箱の `loop` コマンドを実行 |
+| `loop.cmd` | このリポジトリのまま（`host` を PATH に足す） | ディストロ起動 → sshd 待機 → 箱の `loop` コマンドを実行 |
 | `wsl-keepalive.vbs` | このリポジトリのまま（タスクが絶対パスで参照する） | VM を**窓を出さずに**生かし続ける。下の keepalive タスクの実体 |
 | `loop-pull.cmd` | このリポジトリのまま | **すべての** `repo*.git` を run ごとのミラーに引く。**VHDX を失っても残る唯一の複製** |
 | `loop-dashboard.cmd` | このリポジトリのまま | 進捗、エスカレーション、予定レビューを扱うGUIを起動（`127.0.0.1:8443`） |
@@ -22,6 +22,9 @@ WSL2 では起動と生存管理がホスト側の責務になった（`RUNNER_S
 
 `loop.cmd` は、ディストロを起動して sshd を待ち、`ssh -t loop-dev loop <引数>` を流す。
 引数は箱の `loop` コマンドと同じ（`provision/README.md` §2-10）。
+
+`loop` だけで打てるよう、このリポジトリの `host` ディレクトリをユーザーの PATH に足す
+（手順は `docs/COMMANDS.md`）。コピーして置くと、pull しても更新が届かない。
 
 ```cmd
 loop go C:\path\to\requirements.md
