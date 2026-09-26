@@ -1,11 +1,10 @@
 #!/usr/bin/env bash
 # 箱に複数のプロジェクトを置き、1つずつ切り替えて使う。root で流す。
+# 普段は `loop project <コマンド>` で呼ぶ。`loop` がまだ無い箱では直接流す:
 #
-#   sudo bash loop-project.sh list
-#   sudo bash loop-project.sh current
-#   sudo bash loop-project.sh adopt <名前>
-#   sudo bash loop-project.sh init  <名前> [--branch <ブランチ>]
-#   sudo ADMIN_USER=<保守ユーザー> bash loop-project.sh use <名前>
+#   cd /tmp && sudo ADMIN_USER=<保守ユーザー> bash /opt/loop-engine/provision/loop-project.sh <コマンド>
+#
+# コマンドは usage() を参照。
 #
 # 同時に走るのは1つだけ。3役は同じサブスクリプションの枠を分け合うので、並べても
 # 枠の上限で待つ時間が増えるだけだ。
@@ -191,7 +190,17 @@ cmd_use() {
 }
 
 usage() {
-  sed -n '2,8p' "$0" >&2
+  cat >&2 <<EOF
+usage: loop project <command>
+   or: sudo ADMIN_USER=<maintenance user> bash $HERE/loop-project.sh <command>
+
+commands:
+  list                          list the projects; * marks the current one
+  current                       print the current project's name
+  init <name> [--branch <b>]    prepare an empty project (or one that receives branch <b>)
+  use <name>                    switch to a project, building it the first time
+  adopt <name>                  name the sandbox as it was before loop-project.sh
+EOF
   exit 2
 }
 
