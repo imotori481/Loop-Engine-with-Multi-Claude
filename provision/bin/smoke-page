@@ -1,0 +1,98 @@
+#!/usr/bin/env bash
+# 開発サーバで開いたページが、src/main.ts の start まで届くか。
+#
+#     sudo -u runner /srv/loop/bin/smoke-page
+#
+# 計画には、開発サーバの応答を確かめる条件を書かせない（loop.py の
+# environment_facts）。応答はサーバが決め、どの実装でも変えられないからだ。run 8 の
+# S10 は、Vite が index.html を変換した結果に /src/main.ts が含まれることを確かめる
+# 条件で時間切れまで考えた。その代わり、要件の「開発サーバで開ける」は環境の性質
+# として、ここで確かめる。35-node.sh がプロビジョニングのたびに流す。
+#
+# 変換後の HTML は見ない。Vite はインラインのモジュールスクリプトを
+# /index.html?html-proxy&index=0.js のような別のモジュールに切り出し、HTML には
+# それを読む <script src> だけを残す。確かめるのは、切り出されたモジュールが
+# /src/main.ts を読むことと、/src/main.ts が変換できることだ。
+#
+# 本物の index.html を使い、src/main.ts は使い捨ての作業場所に置いた仮のものを
+# 使う。プロジェクトの src/ は計画のもので、ここでは触らない。
+set -euo pipefail
+
+TOOLS="${LOOP_NODE_TOOLS:-/srv/loop/node}"
+PAGE="${LOOP_PAGE:-/srv/loop/project/index.html}"
+
+[ -d "$TOOLS/node_modules/vite" ] || { echo "smoke-page: no vite under $TOOLS; run 35-node.sh" >&2; exit 2; }
+[ -r "$PAGE" ] || { echo "smoke-page: cannot read $PAGE" >&2; exit 2; }
+
+WORK="$(mktemp -d)"
+trap 'rm -rf "$WORK"' EXIT
+
+mkdir -p "$WORK/src"
+cp "$PAGE" "$WORK/index.html"
+ln -s "$TOOLS/node_modules" "$WORK/node_modules"
+cat > "$WORK/src/main.ts" <<'EOF'
+export function start(root: HTMLElement): void {
+  root.textContent = "smoke-page";
+}
+EOF
+
+# cacheDir を作業場所に向ける。既定の node_modules/.vite は凍結した
+# ツールチェーンの中を指し、そこに書くと凍結を崩す。
+cat > "$WORK/check.mjs" <<'EOF'
+import { readFileSync } from "node:fs";
+import { createServer } from "vite";
+
+const root = process.cwd();
+const server = await createServer({
+  root,
+  configFile: false,
+  logLevel: "silent",
+  cacheDir: `${root}/.vite`,
+  appType: "custom",
+  server: { middlewareMode: true, hmr: false },
+  optimizeDeps: { noDiscovery: true, include: [] },
+});
+
+let failed = false;
+const fail = (message) => { console.log(`FAIL: ${message}`); failed = true; };
+
+try {
+  const html = await server.transformIndexHtml(
+    "/index.html", readFileSync(`${root}/index.html`, "utf8"));
+  const sources = [...html.matchAll(/<script\b[^>]*\bsrc="([^"]+)"/g)]
+    .map((m) => m[1].replaceAll("&amp;", "&"))
+    .filter((src) => !src.startsWith("/@vite/"));
+
+  let loader = null;
+  for (const src of sources) {
+    if (src === "/src/main.ts") { loader = src; break; }
+    const module = await server.transformRequest(src);
+    if (module && module.code.includes("/src/main.ts")) { loader = src; break; }
+  }
+  if (loader) {
+    console.log(`ok: ${loader} loads /src/main.ts`);
+  } else {
+    fail(`no module script served for index.html loads /src/main.ts (saw: ${sources.join(", ") || "none"})`);
+  }
+
+  const main = await server.transformRequest("/src/main.ts");
+  if (main && /export\s+function\s+start\b/.test(main.code)) {
+    console.log("ok: /src/main.ts is served and exports start");
+  } else {
+    fail("/src/main.ts was not served as a module exporting start");
+  }
+} catch (error) {
+  fail(error?.message ?? String(error));
+} finally {
+  await server.close();
+}
+process.exit(failed ? 1 : 0);
+EOF
+
+echo "vite: $(node -p "require('$TOOLS/node_modules/vite/package.json').version")"
+if (cd "$WORK" && node check.mjs); then
+  echo "smoke-page: ok -- the dev server serves index.html and it reaches start in src/main.ts"
+else
+  echo "smoke-page: BROKEN -- opening the page from the dev server does not reach src/main.ts" >&2
+  exit 1
+fi

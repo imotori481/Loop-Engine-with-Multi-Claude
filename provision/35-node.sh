@@ -34,6 +34,7 @@ cd "$(dirname "$0")"
 
 install -d -o root -g root -m 755 /srv/loop/bin
 install -o root -g root -m 755 bin/smoke-dom /srv/loop/bin/smoke-dom
+install -o root -g root -m 755 bin/smoke-page /srv/loop/bin/smoke-page
 
 # ---- ツールチェーンはプロジェクトの外に置く ----------------------------
 #
@@ -181,6 +182,13 @@ chk_can    test -r "$P/index.html"
 chk_cannot rm -f "$P/node_modules"
 
 "$TOOLS/node_modules/.bin/vitest" --version
+
+# 開発サーバで開いたページが start まで届くこと。計画には開発サーバの応答を
+# 確かめる条件を書かせないので（loop.py の environment_facts）、要件の「開発
+# サーバで開ける」はここで確かめる。
+if ! sudo -u runner /srv/loop/bin/smoke-page; then
+  echo "FAIL: the dev server does not reach start in src/main.ts"; fail=1
+fi
 
 if [ "$fail" -eq 0 ]; then
   echo "35-node: ok (all assertions passed)"

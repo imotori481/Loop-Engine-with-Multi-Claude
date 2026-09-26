@@ -262,6 +262,18 @@ sudo -u runner /srv/loop/bin/smoke-dom
 `expected 0 to be greater than 0`。**両方向を見るのが要点**で、何でも通す関門は
 働いている関門と見分けがつかない。
 
+`35-node.sh` は最後に `smoke-page` を流す。開発サーバ（Vite）で `index.html` を開いたとき、
+`src/main.ts` の `start` まで届くことを確かめる。計画には開発サーバの応答を確かめる
+条件を書かせないので、要件の「開発サーバで開ける」はここで確かめる。
+
+```bash
+sudo -u runner /srv/loop/bin/smoke-page
+```
+
+Vite はインラインのモジュールスクリプトを `/index.html?html-proxy&index=0.js` に切り出し、
+変換後の HTML には `/src/main.ts` が現れない。だから見るのは HTML ではなく、切り出された
+モジュールの中身だ。キャッシュは作業場所に書き、凍結したツールチェーンには書かない。
+
 ### 2-9. 資格情報を入れる（箱）
 
 3役はそれぞれ別のファイルから資格情報を読む。各ファイルは、その役の uid だけが読める
@@ -769,4 +781,5 @@ VirtualBox 構成の手順は `c4374f4` から拾える。
 
 ## 更新履歴
 
+- 2026/09/26: 開発サーバで開けることを確かめる `smoke-page` を §2-8 に追加
 - 2026/09/26: 手順を、実行する場所の明記、鍵の名前 `loop-dev` / `loop-runner`、公開鍵の流し込み、`/opt/loop-engine` からのプロビジョニング、Claude の資格情報、走行ログと run の退避に合わせて書き換え
