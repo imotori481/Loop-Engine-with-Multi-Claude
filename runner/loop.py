@@ -231,6 +231,16 @@ class Halt(Exception):
         self.detail = detail
 
 
+class SolverTimeout(Halt):
+    """ソルバーが solver-run の上限時間内に終わらなかった。
+
+    Halt の一種なので、受け止めない場所では今までどおりステップを止める。受け止める
+    のは IMPL のループだけだ。実装の試行の時間切れは、試行1回分の失敗であって、
+    計画の問題ではない。run 8 の S10 では、残り1回の試行を使わずにエスカレーション
+    になり、上限を使い切って人間で止まった。
+    """
+
+
 def run(cmd: list[str], cwd: Path = PROJECT, check: bool = False,
         env: dict[str, str] | None = None,
         timeout: int | None = None) -> subprocess.CompletedProcess:
@@ -930,7 +940,7 @@ def call_solver(phase: str, brief: str, backend: str | None = None) -> str:
                    "may still be alive. Check with: pgrep -a -u solver")
     out = proc.stdout + proc.stderr
     if proc.returncode == 124:
-        raise Halt(phase, "solver hit its own timeout in solver-run", out[-4000:])
+        raise SolverTimeout(phase, "solver hit its own timeout in solver-run", out[-4000:])
     if proc.returncode != 0:
         raise Halt(phase, f"solver exited {proc.returncode}", out[-4000:])
 
@@ -1486,6 +1496,35 @@ def frozen_tests_text(step: dict) -> str:
         path = PROJECT / rel
         parts.append(f"--- {rel} ---\n{path.read_text(encoding='utf-8')}")
     return "\n\n".join(parts)
+
+
+def absorb_timeout(step: dict, attempt: int, backend: str,
+                   manifest: dict[str, str], last_failure: str) -> str:
+    """IMPL の時間切れを、試行1回分の失敗として片付ける。次のブリーフに渡す文を返す。
+
+    書きかけの作業は捨てる。途中で止まったファイルは、半分だけ書き換わっている
+    かもしれず、次の試行が修理の土台にするには信用できない。
+
+    それでも、成功した試行と同じ検査は通す。時間切れの前に、凍結したテストや許可
+    リストの外に手を出していれば、それは試行の失敗ではなく柵の違反で、今までどおり
+    止める。引き取りを先にするのは、solver が書いたファイルを runner が扱えるように
+    するためだ（adopt を参照）。
+    """
+    adopt(TESTS, SRC)
+    for rel, digest in manifest.items():
+        if sha256(PROJECT / rel) != digest:
+            raise Halt("VERIFY", f"frozen test was modified: {rel}")
+    assert_touched("IMPL", step["files_test"] + step["files_write"])
+    dropped = discard_attempt(step["files_write"])
+    seconds = TIMEOUTS["solver"]
+    ledger("SOLVER_TIMEOUT", step=step["id"], attempt=attempt, backend=backend,
+           seconds=seconds, files=dropped)
+    return (f"Your previous attempt ran out of time: it was stopped after {seconds}s, "
+            "before it finished. Nothing it wrote was kept -- the files you may "
+            "modify are back to what they were before it started.\n\n"
+            "Do not try to do everything in one pass. Make the smallest change "
+            "that addresses the failures below, write it, and stop.\n\n"
+            + (last_failure or "(nothing recorded)"))
 
 
 # --------------------------------------------------------------------------
@@ -3748,6 +3787,7 @@ def run_step(step_id: str, unvalidated: bool = False) -> int:
         own_tests = {Path(p).with_suffix("").as_posix().replace("/", ".")
                      for p in step["files_test"]} | set(step["files_test"])
 
+        timeouts = 0
         while attempt < len(schedule):
             backend = schedule[attempt]
             handover = attempt > 0 and backend != schedule[attempt - 1]
@@ -3769,8 +3809,16 @@ def run_step(step_id: str, unvalidated: bool = False) -> int:
                 if not handover:
                     last_failure = red_baseline
 
-            call_solver("IMPL", brief_impl(step, context, tests_text, last_failure),
-                        backend=backend)
+            try:
+                call_solver("IMPL", brief_impl(step, context, tests_text, last_failure),
+                            backend=backend)
+            except SolverTimeout:
+                # 試行を1回使っただけで、ステップは止めない。残りの試行があれば
+                # 次へ進み、使い切れば下の else がいつもどおりエスカレーションする。
+                last_failure = absorb_timeout(step, attempt, backend, manifest,
+                                              last_failure)
+                timeouts += 1
+                continue
 
             # 何よりも先に凍結のトリップワイヤを見る。テストが変わっていれば、
             # 通ったかについて走行が言うことは、何の意味も持たない。
@@ -3833,6 +3881,10 @@ def run_step(step_id: str, unvalidated: bool = False) -> int:
             tried = ", ".join(dict.fromkeys(schedule))
             reason = (f"still failing after {attempt} attempts"
                       + (f" across {tried}" if len(SOLVER_TIERS) > 1 else ""))
+            if timeouts:
+                # プランナーに届く理由に残す。全部が時間切れなら、実装が難しいの
+                # ではなく、ステップが大きすぎるか、条件が満たせないことを疑う。
+                reason += f"; {timeouts} of them ran out of time"
             if broke:
                 # 理由の中で別に名指しする。これは ESCALATION.md を通って
                 # プランナーに届き、「このステップは前のステップを壊さずには
