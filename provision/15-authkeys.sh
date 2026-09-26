@@ -11,14 +11,25 @@
 set -euo pipefail
 
 PUB=/tmp/loop-provision/loop-runner_ed25519.pub
-[ -f "$PUB" ] || { echo "FATAL: $PUB not found" >&2; exit 1; }
+KEYS=/home/runner/.ssh/authorized_keys
 
-install -d -o runner -g runner -m 700 /home/runner/.ssh
-install -o runner -g runner -m 600 /dev/null /home/runner/.ssh/authorized_keys
-cat "$PUB" > /home/runner/.ssh/authorized_keys
-chown runner:runner /home/runner/.ssh/authorized_keys
+# /tmp は VM の再起動で消える。2回目以降のプロビジョニングで流し込み直しを
+# 求めないよう、流し込んだ鍵が無くても、すでに入っている鍵があればそれを残す。
+# 新しい鍵を流し込んだときだけ置き換える。
+if [ -f "$PUB" ]; then
+  install -d -o runner -g runner -m 700 /home/runner/.ssh
+  install -o runner -g runner -m 600 /dev/null "$KEYS"
+  cat "$PUB" > "$KEYS"
+  chown runner:runner "$KEYS"
+  note="installed from $PUB"
+elif [ -s "$KEYS" ]; then
+  note="no new key at $PUB; kept the one already installed"
+else
+  echo "FATAL: $PUB not found, and runner has no key yet" >&2
+  exit 1
+fi
 
 # solver には鍵も .ssh ディレクトリも与えない。
 rm -rf /home/solver/.ssh
 
-echo "15-authkeys: ok"
+echo "15-authkeys: ok ($note)"
