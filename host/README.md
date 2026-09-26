@@ -10,6 +10,7 @@ WSL2 では起動と生存管理がホスト側の責務になった（`RUNNER_S
 |---|---|---|
 | `loop-dev.cmd` | `C:\Users\<you>\bin\loop-dev.cmd`（PATH の通った場所） | ディストロ起動 → sshd 待機 → VS Code Remote-SSH 起動 |
 | `loop.cmd` | このリポジトリのまま（`host` を PATH に足す） | ディストロ起動 → sshd 待機 → 箱の `loop` コマンドを実行 |
+| `loop-import.cmd` | このリポジトリのまま（`host` を PATH に足す） | 既存リポジトリのブランチを箱のプロジェクトとして取り込む |
 | `wsl-keepalive.vbs` | このリポジトリのまま（タスクが絶対パスで参照する） | VM を**窓を出さずに**生かし続ける。下の keepalive タスクの実体 |
 | `loop-pull.cmd` | このリポジトリのまま | **すべての** `repo*.git` を run ごとのミラーに引く。**VHDX を失っても残る唯一の複製** |
 | `loop-dashboard.cmd` | このリポジトリのまま | 進捗、エスカレーション、予定レビューを扱うGUIを起動（`127.0.0.1:8443`） |
@@ -35,6 +36,23 @@ loop log
 `go` に渡した要件がこの機械のファイルなら、先に保守ユーザーのホームへ
 `loop-requirements.md` として送る。走行は箱の中で続くので、窓を閉じてもよい。
 続きは `loop log` で追う。
+
+## 既存リポジトリを取り込む
+
+```cmd
+loop-import <project> <repo-url> <branch> [<base-branch>]
+```
+
+次の順に流す。どこかで失敗したら、その場で止まり、次に打つコマンドを出す。
+
+1. `<repo-url>` を `C:\dev\roop-engin\projects\<project>` にクローンする。もうあれば使い回す。そのときは、`origin` が `<repo-url>` であることと、未コミットの変更が無いことを確かめてから fetch する
+2. `<branch>` に切り替える。手元にも `origin` にも無ければ、`<base-branch>` から作る。`<base-branch>` を省くと、`origin` の既定のブランチから作る
+3. 箱で `loop project init <project> --branch <branch>` を流す
+4. `loop-runner` で `<branch>` を箱の bare に push する
+5. 箱で `loop project use <project>` を流す
+
+クローンの置き場は、冒頭の `set "WORKROOT=..."` で決まる。GitHub とやり取りするのはこのクローンだけだ。
+箱には GitHub の資格情報を置かない。
 
 ## オペレーターGUI
 
@@ -212,5 +230,6 @@ git clone loop-runner:/srv/loop/repo.git <置き場所>
 
 ## 更新履歴
 
+- 2026/09/27: 既存リポジトリを取り込む `loop-import.cmd` を追加
 - 2026/09/26: 箱の `loop` コマンドを呼ぶ `loop.cmd` を追加
 - 2026/09/26: `~/.ssh/config` の鍵の名前を `loop-dev` / `loop-runner` に、keepalive とミラーのパスを置き換え前提の書き方に変更

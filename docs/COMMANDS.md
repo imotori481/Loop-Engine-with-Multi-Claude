@@ -92,6 +92,14 @@ GitHub とやり取りするのはホストだけだ。箱には GitHub の資�
 
 ### 取り込む
 
+ホストで1行打つ。下の1から4をまとめて流す。クローンは `C:\dev\roop-engin\projects\<project>` に置く。
+
+```bash
+loop-import <project> <repo-url> <branch> [<base-branch>]
+```
+
+手で打つときは次の順に流す。
+
 1. 作業用ブランチを切る（ホスト）
 
     ```bash
