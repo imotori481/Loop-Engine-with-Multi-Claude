@@ -139,6 +139,8 @@ TypeScript では happy-dom が画面の無い DOM を作るので、ボタン�
 8. [PLANS.md](PLANS.md) — このリポジトリの目標と作業の一覧
 9. [HANDOFF.md](docs/HANDOFF.md) — 実行環境の経緯と、作業再開時の注意
 
+普段の操作で使うコマンドは [COMMANDS.md](docs/COMMANDS.md) にまとめてあります。
+
 ## リポジトリ構成
 
 ```text
@@ -151,6 +153,7 @@ TypeScript では happy-dom が画面の無い DOM を作るので、ボタン�
 │   ├── BOOTSTRAP.md      # プランナー向けの開始プロンプト
 │   ├── RUNNER_SPEC.md    # ループランナーの仕様
 │   ├── LOCAL_SOLVER.md   # ローカルモデルをソルバーに据える手順と失敗表
+│   ├── COMMANDS.md       # よく使うコマンド
 │   └── HANDOFF.md        # 進捗と引き継ぎ
 ├── requirements/         # 通し実行に使った要件
 ├── runner/
