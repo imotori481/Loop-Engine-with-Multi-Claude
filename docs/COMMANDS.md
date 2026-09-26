@@ -11,7 +11,7 @@
 置けば `loop` だけで呼べる。中身は `ssh -t loop-dev loop <引数>` で、ディストロの起動と
 sshd の待機も先に済ませる。だから下の `loop` の行は、ホストと箱のどちらで打っても同じに動く。
 
-## 走らせる
+## 走らせる（ホストでも箱でも）
 
 | やりたいこと | コマンド |
 |---|---|
@@ -30,7 +30,7 @@ sshd の待機も先に済ませる。だから下の `loop` の行は、ホス�
 loop go C:\work\requirements.md
 ```
 
-## 止まったとき
+## 止まったとき（ホストでも箱でも）
 
 止まった理由と次の手は、`loop status` とログの最後の行に出る。
 
@@ -45,7 +45,7 @@ loop go C:\work\requirements.md
 
 `loop raw` は `loop.py` をそのまま runner として前面で呼ぶ。動詞の一覧は `loop raw --help`。
 
-## プロジェクトを切り替える
+## プロジェクトを切り替える（ホストでも箱でも）
 
 | やりたいこと | コマンド |
 |---|---|
@@ -73,6 +73,8 @@ loop go C:\work\requirements.md
 
 ## 箱を保守する
 
+### 更新する（箱）
+
 スクリプトやランナーを更新したら、pull してからプロビジョニングを流し直す。何度流しても同じ状態になる。
 
 ```bash
@@ -80,7 +82,20 @@ sudo git -C /opt/loop-engine pull
 cd /tmp && sudo ADMIN_USER=<保守ユーザー> bash /opt/loop-engine/provision/provision.sh
 ```
 
-配管を確かめる smoke は runner として流す。
+### 配管を確かめる（箱）
+
+smoke は、箱の配管が繋がっているかを最小の往復で確かめる検査だ。箱を作ったあと、資格情報を
+入れ替えたあと、プロビジョニングのスクリプトや起動スクリプトを直したあとに流す。
+runner として流す。
+
+| smoke | 確かめること |
+|---|---|
+| `smoke-solver` | ランナーがソルバーを別の uid で起動できるか。認証、端末なしの実行、書いたファイルの所有者 |
+| `smoke-pytest` | ソルバーが pytest を実行できないこと |
+| `smoke-planner` | プランナーが動き、計画にもコードにも直接触れないこと |
+| `smoke-critic` | クリティックが起動でき、書いたファイルを読み戻せること |
+| `smoke-dom` | happy-dom の UI の関門が、生きた UI で通り、壊れた UI で落ちること |
+| `smoke-page` | 開発サーバで `index.html` を開くと `src/main.ts` の `start` まで届くこと |
 
 ```bash
 sudo -u runner /srv/loop/bin/smoke-solver
@@ -91,15 +106,18 @@ sudo -u runner /srv/loop/bin/smoke-dom
 sudo -u runner /srv/loop/bin/smoke-page
 ```
 
-VM が落ちて keepalive が戻らないときは、ホストでタスクを起こし直す。
+### keepalive を起こし直す（ホスト）
+
+VM が落ちて keepalive が戻らないときは、cmd でタスクを起こし直す。
 
 ```bat
 schtasks /run /tn "WSL-keepalive-Ubuntu-24-04"
 ```
 
-## リポジトリのテスト
+## リポジトリのテスト（ホスト）
 
-ホストのリポジトリの根で、普段使いの WSL などの Python 3 から流す。
+ホストにクローンしたリポジトリの根で流す。Python 3 が要るので、普段使いの WSL ディストロ
+（箱の `Ubuntu-24.04` ではないもの）から流す。箱は Windows のパスを見せないので、そこでは流せない。
 
 ```bash
 python3 -m unittest discover -s runner/tests
