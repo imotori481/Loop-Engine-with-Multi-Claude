@@ -9,6 +9,7 @@ WSL2 では起動と生存管理がホスト側の責務になった（`RUNNER_S
 | ファイル | 置き場所 | 役割 |
 |---|---|---|
 | `loop-dev.cmd` | `C:\Users\<you>\bin\loop-dev.cmd`（PATH の通った場所） | ディストロ起動 → sshd 待機 → VS Code Remote-SSH 起動 |
+| `loop.cmd` | `C:\Users\<you>\bin\loop.cmd`（PATH の通った場所） | ディストロ起動 → sshd 待機 → 箱の `loop` コマンドを実行 |
 | `wsl-keepalive.vbs` | このリポジトリのまま（タスクが絶対パスで参照する） | VM を**窓を出さずに**生かし続ける。下の keepalive タスクの実体 |
 | `loop-pull.cmd` | このリポジトリのまま | **すべての** `repo*.git` を run ごとのミラーに引く。**VHDX を失っても残る唯一の複製** |
 | `loop-dashboard.cmd` | このリポジトリのまま | 進捗、エスカレーション、予定レビューを扱うGUIを起動（`127.0.0.1:8443`） |
@@ -16,6 +17,21 @@ WSL2 では起動と生存管理がホスト側の責務になった（`RUNNER_S
 **ASCII のみで書くこと。** PowerShell 5.1 と cmd.exe は BOM 無し UTF-8 を ANSI として
 読むため、日本語コメントを入れると行継続として誤解釈され、変数が黙って null になる
 （`provision/README.md` §3-6）。
+
+## 箱を操作する
+
+`loop.cmd` は、ディストロを起動して sshd を待ち、`ssh -t loop-dev loop <引数>` を流す。
+引数は箱の `loop` コマンドと同じ（`provision/README.md` §2-10）。
+
+```cmd
+loop go C:\path\to\requirements.md
+loop status
+loop log
+```
+
+`go` に渡した要件がこの機械のファイルなら、先に保守ユーザーのホームへ
+`loop-requirements.md` として送る。走行は箱の中で続くので、窓を閉じてもよい。
+続きは `loop log` で追う。
 
 ## オペレーターGUI
 
@@ -193,4 +209,5 @@ git clone loop-runner:/srv/loop/repo.git <置き場所>
 
 ## 更新履歴
 
+- 2026/09/26: 箱の `loop` コマンドを呼ぶ `loop.cmd` を追加
 - 2026/09/26: `~/.ssh/config` の鍵の名前を `loop-dev` / `loop-runner` に、keepalive とミラーのパスを置き換え前提の書き方に変更

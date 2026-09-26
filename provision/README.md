@@ -318,20 +318,50 @@ sudo -u runner /srv/loop/bin/smoke-critic
 
 ### 2-10. 走らせる（箱）
 
-要件を人間の受け渡し口に置き、計画を起こして回す。
+保守ユーザーが `loop` コマンドで操作する。`25-runner.sh` が `/usr/local/bin/loop` に置く。
+ホストからは `host\loop.cmd` で同じコマンドを呼べる（`host/README.md`）。
 
 ```bash
-sudo install -o root -g humanw -m 644 <要件>.md /srv/loop/human/in/REQUIREMENTS.md
-L="sudo -u runner python3 -u /srv/loop/runner/loop.py"
-$L plan bootstrap                  # TypeScript なら --language typescript
-$L plan refine                     # critic の指摘をプランナーへ戻す
-$L plan apply
-$L run --all 2>&1 | sudo -u runner tee -a /srv/loop/logs/<名前>.log
+loop go <要件>.md                     # TypeScript なら --language typescript
+loop status                          # 走っているか、人への問い、台帳の末尾
+loop log                             # 走行ログを追う。Ctrl-C で抜けても走行は続く
+loop continue                        # 止まったところから続ける
+loop stop                            # 走行を止める
 ```
 
-**走行ログは `/srv/loop/logs/` に書く。** `/srv/loop` の直下には runner も保守ユーザーも
-書けない。`tee` も `sudo -u runner` で起こす ── パイプの先は保守ユーザーとして動くので、
-そのままでは `Permission denied` になる。
+`loop go` は要件を `/srv/loop/human/in/REQUIREMENTS.md` に置き、次を順に裏で流す。
+
+1. `plan bootstrap`
+2. `plan refine`（critic の指摘をプランナーへ戻す）
+3. `plan apply`
+4. `run --all`
+
+次の場合は、適用や実行に進まずに止まる。何を読めばよいかはログの最後の行と `loop status` に出る。
+
+| 止まる場面 | 次の手 |
+|---|---|
+| プランナーが計画を書かずにエスカレーションした | 書かれた問いを読み、要件を直して `loop go` |
+| `plan refine` のあとも critic の指摘が残った | 指摘を読む。そのまま適用するなら `loop continue` |
+| `plan apply` が提案を拒んだ | 違反を読み、要件を直して `loop go` |
+| `run --all` が止まった | `loop status` のエスカレーションを読む |
+| 利用枠が尽きた | 枠が戻ってから `loop continue`。途中のステップがあれば先に `loop raw reset <ステップ>` |
+
+`loop continue` は、適用待ちの提案があれば `plan apply` を流してから `run --all` を流す。
+提案が無ければ `run --all` だけを流す。
+
+走行は systemd の一時ユニット `loop-run` として runner で動く。SSH が切れても止まらず、
+二重には起動できない。`loop stop` は3役の呼び出しも含めてまとめて止める。
+
+走行ログは `/srv/loop/logs/<プロジェクト>-<日時>.log` に書く。
+`/srv/loop/logs/<プロジェクト>-latest.log` が最新のログを指す。
+
+`loop.py` の動詞を直接使うときは `loop raw` を使う。runner として前面で動く。
+
+```bash
+loop raw validate
+loop raw plan show
+loop raw reset <ステップ>
+```
 
 ### 2-11. プロジェクトを切り替える（箱）
 
@@ -339,13 +369,17 @@ $L run --all 2>&1 | sudo -u runner tee -a /srv/loop/logs/<名前>.log
 `/srv/loop` は root 所有なので、保守ユーザーが `sudo` で流す。runner にはできない。
 
 ```bash
-P="sudo ADMIN_USER=<保守ユーザー> bash /opt/loop-engine/provision/loop-project.sh"
-cd /tmp
-$P list                              # プロジェクトの一覧。* が今のもの
-$P current                           # 今のプロジェクトの名前
-$P init <名前>                        # 空のプロジェクトを用意する
-$P init <名前> --branch <ブランチ>     # 既存リポジトリのブランチを受け入れる用意をする
-$P use <名前>                         # 切り替える
+loop project list                              # プロジェクトの一覧。* が今のもの
+loop project current                           # 今のプロジェクトの名前
+loop project init <名前>                        # 空のプロジェクトを用意する
+loop project init <名前> --branch <ブランチ>     # 既存リポジトリのブランチを受け入れる用意をする
+loop project use <名前>                         # 切り替える
+```
+
+`loop project` は `loop-project.sh` を root で流す。`loop` がまだ無い箱では、直接流す。
+
+```bash
+cd /tmp && sudo ADMIN_USER=<保守ユーザー> bash /opt/loop-engine/provision/loop-project.sh <引数>
 ```
 
 置き場は次のとおり。
@@ -374,7 +408,7 @@ $P use <名前>                         # 切り替える
 `loop-project.sh` を使う前に作った箱は、最初に今の状態へ名前を付ける。
 
 ```bash
-$P adopt <名前>
+loop project adopt <名前>
 ```
 
 `/srv/loop/repo.git` の実体が `projects/<名前>/repo.git` に移り、元の場所はリンクになる。
@@ -820,6 +854,7 @@ VirtualBox 構成の手順は `c4374f4` から拾える。
 
 ## 更新履歴
 
+- 2026/09/26: §2-10 を `loop` コマンドで走らせる手順に置き換え
 - 2026/09/26: §2-11 を、`loop-project.sh` でプロジェクトを切り替える手順に置き換え
 - 2026/09/26: 2回目以降のプロビジョニングで runner の公開鍵の流し込みを不要にした
 - 2026/09/26: 開発サーバで開けることを確かめる `smoke-page` を §2-8 に追加

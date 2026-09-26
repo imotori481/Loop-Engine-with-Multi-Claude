@@ -1,0 +1,214 @@
+#!/usr/bin/env bash
+# 箱の操作をまとめたコマンド。保守ユーザーが流す。25-runner.sh が
+# /usr/local/bin/loop に置く。
+#
+#   loop go <requirements.md> [--language <lang>]
+#                        要件を置き、計画づくりから全ステップまでを裏で流す
+#   loop continue        適用待ちの提案があれば適用し、全ステップを裏で流す
+#   loop status          今のプロジェクト、走っているか、人への問い、台帳の末尾
+#   loop log             走行ログを追う。Ctrl-C で抜けても走行は続く
+#   loop stop            走行を止める
+#   loop project <args>  プロジェクトの一覧と切り替え（loop-project.sh）
+#   loop raw <args>      loop.py をそのまま呼ぶ（runner として、前面で）
+#
+# 走行は systemd の一時ユニット loop-run で、runner として動く。`sudo ... &` で裏に
+# 回すと、SSH が切れたときに sudo が受けた SIGHUP を中のコマンドへ中継し、走行が
+# 止まる。一時ユニットは SSH のセッションから切り離されている。ユニット名が1つ
+# なので二重には起動できず、止めるときは3役の呼び出しも含めてまとめて止まる。
+set -euo pipefail
+
+# LOOP_ROOT はテストのためだけにある。走行は systemd のユニットで動き、呼んだ人の
+# 環境を受け継がないので、裏で走る側には効かない。
+LOOP="${LOOP_ROOT:-/srv/loop}"
+UNIT=loop-run
+LOGS=$LOOP/logs
+REQUIREMENTS=$LOOP/human/in/REQUIREMENTS.md
+PENDING=$LOOP/planner/out/tasks.json
+PLAN=$LOOP/project/plan
+PROJECT_SH="${LOOP_ENGINE:-/opt/loop-engine}/provision/loop-project.sh"
+SELF=/usr/local/bin/loop
+
+# 保守ユーザーのホームは 0700 で、runner はそこに cd できない（provision/README §3-14）。
+cd /tmp
+
+die() { echo "loop: $*" >&2; exit 1; }
+
+project_name() {
+  local name
+  name="$(cat "$LOOP/projects/CURRENT" 2>/dev/null || true)"
+  echo "${name:-default}"
+}
+
+running() { systemctl is-active --quiet "$UNIT"; }
+
+latest_log() { echo "$LOGS/$(project_name)-latest.log"; }
+
+as_runner() { sudo -u runner "$@"; }
+
+# ---- 裏で走る側。runner として動く ------------------------------------------
+
+# loop.py を1つ呼び、終了コードを返す。何を呼んだかをログに残す。
+step() {
+  echo
+  echo "--- loop.py $* ($(date '+%F %T'))"
+  python3 -u "$LOOP/runner/loop.py" "$@"
+}
+
+# 最後の行は `loop status` が読む。形を変えるときは cmd_status も合わせる。
+finish() {
+  echo
+  echo "=== loop finished ($(date '+%F %T')): $2"
+  exit "$1"
+}
+
+apply_pending() {
+  local rc=0
+  step plan apply || rc=$?
+  case "$rc" in
+    0) ;;
+    2) finish 2 "the proposal was rejected; it is left in $LOOP/planner/out. Read the violations above" ;;
+    3) finish 3 "the planner escalated to you; read $PLAN/PLANNER_ESCALATION.md" ;;
+    *) finish "$rc" "plan apply failed (exit $rc)" ;;
+  esac
+}
+
+run_all() {
+  local rc=0
+  step run --all || rc=$?
+  case "$rc" in
+    0) finish 0 "all steps green" ;;
+    5) finish 5 "out of quota; when it resets, 'loop continue' (reset a half-done step first: loop raw reset <step-id>)" ;;
+    *) finish "$rc" "run --all stopped (exit $rc); see 'loop status'" ;;
+  esac
+}
+
+work() {
+  local log="$1" mode="$2" language="${3:-python}" rc=0
+  exec >>"$log" 2>&1
+  echo "=== loop $mode started ($(date '+%F %T')) project=$(project_name)"
+
+  if [ "$mode" = go ]; then
+    step plan bootstrap --language "$language" || rc=$?
+    [ "$rc" -eq 0 ] || finish "$rc" "plan bootstrap failed (exit $rc)"
+    if [ -f "$LOOP/planner/out/ESCALATE.md" ]; then
+      finish 3 "the planner escalated instead of planning; read $LOOP/planner/out/ESCALATE.md"
+    fi
+
+    step plan refine || rc=$?
+    case "$rc" in
+      0) ;;
+      3) finish 3 "the planner escalated during refine; read $LOOP/project/.runner/refine-escalation.md" ;;
+      4) finish 4 "the critic still has findings; read them above, then 'loop continue' to apply the proposal as it is" ;;
+      *) finish "$rc" "plan refine failed (exit $rc)" ;;
+    esac
+    apply_pending
+  else
+    [ ! -f "$PENDING" ] || apply_pending
+  fi
+  run_all
+}
+
+# ---- 保守ユーザーが打つ側 ----------------------------------------------------
+
+start() {
+  local mode="$1" language="${2:-}" log
+  running && die "a run is already in progress; 'loop log' to follow it, 'loop stop' to end it"
+  log="$LOGS/$(project_name)-$(date +%Y%m%d-%H%M%S).log"
+  as_runner touch "$log"
+  as_runner ln -sfn "$(basename "$log")" "$(latest_log)"
+  sudo systemd-run --quiet --collect --unit="$UNIT" \
+    --uid=runner --gid=runner --working-directory=/tmp \
+    "$SELF" __work "$log" "$mode" ${language:+"$language"}
+  echo "started; log: $log"
+  echo "follow it with 'loop log', check it with 'loop status'"
+}
+
+cmd_go() {
+  local requirements="" language="python"
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --language) [ $# -ge 2 ] || die "--language needs a value"; language="$2"; shift 2 ;;
+      -*) die "unknown option: $1" ;;
+      *) [ -z "$requirements" ] || die "one requirements file only"; requirements="$1"; shift ;;
+    esac
+  done
+  [ -n "$requirements" ] || die "usage: loop go <requirements.md> [--language <lang>]"
+  [ -f "$requirements" ] || die "no such file: $requirements"
+  [ -d "$(dirname "$REQUIREMENTS")" ] || die "$(dirname "$REQUIREMENTS") does not exist; is the project built?"
+  running && die "a run is already in progress; 'loop stop' first"
+
+  sudo install -o root -g humanw -m 644 "$requirements" "$REQUIREMENTS"
+  echo "requirements placed at $REQUIREMENTS"
+  start go "$language"
+}
+
+cmd_continue() {
+  as_runner test -f "$PLAN/tasks.json" || as_runner test -f "$PENDING" \
+    || die "there is no plan yet; start with 'loop go <requirements.md>'"
+  start continue
+}
+
+cmd_status() {
+  local log last
+  echo "project:  $(project_name)"
+  if running; then
+    echo "run:      in progress"
+  else
+    echo "run:      not running"
+  fi
+
+  log="$(latest_log)"
+  if [ -e "$log" ]; then
+    echo "log:      $(readlink -f "$log")"
+    last="$(grep -E '^=== loop ' "$log" | tail -n 1 || true)"
+    [ -z "$last" ] || echo "last:     ${last#=== }"
+  fi
+
+  as_runner test -f "$PENDING" && echo "pending:  a proposal waits in $LOOP/planner/out ('loop continue' applies it)"
+  local f
+  for f in ESCALATION.md PLANNER_ESCALATION.md; do
+    if as_runner test -f "$PLAN/$f"; then
+      echo
+      echo "--- $PLAN/$f (first 20 lines)"
+      as_runner head -n 20 "$PLAN/$f"
+    fi
+  done
+
+  if as_runner test -f "$PLAN/ledger.jsonl"; then
+    echo
+    echo "--- ledger (last 5 events)"
+    as_runner tail -n 5 "$PLAN/ledger.jsonl"
+  fi
+}
+
+cmd_log() {
+  local log
+  log="$(latest_log)"
+  [ -e "$log" ] || die "no log yet for project '$(project_name)'"
+  tail -n 50 -F "$log"
+}
+
+cmd_stop() {
+  running || { echo "not running"; return 0; }
+  sudo systemctl stop "$UNIT"
+  echo "stopped."
+  echo "a step that was in progress is left as it was; before 'loop continue', run:"
+  echo "    loop raw reset <step-id>"
+}
+
+usage() {
+  sed -n '5,12p' "$0" | sed 's/^# \{0,1\}//' >&2
+  exit 2
+}
+
+case "${1:-}" in
+  go)       shift; cmd_go "$@" ;;
+  continue) cmd_continue ;;
+  status)   cmd_status ;;
+  log)      cmd_log ;;
+  stop)     cmd_stop ;;
+  project)  shift; sudo ADMIN_USER="$(id -un)" bash "$PROJECT_SH" "$@" ;;
+  raw)      shift; as_runner python3 -u "$LOOP/runner/loop.py" "$@" ;;
+  __work)   shift; work "$@" ;;
+  *)        usage ;;
+esac
