@@ -6,6 +6,7 @@
 #                        要件を置き、計画づくりから全ステップまでを裏で流す
 #   loop continue        適用待ちの提案があれば適用し、全ステップを裏で流す
 #   loop status          今のプロジェクト、走っているか、人への問い、台帳の末尾
+#   loop now             いまの作業を JSON で出す（ホストのダッシュボードが読む）
 #   loop log             走行ログを追う。Ctrl-C で抜けても走行は続く
 #   loop stop            走行を止める
 #   loop project <args>  プロジェクトの一覧と切り替え（loop-project.sh）
@@ -181,6 +182,38 @@ cmd_status() {
   fi
 }
 
+# ランナーが書く now.json に、走っているかどうかと最後の結果を足して1つの JSON に
+# する。sudo を使わない。ダッシュボードは端末の無い SSH で呼ぶので、パスワードを
+# 訊けない。/srv/loop/logs は humanw 経由で保守ユーザーが読める。
+cmd_now() {
+  local active=false
+  running && active=true
+  python3 - "$(project_name)" "$active" "$LOGS/now.json" "$(latest_log)" <<'PY'
+import json
+import sys
+
+project, active, now_path, log_path = sys.argv[1:5]
+
+
+def read(path, parse):
+    try:
+        with open(path, encoding="utf-8") as handle:
+            return parse(handle)
+    except (OSError, ValueError):
+        return None
+
+
+def last_result(handle):
+    lines = [line.strip()[4:] for line in handle if line.startswith("=== loop ")]
+    return lines[-1] if lines else None
+
+
+print(json.dumps({"project": project, "running": active == "true",
+                  "now": read(now_path, json.load),
+                  "last": read(log_path, last_result)}, ensure_ascii=False))
+PY
+}
+
 cmd_log() {
   local log
   log="$(latest_log)"
@@ -197,7 +230,7 @@ cmd_stop() {
 }
 
 usage() {
-  sed -n '5,12p' "$0" | sed 's/^# \{0,1\}//' >&2
+  sed -n '5,13p' "$0" | sed 's/^# \{0,1\}//' >&2
   exit 2
 }
 
@@ -205,6 +238,7 @@ case "${1:-}" in
   go)       shift; cmd_go "$@" ;;
   continue) cmd_continue ;;
   status)   cmd_status ;;
+  now)      cmd_now ;;
   log)      cmd_log ;;
   stop)     cmd_stop ;;
   project)  shift; sudo ADMIN_USER="$(id -un)" bash "$PROJECT_SH" "$@" ;;

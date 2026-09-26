@@ -22,6 +22,7 @@ REVIEW_GATE は v1 では実装していない。人間の手順で、最初の�
 from __future__ import annotations
 
 import argparse
+import atexit
 import hashlib
 import json
 import os
@@ -290,6 +291,100 @@ def ledger(event: str, *, echo: str | None = None, **fields) -> None:
     shown = echo if echo is not None else \
         " ".join(f"{k}={v}" for k, v in fields.items() if k != "detail")
     print(f"[{event}] {shown}")
+
+
+# --------------------------------------------------------------------------
+# いまの作業
+# --------------------------------------------------------------------------
+#
+# 台帳は起きたことの記録で、ホストに届くのは GREEN と plan apply のときだけだ。
+# 人が知りたい「いま誰がどのステップの何をしているか」は、そこからは読めない。
+# だから、変わるたびに1つのファイルを丸ごと書き直す。箱の `loop now` がこれを
+# 読み、ホストのダッシュボードが SSH で引く。
+#
+# /srv/loop/logs は runner と保守ユーザー（humanw）だけが読める。ステップの goal を
+# 載せても、それを読むべきでない役には届かない。
+
+NOW_FILE = LOOP / "logs" / "now.json"
+# 誰が何をしているかの文脈。コマンドとステップは呼び出し元が設定する。
+NOW: dict = {"command": None, "step": None, "attempt": None, "key": None, "since": None}
+
+ROLE_JA = {"planner": "プランナー", "critic": "クリティック",
+           "solver": "ソルバー", "runner": "ランナー"}
+
+CRITIQUE_JA = {
+    "coverage": "計画をやり遂げたとき、要件が満たされるかを批評している",
+    "trace": "計画に、使う人の操作では届かない部分が無いかを批評している",
+}
+
+
+def describe_now(who: str, phase: str, detail: str = "") -> str:
+    """いまの作業を日本語の1文にする。"""
+    step = NOW["step"]
+    if who == "planner":
+        if NOW["command"] == "plan bootstrap":
+            return "要件から計画を書いている"
+        if NOW["command"] == "plan refine":
+            return "クリティックの指摘を受けて計画を直している"
+        if step:
+            return f"{step} のエスカレーションに答えて計画を直している"
+        return "計画の改訂案を書いている"
+    if who == "critic":
+        return CRITIQUE_JA.get(detail, "計画を批評している")
+    if who == "solver":
+        text = {"TEST_WRITE": f"{step} の受け入れ条件からテストを書いている",
+                "STUB": f"{step} のスタブを書いている",
+                "IMPL": f"{step} を実装している"}.get(phase, f"{step} の {phase} をしている")
+        if phase == "IMPL" and NOW["attempt"]:
+            text += f"（試行 {NOW['attempt']}）"
+        return text
+    return {"red": f"{step} のテストが、実装の無いうちは落ちることを確かめている",
+            "verify": f"{step} の実装をテストで確かめている",
+            "check": "エージェントの出力を確かめている",
+            "quota": "利用枠が戻るのを待っている"}.get(phase, phase)
+
+
+def steps_now() -> list[dict]:
+    """各ステップの goal と状態。計画がまだ無ければ空。"""
+    try:
+        tasks = json.loads((PLAN / "tasks.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    done = green_steps()
+    rows = []
+    for step in tasks.get("steps", []) if isinstance(tasks, dict) else []:
+        if not isinstance(step, dict):
+            continue
+        sid = step.get("id")
+        state = "green" if sid in done else "active" if sid == NOW["step"] else "pending"
+        rows.append({"id": sid, "goal": step.get("goal", ""), "state": state})
+    return rows
+
+
+def report_now(who: str | None, phase: str = "", detail: str = "") -> None:
+    """いまの作業を NOW_FILE に書く。who が None なら、何もしていない。
+
+    書けなくても走行は止めない。これは人が見るための写しで、関門ではない。
+    """
+    if who is None:
+        activity = None
+        NOW["key"] = NOW["since"] = None
+    else:
+        key = (who, phase, NOW["step"], NOW["attempt"], detail)
+        if key != NOW["key"]:
+            NOW["key"], NOW["since"] = key, time.strftime("%Y-%m-%dT%H:%M:%S%z")
+        activity = {"who": who, "who_ja": ROLE_JA.get(who, who), "phase": phase,
+                    "step": NOW["step"], "attempt": NOW["attempt"],
+                    "text_ja": describe_now(who, phase, detail), "since": NOW["since"]}
+    record = {"updated": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "pid": os.getpid(),
+              "command": NOW["command"], "activity": activity, "steps": steps_now()}
+    try:
+        temporary = NOW_FILE.with_name(NOW_FILE.name + ".tmp")
+        temporary.write_text(json.dumps(record, ensure_ascii=False), encoding="utf-8")
+        temporary.chmod(0o640)
+        os.replace(temporary, NOW_FILE)
+    except OSError:
+        pass
 
 
 def sha256(path: Path) -> str:
@@ -700,6 +795,7 @@ def pytest_run(tag: str, files_test: list[str]) -> TestRun:
     落ちることを確かめることで、スイートの残りまで数えると R1 が意味を失う。
     VERIFY には tests/ 全体を渡す。その仕事はもう半分、これらがいま通り、かつ
     通っていたものが1つも落ちていないことを確かめることだからだ。"""
+    report_now("runner", tag.split("-")[0])
     STATE.mkdir(parents=True, exist_ok=True)
     xml_path = STATE / f"pytest-{tag}.xml"
     argv, env = test_argv(files_test, xml_path)
@@ -906,15 +1002,19 @@ def record_usage(who: str, phase: str, data: dict) -> None:
            is_error=data.get("is_error"))
 
 
-def run_agent(who: str, phase: str, invoke) -> subprocess.CompletedProcess:
+def run_agent(who: str, phase: str, invoke, detail: str = "") -> subprocess.CompletedProcess:
     """エージェントを1回呼ぶ。枠が無くて失敗したときだけ、待ってやり直す。
 
     それ以外の結果は、成功も失敗もそのまま返す。判断は呼び出し側に残す。
     TimeoutExpired もそのまま上に通す。出力が JSON なら、消費量を台帳に残し、
-    結果の文だけを返す。
+    結果の文だけを返す。detail はいまの作業の説明にだけ使う（report_now）。
     """
     for round_no in range(1, QUOTA["waits"] + 2):
-        proc, data = unwrap_result(invoke())
+        report_now(who, phase, detail)
+        try:
+            proc, data = unwrap_result(invoke())
+        finally:
+            report_now("runner", "check")
         if data is not None:
             record_usage(who, phase, data)
         kind = quota_problem(proc.stdout + proc.stderr) if proc.returncode != 0 else None
@@ -924,6 +1024,7 @@ def run_agent(who: str, phase: str, invoke) -> subprocess.CompletedProcess:
             break
         ledger("QUOTA_WAIT", who=who, phase=phase, kind=kind, round=round_no,
                of=QUOTA["waits"], seconds=QUOTA["wait_seconds"])
+        report_now("runner", "quota")
         time.sleep(QUOTA["wait_seconds"])
     ledger("QUOTA_EXHAUSTED", who=who, phase=phase, kind=kind)
     raise QuotaExhausted(who, phase, kind)
@@ -3164,7 +3265,7 @@ def call_critic(brief: str, mode: str) -> str:
     try:
         proc = run_agent("critic", "CRITIQUE", lambda: run(
             agent_command("critic", CRITIC_RUN, brief_path, limit),
-            timeout=limit + BACKSTOP_MARGIN))
+            timeout=limit + BACKSTOP_MARGIN), detail=mode)
     except subprocess.TimeoutExpired:
         raise Halt("CRITIQUE", f"critic still running after {limit + BACKSTOP_MARGIN}s",
                    "critic-run's internal timeout did not fire; check with: "
@@ -3523,6 +3624,7 @@ def cmd_plan_propose(step_id: str | None) -> int:
         print(f"nothing to revise: {ESCALATION} does not exist", file=sys.stderr)
         return 1
     load_settings(json.loads((PLAN / "tasks.json").read_text(encoding="utf-8")))
+    NOW["step"] = step_id
     step = None
     if step_id:
         step, _ = load_plan(step_id)
@@ -3774,6 +3876,7 @@ def complete_run(done: set[str], tasks: dict) -> None:
 
 
 def run_step(step_id: str, unvalidated: bool = False) -> int:
+    NOW["step"], NOW["attempt"] = step_id, None
     tasks = json.loads((PLAN / "tasks.json").read_text(encoding="utf-8"))
     load_settings(tasks)
     problems = validate_plan(tasks)
@@ -3926,6 +4029,7 @@ def run_step(step_id: str, unvalidated: bool = False) -> int:
             backend = schedule[attempt]
             handover = attempt > 0 and backend != schedule[attempt - 1]
             attempt += 1
+            NOW["attempt"] = attempt
             set_writable(tests=None, src=True)   # tests/ は凍結したまま。set_writable を参照
 
             # 修理ではない試行には、きれいな木を用意する。ここには2つの別のものが
@@ -4282,6 +4386,13 @@ def main() -> int:
 
     if fence_is_open():
         return 1
+
+    # どのコマンドの中の作業かを、いまの作業の説明に使う。終わるときは、どの
+    # 経路で終わっても「何もしていない」に戻す。
+    NOW["command"] = " ".join(v for v in (args.cmd, getattr(args, "plan_cmd", None),
+                                          "--all" if getattr(args, "all", False) else None)
+                              if v)
+    atexit.register(report_now, None)
 
     try:
         if args.cmd == "validate":

@@ -197,6 +197,7 @@ c_cannot ls /srv/loop/project/tests         # すでに通ったテスト
 c_cannot ls /srv/loop/project/.git          # 両方を含む履歴
 c_cannot ls /srv/loop/planner/out           # 書かれている最中の提案
 c_cannot ls /srv/loop/brief                 # solver に伝えた内容
+c_cannot ls /srv/loop/logs                  # 失敗したテストの中身を含む走行ログ
 # 要件は、runner が組み立てたブリーフを通してだけ届く。受け渡し口を直接読めると、
 # 誰も渡していない入力に対して批評が走りうる。
 c_cannot ls /srv/loop/human/in

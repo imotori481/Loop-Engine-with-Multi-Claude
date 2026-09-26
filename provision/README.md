@@ -324,6 +324,7 @@ sudo -u runner /srv/loop/bin/smoke-critic
 ```bash
 loop go <要件>.md                     # TypeScript なら --language typescript
 loop status                          # 走っているか、人への問い、台帳の末尾
+loop now                             # いまの作業を JSON で出す（ダッシュボードが読む）
 loop log                             # 走行ログを追う。Ctrl-C で抜けても走行は続く
 loop continue                        # 止まったところから続ける
 loop stop                            # 走行を止める
@@ -354,6 +355,8 @@ loop stop                            # 走行を止める
 
 走行ログは `/srv/loop/logs/<プロジェクト>-<日時>.log` に書く。
 `/srv/loop/logs/<プロジェクト>-latest.log` が最新のログを指す。
+`/srv/loop/logs` は `runner:humanw 2750` で、読めるのは runner と保守ユーザーだけ。
+走行ログには失敗したテストの中身が載るので、3役には読ませない。
 
 `loop.py` の動詞を直接使うときは `loop raw` を使う。runner として前面で動く。
 

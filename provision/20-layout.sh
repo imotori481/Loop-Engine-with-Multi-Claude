@@ -28,7 +28,11 @@ install -d -o root -g root -m 755 /srv/loop
 # ならない。そうでないと、solver は自分の唯一の経路を読めない。
 install -d -o runner -g solverw -m 2750 /srv/loop/brief
 # 走行ログの置き場。runner は /srv/loop の直下に書けないので、ここに書く。
-install -d -o runner -g runner -m 755 /srv/loop/logs
+# 走行ログには失敗したテストの中身が載り、now.json にはステップの goal が載る。
+# 読めるのは runner と、humanw にいる保守ユーザーだけにする。setgid で、runner が
+# 作ったファイルもグループ humanw を継ぐ。
+install -d -o runner -g humanw -m 2750 /srv/loop/logs
+chmod -R o-rwx /srv/loop/logs
 
 # repo.git と project は runner が中身を作る。直下に作る権限は runner に無いので、
 # 空のディレクトリを root が runner 所有で先に用意する。git init --bare も

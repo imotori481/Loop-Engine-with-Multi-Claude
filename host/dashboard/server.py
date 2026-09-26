@@ -18,17 +18,20 @@ from urllib.parse import urlparse
 try:
     from .access import LOCAL, Reach
     from .actions import Launchers
+    from .live import Live
     from .state import DashboardState
 except ImportError:  # 直接実行したとき: python host/dashboard/server.py
     from access import LOCAL, Reach
     from actions import Launchers
+    from live import Live
     from state import DashboardState
 
 
 STATIC = Path(__file__).with_name("static")
 
 
-def handler_for(state: DashboardState, launchers: Launchers, reach: Reach, token: str):
+def handler_for(state: DashboardState, launchers: Launchers, reach: Reach, token: str,
+                live: Live | None = None):
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, format: str, *args) -> None:
             print("dashboard: " + format % args)
@@ -82,6 +85,10 @@ def handler_for(state: DashboardState, launchers: Launchers, reach: Reach, token
                 return
             if path == "/api/state":
                 self._json(state.snapshot())
+                return
+            if path == "/api/live":
+                self._json(live.fetch() if live is not None
+                           else {"error": "live view is not configured"})
                 return
             files = {"/": "index.html", "/app.js": "app.js", "/style.css": "style.css"}
             name = files.get(path)
@@ -144,7 +151,7 @@ def main() -> int:
     server = ThreadingHTTPServer(
         ("127.0.0.1", args.port),
         handler_for(DashboardState(args.project, args.data), Launchers(args.config),
-                    Reach(args.config), token),
+                    Reach(args.config), token, Live(args.config)),
     )
     print(f"Loop dashboard: http://127.0.0.1:{args.port}")
     try:

@@ -15,4 +15,7 @@ textarea { width: 100%; min-height: 90px; resize: vertical; padding: 12px; color
 button { cursor: pointer; border: 1px solid #75c49d; color: #effff4; background: #176746; border-radius: 8px; padding: 9px 14px; font-weight: 700; }
 button:hover { background: #22865d; } button:disabled { opacity: .5; }
 table { width: 100%; border-collapse: collapse; } th, td { text-align: left; padding: 9px; border-bottom: 1px solid #263c34; } td { font-family: Consolas, monospace; font-size: .86rem; }
+.live { display: grid; gap: 8px; } .live strong { font-size: 1.3rem; } .live .badge { justify-self: start; }
+.live.idle strong { color: #9bb7a8; } .live.error strong { color: #f0b37e; }
+tr.active td { background: #173d30; } td.goal { font-family: inherit; }
 @media (max-width: 700px) { .summary { grid-template-columns: 1fr; } .request-actions { align-items: stretch; flex-direction: column; } }

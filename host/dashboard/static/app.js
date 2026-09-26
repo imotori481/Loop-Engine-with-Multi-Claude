@@ -60,6 +60,59 @@ async function refresh() {
   }
 }
 
+const STEP_STATE = {green: "完了", active: "作業中", pending: "未着手"};
+
+function text(tag, value, className) {
+  const element = document.createElement(tag);
+  element.textContent = value;
+  if (className) element.className = className;
+  return element;
+}
+
+// ランナーの時刻は "+0900" の形で、Date はコロンの無いオフセットを読めない。
+function minutesSince(stamp) {
+  const at = Date.parse(String(stamp).replace(/([+-]\d\d)(\d\d)$/, "$1:$2"));
+  return Number.isNaN(at) ? null : Math.max(0, Math.floor((Date.now() - at) / 60000));
+}
+
+function renderLive(value) {
+  const live = document.querySelector("#live"); live.replaceChildren();
+  live.className = "live";
+  document.querySelector("#live-updated").textContent =
+    `${new Date().toLocaleTimeString()} 更新`;
+  if (value.error) {
+    live.classList.add("error");
+    live.append(text("strong", "箱に届きません"), text("p", value.error, "why"));
+    return;
+  }
+  const activity = value.now?.activity;
+  if (value.running && activity) {
+    const minutes = minutesSince(activity.since);
+    live.append(text("span", activity.who_ja, "badge"), text("strong", activity.text_ja),
+                text("p", [activity.step, minutes === null ? "" : `${minutes} 分経過`]
+                  .filter(Boolean).join(" / "), "why"));
+  } else {
+    live.classList.add("idle");
+    live.append(text("strong", value.running ? "作業の切り替え中" : "走っていません"));
+    if (value.last) live.append(text("p", `最後の結果: ${value.last}`, "why"));
+  }
+  live.append(text("p", `プロジェクト: ${value.project}`, "why"));
+
+  const steps = document.querySelector("#steps"); steps.replaceChildren();
+  for (const step of value.now?.steps || []) {
+    const state = step.state === "active" && !value.running ? "中断" : STEP_STATE[step.state] || step.state;
+    const row = document.createElement("tr");
+    if (step.state === "active" && value.running) row.className = "active";
+    row.append(text("td", step.id), text("td", state), text("td", step.goal, "goal"));
+    steps.append(row);
+  }
+}
+
+async function refreshLive() {
+  try { renderLive(await api("/api/live")); }
+  catch (error) { renderLive({error: error.message}); }
+}
+
 async function start() {
   session = await api("/api/session");
   document.querySelector("#scope").textContent =
@@ -76,6 +129,8 @@ async function start() {
     launchers.append(element);
   }
   await refresh();
+  await refreshLive();
+  setInterval(refreshLive, 5000);
 }
 
 document.querySelector("#refresh").onclick = refresh;

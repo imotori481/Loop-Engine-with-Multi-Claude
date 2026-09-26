@@ -94,6 +94,8 @@ chk_cannot ls "$P/.git"
 chk_cannot ls "$P/plan"
 chk_cannot ls "$P/.runner"
 chk_cannot test -w /srv/loop/brief
+# 走行ログは失敗したテストの中身を含む。
+chk_cannot ls /srv/loop/logs
 chk_cannot ls /home/runner
 
 # solverw にいないアカウントは、コードにまったく届いてはならない。planner は
