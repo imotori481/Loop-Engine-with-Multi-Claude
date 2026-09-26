@@ -60,6 +60,12 @@
 | 一部完了 | いまの作業をダッシュボードで見る | 誰（プランナー、クリティック、ソルバー、ランナー）がどのステップの何をしているかを、日本語でブラウザから見る | Python と bash と JS。ランナーは、エージェントを呼ぶ直前、テストを走らせる直前、終わったときに、`/srv/loop/logs/now.json` を丸ごと書き直す（一時ファイルから `os.replace`）。中身は、役、段階、ステップ、試行、日本語の説明、始まった時刻、各ステップの goal と状態。書けなくても走行は止めない。箱の `loop now` がそれに走行中かどうかと最後の結果を足して JSON で返す。ダッシュボードは `/api/live` で `ssh loop-dev loop now` を `shell=False` で呼び、数秒だけ控えを使う。画面は「いまの作業」とステップの一覧を5秒ごとに更新する。unittest でランナー11件、ダッシュボード8件を確かめ、`loop now` は一時ディレクトリで確かめた。箱での実走とブラウザでの表示は未確認 | `runner/loop.py`（`report_now` `run_agent` `call_critic` `pytest_run` `run_step` `cmd_plan_propose` `main`）、`runner/tests/test_now.py`、`provision/bin/loop`、`host/dashboard/live.py`、`host/dashboard/server.py`、`host/dashboard/static/*`、`host/dashboard/tests/test_live.py`、`host/dashboard/README.md` |
 | 未着手 | ホストから既存リポジトリを取り込む | GitHub のリポジトリの作業用ブランチを箱に載せる。箱に GitHub の資格情報を置かない | バッチ。`host/loop-import.cmd <名前> <URL> <ブランチ> [<元のブランチ>]`。ホストでクローンしてブランチを切り、`ssh -t loop-dev` で `loop-project.sh init`、`loop-runner` で bare に push、`loop-project.sh use` を流す | `host/loop-import.cmd`、`host/README.md` |
 | 未着手 | ホストの写しをプロジェクトごとにする | `loop-pull.cmd` は `/srv/loop/repo*.git` しか見ず、プロジェクトを見分けない | バッチ。`/srv/loop/projects/*/repo.git` を `C:\dev\roop-engin\<名前>` に写す。作業用ブランチを GitHub に push するのは人が行う | `host/loop-pull.cmd`、`host/README.md` |
+| 未着手 | 既存コードの署名をプランナーとクリティックに渡す | プランナーはコードを読めない（BOOTSTRAP 1-1）。既存のファイルを書き換える計画は、そこにある関数と型の名前と署名を知らないと書けない | Python。ランナーが HEAD の `src/` から公開の宣言だけを抜き出す（`existing_contracts`）。Python は `ast` で関数、クラス、定数の署名を取り、TypeScript は `export` で始まる宣言の行を取る。本体は渡さない。`environment_facts` が契約と同じ書式（`-- defined in <モジュール>`）で並べる。trace のブリーフにも渡し、既存の宣言を「どのステップも書かないのに読まれるもの」として指摘させない。unittest で両方の言語を確かめる | `runner/loop.py`（`existing_contracts` `environment_facts` `brief_critique_trace`）、`runner/tests/test_brief.py`、`runner/tests/test_critic.py` |
+| 未着手 | 既存の宣言を `requires` で使えるようにする | L3 は依存先の `provides` しか認めないので、既存のコードを呼ぶステップを書けない | Python。L3 で使える名前に `existing_contracts` の名前を足す。`dep_contract_lines` は既存の宣言の行も返し、TEST_WRITE のブリーフとスタブの import に届ける。unittest で受理と拒否の両方を確かめる | `runner/loop.py`（`validate_plan` `dep_contract_lines`）、`runner/tests/test_linter.py` |
+| 未着手 | スタブで既存のコードを消さない | STUB はファイルを丸ごと書き直す。既存のファイルを `files_write` に入れると、ステップに関係の無い関数まで消える | Python。HEAD にあるファイルでは、`provides` に挙がった名前の宣言だけを番兵に替え、無い名前は末尾に足す。TypeScript はランナーが書く。`generate_stub` が括弧を数えて宣言の範囲を探し、見つからなければ None でソルバーに回す。ソルバーのブリーフには、既存のファイルであることと、挙げた名前のほかは変えないことを書く。書いた後に、`provides` にない宣言が HEAD と同じかをランナーが確かめる（Python は `ast.dump`、TypeScript は宣言の範囲を除いた本文の比較）。違えば STUB で止める。unittest で確かめる | `runner/loop.py`（`generate_stub` `brief_stub` `stub_kept_the_rest` `run_step`）、`runner/tests/test_language.py`、`docs/RUNNER_SPEC.md` |
+| 未着手 | 変えない振る舞いを条件に書かせない | スタブが替えるのは挙げた名前だけなので、書き換えない関数で満たされる条件はスタブの時点で通り、R4 で止まる | Python。R4 は変えない。`environment_facts` の既存の宣言の説明に、変えない振る舞いは既存のテストが VERIFY のたびに守ること、条件はこのステップが書き換える名前を呼んで確かめることを書く。unittest でブリーフの文を確かめる | `runner/loop.py`（`environment_facts`）、`runner/tests/test_brief.py` |
+| 未着手 | 最初のステップの前に既存のスイートが緑かを確かめる | VERIFY はスイート全体の緑を求める。取り込んだ時点で落ちているテストがあると、どのステップも緑にならず、実装の失敗としてエスカレーションする | Python。緑のステップが1つも無いときの `run_step` で、TEST_WRITE の前にスイート全体を走らせる。落ちていれば PLAN_LOAD で止め、落ちたテストを並べる。テストが1件も無ければ通す。unittest で確かめる | `runner/loop.py`（`run_step`）、`runner/tests/test_attempts.py` |
+| 未着手 | 既存のファイルを書き換える計画を箱で走らせる | 取り込んだリポジトリで、既存の関数を書き換えるステップと、既存の型を使うステップが緑まで届くことを確かめる | 既存の関数とテストを持つ小さなリポジトリを取り込み、既存の関数を書き換える要件で `plan bootstrap` → `plan refine` → `plan apply` → `run --all`。書き換えない関数の本文が HEAD と同じであることを `git diff` で確かめる | `docs/HANDOFF.md`、`README.md` |
 | 未着手 | .NET のツールチェーンを入れて凍結する | C# の計画を箱で走らせる。Unity に持ち込めるコードだけを書かせる | bash。.NET 8 SDK を入れ、NUnit、NUnit3TestAdapter、Microsoft.NET.Test.Sdk、JunitXml.TestLogger をローカルの NuGet フィードに置いて凍結する。egress は閉じているので、restore はプロビジョニング時に済ませる。根に runner 所有の `Project.csproj`（`netstandard2.1`、`LangVersion 9.0`、`src/**/*.cs`）、`Tests.csproj`（NUnit、`tests/**/*.cs`）、`nuget.config`、`Directory.Build.props`（`bin` と `obj` を柵の外へ出す）を置く。`UnityEngine` は参照させない。実測では LangVersion 9 で `record struct` と file-scoped namespace が CS8773 で落ちる | `provision/36-dotnet.sh`、`provision/provision.sh`、`provision/README.md` |
 | 未着手 | C# を計画の言語に足す | `plan bootstrap --language csharp` で C# の計画を作り、関門にかける | Python。`LANGUAGES["csharp"]` を足す。テストは `dotnet test --no-restore --filter` でステップのテストクラスだけを走らせ、junit で読む。実測では junit の `type` は常に `failure` なので、例外の型は `message` の先頭（`System.NullReferenceException : ...`）から読み、`Expected:` と `But was:` を持つものをアサーションと数える。コンパイルエラーはレポートを出さないので、標準出力の `path(行,列): error CSxxxx` を読み、テストファイルのものを `<did not compile>` にする。名前空間はフォルダのパスと一致させ、ファイル名は型名と一致させる | `runner/loop.py`（`LANGUAGES` `test_argv` `failure_kind` `parse_junit` `pytest_run` `modules_of` `environment_facts`）、`runner/tests/test_language.py`、`runner/tests/test_brief.py` |
 | 未着手 | C# のスタブを契約から書く | ソルバーに頼まずにコンパイルの通るスタブを置く。C# は1ファイルでも欠けるとプロジェクト全体がビルドできない | Python。契約の型宣言を読み、メソッドとコンストラクタの本体を `throw new System.NotImplementedException("__stub__")` にする。実測では真偽値に文字列をキャストする手は `InvalidCastException` になるので、番兵の値は使わない。R5 はこの印の付いた例外だけを赤と認める。読めない契約は今までどおりソルバーに頼む | `runner/loop.py`（`generate_stub` `LANGUAGES`）、`runner/tests/test_language.py` |
@@ -72,12 +78,14 @@
   - 人間の対話作業とも同じ枠を取り合う
 - codex とローカルモデルのバックエンドを残すか
   - 残す場合、Claude 単独構成を既定にして任意の tier として扱う
-- 既存リポジトリで、既存のファイルを書き換えさせるか
-  - 新しいファイルを足すだけなら、柵の場所の設定と、既存の型を L3 で認める仕組みで足りる
-  - 書き換えさせるなら、スタブで既存のコードを消さない仕組みと、R4 の扱いの見直しも要る
+- 既存のテストが古い振る舞いを確かめているとき、どう扱うか
+  - `tests/` は凍結されるので、振る舞いを変えるステップは既存のテストを回帰として落とし、エスカレーションする
+  - 人が先にテストを直すか、計画で既存のテストファイルを差し替えさせるかを決める
+- 既存リポジトリが `src/` と `tests/` 以外にコードを置いているとき、柵の場所を設定できるようにするか
 
 ## 更新履歴
 
+- 2026/09/27: 既存のファイルを書き換えさせることに決め、その作業を追加
 - 2026/09/25: 作業の表に実装方法の列を追加
 - 2026/09/25: 作業の表に状態の列を追加し、実走で見つかった作業を追加
 - 2026/09/24: ソルバーのツールを Read Write Edit に決定
