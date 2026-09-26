@@ -2503,6 +2503,25 @@ It is what a person opens, and it is already wired:
                  f"{page.read_text(encoding='utf-8')}"
                  ) if typescript and page.is_file() else ""
 
+    # 開発サーバで開けることも環境の持ち物だ。run 8 の S10 は、Vite が index.html を
+    # 変換した結果に /src/main.ts が含まれることを確かめる条件を持っていた。Vite は
+    # インラインのモジュールスクリプトを別のモジュールに切り出すので、含まれない。
+    # どの実装でも変わらず、ソルバーは時間切れまで考えた。開けることは箱の検査が
+    # 確かめ、計画には start が何を組み立てるかだけを書かせる。
+    if page_text:
+        page_text += """
+Opening the page through a development server (Vite, for example) is also the
+environment's job. The server serves index.html, and index.html loads `start`
+from src/main.ts; that path is checked when the machine is provisioned. If the
+requirements say the page must open from a dev server, a step that exports
+`start` satisfies it. Write criteria about what `start` puts in the document.
+
+Do not write criteria that start a development server, transform index.html, or
+check what a server sends back. That output is decided by the server, not by
+any code a step writes: no implementation can change it, and the step spends
+every attempt on it.
+"""
+
     # ここのほかのものと同じ理由で、書き写さずに集める。ただし、これは効き目が
     # 大きい。「窓が開く」のような条件は TclError で落ちるテストになり、それは
     # 本物の赤で、RED_GATE をきれいに通る。ソルバーが何を書いても緑にならない

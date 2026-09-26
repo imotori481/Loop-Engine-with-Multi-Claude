@@ -99,6 +99,14 @@ class TheRootBelongsToTheEnvironment(RootFiles, unittest.TestCase):
     def test_the_page_gets_an_example_of_what_to_test_instead(self):
         self.assertIn("call `start` on an element", self.facts("typescript"))
 
+    def test_the_dev_server_is_named_as_the_environment_s(self):
+        # run 8 の S10 は、Vite が index.html を変換した結果を確かめる条件を持ち、
+        # どの実装でも通らずに時間切れまで考えた。
+        facts = self.facts("typescript")
+        self.assertIn("development server (Vite, for example) is also the", facts)
+        self.assertIn("Do not write criteria that start a development server", facts)
+        self.assertNotIn("development server", self.facts("python"))
+
     def test_a_python_plan_is_not_told_about_files_it_is_not_shown(self):
         facts = self.facts("python")
         self.assertNotIn("belong to the environment", facts)
