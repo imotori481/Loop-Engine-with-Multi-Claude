@@ -36,7 +36,7 @@ for t in "${TRACES[@]}"; do
   fi
 done
 if pgrep -u solver >/dev/null; then
-  echo "FATAL: a solver process is already running; this smoke cannot tell whose it is" >&2
+  echo "FATAL: solver のプロセスがもう動いている。この smoke では誰のものか見分けられない" >&2
   pgrep -a -u solver >&2
   exit 1
 fi
@@ -110,7 +110,7 @@ rm -f "$TEST" "$REPORT" "$BRIEF"
 
 echo
 if [ "$fail" -eq 0 ]; then
-  echo "smoke-pytest: PASS (the solver cannot run the tests; VERIFY is the only judge)"
+  echo "smoke-pytest: PASS（ソルバーはテストを走らせられない。判定するのは VERIFY だけだ）"
 else
   echo "smoke-pytest: FAIL"
   for t in "${TRACES[@]}"; do

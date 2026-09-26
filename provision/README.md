@@ -231,7 +231,7 @@ Get-Content "$env:USERPROFILE\.ssh\loop-runner.pub" |
 
 **箱の中での名前は `loop-runner_ed25519.pub` で固定。** `15-authkeys.sh` がこの名前を
 決め打ちで読む。Windows 側の鍵の名前とは関係ない。無ければ
-`FATAL: /tmp/loop-provision/loop-runner_ed25519.pub not found` で止まる。
+`FATAL: /tmp/loop-provision/loop-runner_ed25519.pub が無く、runner にもまだ鍵が無い` で止まる。
 
 `/tmp` は VM の再起動で消える。最初のプロビジョニングの直前に流し込む。2回目以降は、
 流し込んだ鍵が無くても、runner にすでに入っている鍵をそのまま使う。鍵を替えるときだけ
@@ -303,7 +303,7 @@ sudo nano /etc/loop/solver.env
 | `LOOP_EFFORT=` | `low` / `medium` / `high` / `xhigh` / `max`。空なら既定 |
 
 planner と critic も同じ手順で埋める。3役とも同じサブスクリプションの利用枠を使う。
-トークンが空の役があると、プロビジョニングの最後に `still unauthenticated` として名前が出る。
+トークンが空の役があると、プロビジョニングの最後に `資格情報がまだ無い役` として名前が出る。
 
 配管を確かめる:
 

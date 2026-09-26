@@ -92,7 +92,7 @@ sudo -u runner install -d -m 700 \
 # ここの雛形を直しただけで止まる。
 cd /srv/loop/project
 if sudo -u runner git log --format=%an -- conftest.py 2>/dev/null | grep -qvx 'loop runner'; then
-  echo "20-layout: the repository has its own conftest.py; refusing to overwrite it" >&2
+  echo "20-layout: リポジトリが自分の conftest.py を持っている。上書きしない" >&2
   exit 1
 fi
 sudo -u runner tee conftest.py >/dev/null <<'PYEOF'

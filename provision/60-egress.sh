@@ -16,14 +16,14 @@
 # ここの規則は「solver は localhost のプロキシのポートにだけ届く」に絞る。
 set -euo pipefail
 
-[ "$(id -u)" -eq 0 ] || { echo "run with sudo" >&2; exit 1; }
-[ "$#" -ge 1 ] || { echo "usage: $0 <host> [host ...]" >&2; exit 1; }
+[ "$(id -u)" -eq 0 ] || { echo "sudo で流す" >&2; exit 1; }
+[ "$#" -ge 1 ] || { echo "使い方: $0 <ホスト> [ホスト ...]" >&2; exit 1; }
 
 # WSL の Ubuntu イメージには iptables も nft も無い。30-python.sh ではなくここで
 # 入れるのは、この任意の手順だけが要るパッケージを、基本のプロビジョニングに
 # 持ち込まないためだ。
 if ! command -v iptables >/dev/null 2>&1; then
-  echo "iptables is not installed; installing (iptables-nft backend)"
+  echo "iptables が無いので入れる（iptables-nft 版）"
   DEBIAN_FRONTEND=noninteractive apt-get update -qq
   DEBIAN_FRONTEND=noninteractive apt-get install -y -qq iptables
 fi
@@ -47,9 +47,9 @@ iptables -A "$CHAIN" -p tcp --dport 53 -j ACCEPT
 
 for host in "$@"; do
   ips="$(getent ahostsv4 "$host" | awk '{print $1}' | sort -u)"
-  [ -n "$ips" ] || { echo "FATAL: cannot resolve $host" >&2; exit 1; }
+  [ -n "$ips" ] || { echo "FATAL: $host の名前を引けない" >&2; exit 1; }
   for ip in $ips; do
-    echo "  allow $host -> $ip"
+    echo "  許可: $host -> $ip"
     iptables -A "$CHAIN" -d "$ip" -p tcp --dport 443 -j ACCEPT
   done
 done
@@ -59,10 +59,10 @@ done
 iptables -A "$CHAIN" -j REJECT --reject-with icmp-admin-prohibited
 
 echo
-echo "Verifying (both checks must behave as stated):"
-sudo -u solver curl -s -m 8 -o /dev/null -w '  pypi.org  -> %{http_code} (want 000/failure)\n' https://pypi.org/simple/ || echo "  pypi.org  -> blocked (correct)"
+echo "確かめる（どちらも書いたとおりに振る舞うこと）:"
+sudo -u solver curl -s -m 8 -o /dev/null -w '  pypi.org  -> %{http_code}（000 か失敗が正しい）\n' https://pypi.org/simple/ || echo "  pypi.org  -> 遮断された（正しい）"
 for host in "$@"; do
-  sudo -u solver curl -s -m 8 -o /dev/null -w "  $host -> %{http_code} (want non-000)\n" "https://$host/" || echo "  $host -> UNREACHABLE (rules too tight)"
+  sudo -u solver curl -s -m 8 -o /dev/null -w "  $host -> %{http_code}（000 以外が正しい）\n" "https://$host/" || echo "  $host -> 届かない（規則が狭すぎる）"
 done
 
 # 普通のサーバで「永続しない」は「次の再起動まで」を意味する。WSL2 では
@@ -70,11 +70,11 @@ done
 # 消えてからおよそ1分後だ。だから、ここでは永続化が実質必須になる。
 echo
 cat <<'EOF'
-Rules are NOT persistent, and the WSL2 VM stops whenever it goes idle.
-Make them survive that:
+この規則は永続しない。WSL2 の VM はアイドルになるたびに止まる。
+止まっても残るようにする:
   apt-get install -y iptables-persistent && netfilter-persistent save
-Then confirm after a restart (do NOT use `wsl --shutdown` -- it kills the
-keepalive task, see README 3-2):
-  wsl --terminate Ubuntu-24.04      # from Windows, then reconnect
-  sudo iptables -S LOOP_SOLVER_OUT  # rules must still be there
+そのあと、再起動しても残ることを確かめる。`wsl --shutdown` は使わない。
+keepalive タスクまで止まる（README 3-2）:
+  wsl --terminate Ubuntu-24.04      # Windows で流し、つなぎ直す
+  sudo iptables -S LOOP_SOLVER_OUT  # 規則が残っていること
 EOF

@@ -92,8 +92,8 @@ fi
 # 書き込みとして報告する。
 IGNORE="$P/.gitignore"
 if grep -qx 'node_modules/\?' "$IGNORE" 2>/dev/null; then
-  echo "35-node: refusing: $IGNORE ignores node_modules at every depth" >&2
-  echo "  Change that line to /node_modules -- see the comment above." >&2
+  echo "35-node: 進まない。$IGNORE が node_modules をすべての深さで無視している" >&2
+  echo "  その行を /node_modules に変える。理由はこのスクリプトのコメントと provision/README §3-20。" >&2
   exit 1
 fi
 grep -qx '/node_modules' "$IGNORE" 2>/dev/null || \
@@ -114,7 +114,7 @@ grep -qx '/node_modules' "$IGNORE" 2>/dev/null || \
 # runner 以外がコミットしたことのあるファイルは、そのリポジトリの持ち物だ。
 for f in vitest.config.mjs index.html; do
   if sudo -u runner git -C "$P" log --format=%an -- "$f" 2>/dev/null | grep -qvx 'loop runner'; then
-    echo "35-node: the repository has its own $f; refusing to overwrite it" >&2
+    echo "35-node: リポジトリが自分の $f を持っている。上書きしない" >&2
     exit 1
   fi
 done
@@ -196,7 +196,7 @@ chk_cannot rm -f "$P/node_modules"
 # 確かめる条件を書かせないので（loop.py の environment_facts）、要件の「開発
 # サーバで開ける」はここで確かめる。
 if ! sudo -u runner /srv/loop/bin/smoke-page; then
-  echo "FAIL: the dev server does not reach start in src/main.ts"; fail=1
+  echo "FAIL: 開発サーバで開いたページが src/main.ts の start に届かない"; fail=1
 fi
 
 if [ "$fail" -eq 0 ]; then

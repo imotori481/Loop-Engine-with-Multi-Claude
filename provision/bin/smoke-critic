@@ -63,5 +63,4 @@ PY
 
 # ディレクトリは runner の所有なので、使い終えたものは runner が片付ける。
 rm -f "$OUT"/* "$BRIEF"
-echo "smoke-critic: ok -- the critic starts, writes where it is told, and the"
-echo "               runner can read it back"
+echo "smoke-critic: ok。クリティックが起動し、決められた場所に書き、ランナーがそれを読み戻せる"

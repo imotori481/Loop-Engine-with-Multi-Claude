@@ -13,7 +13,7 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-[ "$(id -u)" -eq 0 ] || { echo "run with sudo" >&2; exit 1; }
+[ "$(id -u)" -eq 0 ] || { echo "sudo で流す" >&2; exit 1; }
 
 # 05-isolation を最初に流す。wsl.conf が効いていなければ、プロビジョニングする
 # サンドボックスが無い。その後のステップはすべて成功しつつ、何も意味しなくなる。
@@ -24,14 +24,14 @@ for s in 05-isolation.sh 10-users.sh 15-authkeys.sh 20-layout.sh 25-runner.sh 30
 done
 
 echo
-echo "=== provisioning complete ==="
-echo "Next: put a key in /etc/loop/solver.env, then run the first experiment:"
+echo "=== プロビジョニング完了 ==="
+echo "次は3役の資格情報を /etc/loop/<役>.env に入れる（provision/README §2-9）。"
+echo "そのあと、最初の往復を確かめる:"
 echo "    sudo -u runner /srv/loop/bin/smoke-solver"
 echo
-echo "60-egress.sh was NOT run: the solver CLI and its API endpoint are still"
-echo "undecided (RUNNER_SPEC section 11, item 1). Until it runs, the solver"
-echo "account has unrestricted outbound network access."
+echo "60-egress.sh は流していない。流すかどうかは provision/README §4 を読んで決める。"
+echo "流すまで、solver の外向きの通信は制限されない。"
 echo
-echo "Reminder: this sandbox only stays up while a wsl.exe session holds it."
-echo "The keepalive scheduled task on Windows is what does that; unattended"
-echo "runs across a logoff are not possible here (see provision/README 3-1)."
+echo "この箱は、wsl.exe のセッションが握っているあいだだけ動く。握っているのは"
+echo "Windows の keepalive タスクだ。ログオフをまたいだ無人の走行はできない"
+echo "（provision/README §3-1）。"

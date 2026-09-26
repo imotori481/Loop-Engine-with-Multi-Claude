@@ -28,12 +28,12 @@ CTX="${LOOP_LLM_CTX:-16384}"
 NGL="${LOOP_LLM_NGL:-99}"
 
 [ -r "$WEIGHTS" ] || {
-  echo "llm-serve: cannot read weights: $WEIGHTS" >&2
-  echo "  Fix: put the .gguf there (root-owned, 0444) or set LOOP_LLM_WEIGHTS." >&2
+  echo "llm-serve: 重みを読めない: $WEIGHTS" >&2
+  echo "  直し方: そこに .gguf を置く（root 所有、0444）か、LOOP_LLM_WEIGHTS で場所を渡す。" >&2
   exit 2
 }
 command -v llama-server >/dev/null || {
-  echo "llm-serve: llama-server is not on PATH. See LOCAL_SOLVER.md step 1." >&2
+  echo "llm-serve: llama-server が PATH に無い。LOCAL_SOLVER.md の手順1を参照。" >&2
   exit 2
 }
 

@@ -91,8 +91,8 @@ EOF
 
 echo "vite: $(node -p "require('$TOOLS/node_modules/vite/package.json').version")"
 if (cd "$WORK" && node check.mjs); then
-  echo "smoke-page: ok -- the dev server serves index.html and it reaches start in src/main.ts"
+  echo "smoke-page: ok。開発サーバが index.html を配り、それが src/main.ts の start に届く"
 else
-  echo "smoke-page: BROKEN -- opening the page from the dev server does not reach src/main.ts" >&2
+  echo "smoke-page: 壊れている。開発サーバで開いたページが src/main.ts に届かない" >&2
   exit 1
 fi

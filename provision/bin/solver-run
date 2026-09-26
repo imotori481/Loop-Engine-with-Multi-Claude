@@ -51,7 +51,7 @@ export HOME=/home/solver
 if [ "$BACKEND" != codex ]; then
   helper="/srv/loop/bin/solver-$BACKEND"
   [ -x "$helper" ] || {
-    echo "solver-run: no backend '$BACKEND' ($helper is not executable)" >&2
+    echo "solver-run: バックエンド '$BACKEND' が無い（$helper を実行できない）" >&2
     exit 4
   }
   # 先に作業ツリーへ移る。理由は下の `cd` に書いたとおり。sudo はランナーの
@@ -68,9 +68,9 @@ export CODEX_HOME=/home/solver/.codex
 # ソルバーもほかの誰のものも読めない。共有の資格情報ファイルはあえて置かない:
 # `sudo -u solver -H codex login --device-auth`。
 if [ ! -r "$CODEX_HOME/auth.json" ]; then
-  echo "solver-run: solver is not logged in. Run:" >&2
+  echo "solver-run: solver が codex にログインしていない。次を流す:" >&2
   echo "    sudo -u solver -H codex login --device-auth" >&2
-  echo "Logging in as any other account does NOT work: /home/<other> is 0700." >&2
+  echo "ほかのアカウントでログインしても効かない。/home/<ほかのアカウント> は 0700 だ。" >&2
   exit 3
 fi
 

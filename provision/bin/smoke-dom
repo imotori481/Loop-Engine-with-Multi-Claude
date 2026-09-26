@@ -113,7 +113,7 @@ fail=0
 [ "${dead_failures:-0}" -gt 0 ] || { echo "FAIL: a dead UI went unnoticed" >&2; fail=1; }
 
 if [ "$fail" -eq 0 ]; then
-  echo "smoke-dom: ok -- a screenless machine can tell a live UI from a dead one"
+  echo "smoke-dom: ok。画面の無い機械が、動く UI と死んだ UI を見分けられる"
 else
   echo "smoke-dom: BROKEN" >&2
 fi

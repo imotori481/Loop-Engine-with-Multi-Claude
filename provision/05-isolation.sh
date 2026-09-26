@@ -22,7 +22,7 @@ info() { echo "  note: $*"; }
 # WSL の上でだけ意味がある。別のハイパーバイザではファイルの配置が違い、
 # これらの検査は誤りというより誤解を招くものになる。
 if ! grep -qi microsoft /proc/sys/kernel/osrelease; then
-  echo "05-isolation: not running under WSL, skipping"
+  echo "05-isolation: WSL の上ではないので飛ばす"
   exit 0
 fi
 
@@ -35,18 +35,18 @@ fi
 mounts="$(awk '$3=="drvfs" || ($3=="9p" && $2 !~ /^\/usr\/lib\/wsl\//) {print "  "$2" ("$3")"}' \
           /proc/self/mounts || true)"
 if [ -n "$mounts" ]; then
-  bad "a Windows filesystem is mounted:"
+  bad "Windows のファイルシステムがマウントされている:"
   printf '%s\n' "$mounts" >&2
 fi
 
 # automount を切っても、/mnt/c はたいてい空のディレクトリとして残る。空なら
 # 問題ない。中身があれば、いま何かがそこにマウントされている。
 if [ -d /mnt/c ] && [ -n "$(ls -A /mnt/c 2>/dev/null || true)" ]; then
-  bad "/mnt/c is populated -- automount is on, or someone mounted it by hand"
+  bad "/mnt/c に中身がある。automount が有効か、誰かが手でマウントした"
 fi
 
 case ":${PATH}:" in
-  *:/mnt/c/*) bad "Windows paths are still on PATH (appendWindowsPath)" ;;
+  *:/mnt/c/*) bad "PATH に Windows のパスが残っている（appendWindowsPath）" ;;
 esac
 
 # 2. interop。これが確かめないものに注意する。WSLInterop の binfmt ハンドラは
@@ -57,8 +57,8 @@ esac
 #    確かめた。実行して確かめるには Windows のパスが要り、それは検査1がすでに
 #    禁じている。だから interop は報告するだけで、合否には使わない。
 if [ -e /proc/sys/fs/binfmt_misc/WSLInterop ] || [ -e /proc/sys/fs/binfmt_misc/WSLInterop-late ]; then
-  info "WSLInterop binfmt handler is registered (normal even when interop=false;"
-  info "      not evidence either way -- check 1 is what keeps .exe unreachable)"
+  info "WSLInterop の binfmt ハンドラが登録されている（interop=false でも残るので、"
+  info "      どちらの証拠にもならない。.exe に届かないことは検査1が確かめる）"
 fi
 
 # 3. WSLg。見落としやすい。有効だと /mnt/wslg に、WINDOWS 側で動くコンポジタと
@@ -73,17 +73,17 @@ wslg_sockets="$(find /mnt/wslg /tmp/.X11-unix -type s 2>/dev/null | head -5 || t
 wslg_mounts="$(awk '$2 ~ /^\/mnt\/wslg/ {print "  "$2" ("$3")"}' /proc/self/mounts || true)"
 if [ -n "$wslg_sockets$wslg_mounts" ]; then
   if [ "${ALLOW_WSLG:-0}" = "1" ]; then
-    info "WSLg is active and waived by ALLOW_WSLG=1"
+    info "WSLg が有効だが、ALLOW_WSLG=1 で例外として受け入れた"
   else
-    bad "WSLg is active: a display/audio/clipboard channel to Windows is open to"
-    echo "      every user here, solver included. Found:" >&2
+    bad "WSLg が有効。Windows への画面・音声・クリップボードの経路が、solver を含む"
+    echo "      この箱の全員に開いている。見つかったもの:" >&2
     if [ -n "$wslg_sockets" ]; then printf '  socket: %s\n' $wslg_sockets >&2; fi
     if [ -n "$wslg_mounts" ]; then printf '%s\n' "$wslg_mounts" >&2; fi
-    echo "      Close it in C:\\Users\\<you>\\.wslconfig:" >&2
+    echo "      C:\\Users\\<you>\\.wslconfig で閉じる:" >&2
     echo "        [wsl2]" >&2
     echo "        guiApplications=false" >&2
-    echo "      then wsl --shutdown and restart the keepalive task (README 3-2)." >&2
-    echo "      Or re-run with ALLOW_WSLG=1 to accept it deliberately." >&2
+    echo "      そのあと wsl --shutdown し、keepalive タスクを起こし直す（README 3-2）。" >&2
+    echo "      分かったうえで受け入れるなら、ALLOW_WSLG=1 を付けて流し直す。" >&2
   fi
 fi
 
@@ -92,7 +92,7 @@ fi
 state="$(systemctl is-system-running 2>/dev/null || true)"
 case "$state" in
   running|degraded) ;;
-  *) bad "systemd is not running (state: ${state:-none}); set [boot] systemd=true" ;;
+  *) bad "systemd が動いていない（状態: ${state:-none}）。wsl.conf に [boot] systemd=true を書く" ;;
 esac
 
 # 5. mirrored ではなく NAT であること。mirrored だとディストロから Windows
@@ -103,12 +103,12 @@ esac
 #  README 3-10）
 links="$(ip -o link show 2>/dev/null || true)"
 case "$links" in
-  *" loopback0:"*) bad "mirrored networking detected (loopback0 present); use networkingMode=NAT" ;;
+  *" loopback0:"*) bad "ネットワークが mirrored になっている（loopback0 がある）。networkingMode=NAT にする" ;;
 esac
 
 if [ "$fail" -eq 0 ]; then
-  echo "05-isolation: ok (all assertions passed)"
+  echo "05-isolation: ok（すべての検査に通った）"
 else
-  echo "05-isolation: WSL ISOLATION IS NOT IN EFFECT" >&2
+  echo "05-isolation: WSL の隔離が効いていない" >&2
 fi
 exit "$fail"
