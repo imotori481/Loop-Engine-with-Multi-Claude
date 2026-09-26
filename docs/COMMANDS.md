@@ -4,19 +4,34 @@
 
 | 場所 | 何か |
 |---|---|
-| ホスト | Windows の cmd か PowerShell。`host\` のスクリプトを使う |
+| ホスト | Windows の cmd、PowerShell、Git Bash。`host\` のスクリプトと git を使う |
 | 箱 | `ssh loop-dev` で入った保守ユーザーの端末。`loop` コマンドを使う |
 
 ホストの `loop` は `host\loop.cmd` のこと。PATH の通った場所（`C:\Users\<you>\bin` など）に
-置けば `loop` だけで呼べる。中身は `ssh -t loop-dev loop <引数>` で、ディストロの起動と
+置けば `loop` だけで呼べる。中身は `ssh -t loop-dev loop <args>` で、ディストロの起動と
 sshd の待機も先に済ませる。だから下の `loop` の行は、ホストと箱のどちらで打っても同じに動く。
+
+`<...>` は自分の値に置き換える。
+
+| 記号 | 何を入れるか |
+|---|---|
+| `<requirements>` | 要件のファイルのパス |
+| `<step>` | ステップの ID（`S3` など） |
+| `<project>` | 箱の中でのプロジェクトの名前。英小文字、数字、`.` `_` `-` |
+| `<repo-url>` | 対象のリポジトリの GitHub の URL |
+| `<clone-dir>` | ホストで対象のリポジトリをクローンしたディレクトリ |
+| `<branch>` | Loop Engine に作業させるブランチの名前 |
+| `<base-branch>` | 元にするブランチの名前（`main` など） |
+| `<pr-branch>` | PR に出すブランチの名前 |
+| `<admin-user>` | 箱の保守ユーザーの名前 |
+| `<you>` | Windows のユーザー名 |
 
 ## 走らせる（ホストでも箱でも）
 
 | やりたいこと | コマンド |
 |---|---|
-| 要件から最後まで走らせる | `loop go <要件>.md` |
-| TypeScript で走らせる | `loop go <要件>.md --language typescript` |
+| 要件から最後まで走らせる | `loop go <requirements>` |
+| TypeScript で走らせる | `loop go <requirements> --language typescript` |
 | 状態を見る | `loop status` |
 | ログを追う（Ctrl-C で抜けても走行は続く） | `loop log` |
 | 止まったところから続ける | `loop continue` |
@@ -24,11 +39,7 @@ sshd の待機も先に済ませる。だから下の `loop` の行は、ホス�
 | いまの作業を JSON で見る | `loop now` |
 
 `loop go` は、要件の配置、`plan bootstrap`、`plan refine`、`plan apply`、`run --all` を順に裏で流す。
-ホストで打つときは、要件にホストのファイルのパスをそのまま渡せる。
-
-```bat
-loop go C:\work\requirements.md
-```
+ホストで打つときは、`<requirements>` にホストのファイルのパスをそのまま渡せる。
 
 ## 止まったとき（ホストでも箱でも）
 
@@ -36,11 +47,11 @@ loop go C:\work\requirements.md
 
 | やりたいこと | コマンド |
 |---|---|
-| 途中で止まったステップを最後の緑に戻す | `loop raw reset <ステップ>` |
+| 途中で止まったステップを最後の緑に戻す | `loop raw reset <step>` |
 | 計画をリンタにかける | `loop raw validate` |
 | 適用待ちの提案を見る | `loop raw plan show` |
 | 適用待ちの提案を適用して続ける | `loop continue` |
-| エスカレーションへの改訂案をプランナーに書かせる | `loop raw plan propose --step <ステップ>` |
+| エスカレーションへの改訂案をプランナーに書かせる | `loop raw plan propose --step <step>` |
 | 計画を批評だけする | `loop raw critique` |
 
 `loop raw` は `loop.py` をそのまま runner として前面で呼ぶ。動詞の一覧は `loop raw --help`。
@@ -51,12 +62,85 @@ loop go C:\work\requirements.md
 |---|---|
 | 一覧を見る（`*` が今のもの） | `loop project list` |
 | 今のプロジェクトの名前 | `loop project current` |
-| 空のプロジェクトを用意する | `loop project init <名前>` |
-| 既存リポジトリのブランチを受け入れる用意をする | `loop project init <名前> --branch <ブランチ>` |
-| 切り替える | `loop project use <名前>` |
-| `loop-project.sh` より前に作った箱に名前を付ける | `loop project adopt <名前>` |
+| 空のプロジェクトを用意する | `loop project init <project>` |
+| 既存リポジトリのブランチを受け入れる用意をする | `loop project init <project> --branch <branch>` |
+| 切り替える | `loop project use <project>` |
+| `loop-project.sh` より前に作った箱に名前を付ける | `loop project adopt <project>` |
 
 走行中は切り替えられない。先に `loop stop` か、終わるのを待つ。
+
+## 既存のリポジトリのブランチで作業させる
+
+GitHub とやり取りするのはホストだけだ。箱には GitHub の資格情報を置かない。ホストと箱のあいだは
+`loop-runner`（ホストの `~/.ssh/config` に書いた接続先）で push と pull をする。
+ホストの git のコマンドは、どれも `<clone-dir>` で打つ。
+
+### 取り込む
+
+1. 作業用ブランチを切る（ホスト）
+
+    ```bash
+    git clone <repo-url> <clone-dir>
+    cd <clone-dir>
+    git switch -c <branch> <base-branch>
+    ```
+
+    もうクローンしてあるなら、`<clone-dir>` で最後の1行だけ打つ。
+
+2. 受け皿を作る（箱）
+
+    ```bash
+    loop project init <project> --branch <branch>
+    ```
+
+3. ブランチを箱へ送る（ホスト）
+
+    ```bash
+    git push loop-runner:/srv/loop/projects/<project>/repo.git <branch>
+    ```
+
+4. 切り替えて走らせる（箱）
+
+    ```bash
+    loop project use <project>
+    loop go <requirements>
+    ```
+
+    `use` は、ブランチが push されていなければ何も動かさずに止まる。初回はプロビジョニングが
+    走るので数分かかる。
+
+### 成果を引き取る（ホスト）
+
+```bash
+git pull loop-runner:/srv/loop/projects/<project>/repo.git <branch>
+```
+
+### PR に出す（ホスト）
+
+`<branch>` には、箱が置いた環境のファイル（`conftest.py`、`index.html`、`vitest.config.mjs`、
+`.gitignore` への追記）と計画（`plan/`）がコミットされている。PR には要らないので、別のブランチで
+消してから出す。`<branch>` そのものは消さずに残す。箱はこれからもそこで作業する。
+
+```bash
+git switch -c <pr-branch> <branch>
+git rm -r -q --ignore-unmatch plan conftest.py index.html vitest.config.mjs
+git checkout origin/<base-branch> -- .gitignore
+git commit -m "chore: Loop Engineの環境のファイルを除く"
+git push origin <pr-branch>
+```
+
+`<base-branch>` に `.gitignore` が無ければ、`git checkout` の行は失敗する。そのときは代わりに
+`git rm -q .gitignore` を打つ。箱が作ったファイルなので、消せば元に戻る。
+
+そのあと GitHub で `<pr-branch>` から `<base-branch>` へ PR を出す。
+
+### 取り込むときの条件
+
+- コードは `src/`、テストは `tests/` に置かれている必要がある
+- 自前の `conftest.py`、`index.html`、`vitest.config.mjs` があると、プロビジョニングは上書きせずに止まる
+- `.gitignore` に `node_modules/` があると `35-node.sh` が止まる
+- 依存パッケージは入らない。箱にあるのは pytest と vitest だけだ
+- スタブは `files_write` のファイルを丸ごと上書きする。要件は、新しいファイルを足す形で書く
 
 ## 見る
 
@@ -79,7 +163,7 @@ loop go C:\work\requirements.md
 
 ```bash
 sudo git -C /opt/loop-engine pull
-cd /tmp && sudo ADMIN_USER=<保守ユーザー> bash /opt/loop-engine/provision/provision.sh
+cd /tmp && sudo ADMIN_USER=<admin-user> bash /opt/loop-engine/provision/provision.sh
 ```
 
 ### 配管を確かめる（箱）
@@ -116,8 +200,9 @@ schtasks /run /tn "WSL-keepalive-Ubuntu-24-04"
 
 ## リポジトリのテスト（ホスト）
 
-ホストにクローンしたリポジトリの根で流す。Python 3 が要るので、普段使いの WSL ディストロ
-（箱の `Ubuntu-24.04` ではないもの）から流す。箱は Windows のパスを見せないので、そこでは流せない。
+ホストにクローンした Loop Engine のリポジトリの根で流す。Python 3 が要るので、普段使いの WSL
+ディストロ（箱の `Ubuntu-24.04` ではないもの）から流す。箱は Windows のパスを見せないので、
+そこでは流せない。
 
 ```bash
 python3 -m unittest discover -s runner/tests
