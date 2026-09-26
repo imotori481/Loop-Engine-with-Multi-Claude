@@ -51,7 +51,16 @@ sudo -u runner git config --global user.email "runner@$(hostname)"
 sudo -u runner git config --global init.defaultBranch main
 # 作業ツリーは runner の所有だが、グループで書けるディレクトリを含む。
 # git がそれを所有者の疑わしいリポジトリとして扱わないようにする。
-sudo -u runner git config --global --add safe.directory /srv/loop/project
+#
+# /srv/loop/repo.git も登録する。loop-project.sh で管理する箱では、これは root 所有の
+# シンボリックリンクだ。git はリンクの先ではなくリンクそのものの持ち主を見るので、
+# 登録が無いと clone も push も、ホストからの fetch も "dubious ownership" で拒まれる。
+#
+# 既にある行は足さない。--add は流すたびに同じ行を積む。
+for d in /srv/loop/project /srv/loop/repo.git; do
+  sudo -u runner git config --global --get-all safe.directory 2>/dev/null | grep -qxF "$d" \
+    || sudo -u runner git config --global --add safe.directory "$d"
+done
 
 if [ ! -d /srv/loop/project/.git ]; then
   sudo -u runner git clone /srv/loop/repo.git /srv/loop/project

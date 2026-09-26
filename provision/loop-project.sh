@@ -186,7 +186,12 @@ cmd_use() {
     ADMIN_USER="${ADMIN_USER:-maint}" bash "$HERE/40-perms.sh"
   else
     echo "'$name' を初めて作る"
-    ADMIN_USER="${ADMIN_USER:-maint}" bash "$HERE/provision.sh"
+    # 今のプロジェクトはもう '$name' に書き換えてある。途中で止まったとき、`use` を
+    # 打ち直しても「もう今のプロジェクトだ」で終わるので、続きの流し方を示す。
+    ADMIN_USER="${ADMIN_USER:-maint}" bash "$HERE/provision.sh" \
+      || die "プロビジョニングが途中で止まった。今のプロジェクトはもう '$name' だ。
+原因を直してから、'loop project use' ではなく次で続きを流す:
+    cd /tmp && sudo ADMIN_USER=${ADMIN_USER:-maint} bash $HERE/provision.sh"
   fi
   echo "今のプロジェクト: $name"
 }
