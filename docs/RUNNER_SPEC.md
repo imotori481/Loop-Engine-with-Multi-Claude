@@ -646,6 +646,13 @@ L14 と L15 はまさにそれを保証するために在る。
   `__stub__` を併置するのは、基準の言うキーだけにすると**キー集合の比較が一致する**から
 - **parse できないものは生成しない。** `None` を返してソルバーに戻す。コンパイルできない
   スタブを作るのは、置き換えた問題より悪い。Python は現状すべてソルバーのまま
+- **C# は番兵の値を使わない。** メソッド、コンストラクタの本体を
+  `throw new System.NotImplementedException("__stub__");` にし、フィールドと自動プロパティは
+  宣言のまま残す。bool には誤った値が無く、文字列をキャストして押し込む手は
+  `InvalidCastException` になる（実測）。R5 はこの印の付いた例外（`StubNotImplemented`）と
+  アサーションだけを赤と認め、印の無い `NotImplementedException` は拒む。名前空間は柵の中の
+  フォルダから作り、ほかのフォルダの型は `using` で持ち込む。契約に Unity の型が現れ、Unity の
+  参照があれば `using UnityEngine;` を足す
 
 配線前に、生成物を実際に vitest にかけて確認した ── **`toBe(false)` を期待するテストも
 `toBe(true)` を期待するテストも落ちる。** モデルが値を選んでいる限り boolean には

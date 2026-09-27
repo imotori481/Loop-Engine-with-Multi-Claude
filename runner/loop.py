@@ -813,7 +813,8 @@ underscores only. Name it after the criterion in PascalCase with underscores
             r"\b\s*(<?)"),
         # junit の type は常に "failure" で、例外の型を持たない（smoke-dotnet の
         # 実測）。failure_kind が message から読み、アサーションをこの名前にする。
-        "red_kinds": re.compile(r"^AssertionException$"),
+        # スタブは値を返さず、印の付いた例外を投げる（CSHARP_STUB_BODY）。
+        "red_kinds": re.compile(r"^(?:AssertionException|StubNotImplemented)$"),
         "source_suffix": ".cs",
         "test_suffixes": (".cs",),
         # テストの前にビルドする。Unity の参照を写すので、初回は1分を超えうる。
@@ -936,6 +937,11 @@ def csharp_failure_kind(failure: ET.Element) -> str:
     """
     message = (failure.get("message") or "").strip()
     first = message.splitlines()[0] if message else ""
+    # スタブが投げる印の付いた例外（CSHARP_STUB_BODY）。スタブに対して落ちた
+    # ことを示すので、アサーションと同じく赤と認める。印の無い
+    # NotImplementedException は、ほかの例外と同じく拒む。
+    if CSHARP_STUB_MARK.match(first):
+        return "StubNotImplemented"
     match = CSHARP_EXCEPTION.match(first)
     if match:
         return match.group(1)
@@ -1791,6 +1797,185 @@ def parse_contracts(lines: list[str]) -> list[dict] | None:
     return declarations
 
 
+# C# のスタブの本体。番兵の値は使わない。bool には誤った値が無く、文字列を
+# キャストして押し込む手は InvalidCastException になる（実測）。どの型にも同じ
+# 1行で済み、R5 はこの印の付いた例外だけを赤と認める（csharp_failure_kind）。
+CSHARP_STUB_BODY = '{ throw new System.NotImplementedException("__stub__"); }'
+CSHARP_STUB_MARK = re.compile(r"^\s*System\.NotImplementedException\s*:\s*__stub__\s*$")
+CSHARP_ACCESS = re.compile(r"^(?:public|internal|protected|private)\b")
+CSHARP_MODIFIERS = r"(?:(?:public|internal|protected|private|static|abstract|sealed|partial|readonly|virtual|override|new)\s+)*"
+CSHARP_TYPE_LINE = re.compile(
+    rf"^(?P<mods>{CSHARP_MODIFIERS})(?P<kind>class|struct|interface|enum)\s+(?P<name>[A-Za-z_]\w*)"
+    r"(?P<bases>\s*:\s*[^{]+?)?\s*(?:\{(?P<body>.*)\})?\s*;?\s*$")
+CSHARP_CTOR_LINE = re.compile(
+    rf"^(?P<mods>{CSHARP_MODIFIERS})(?P<type>[A-Za-z_]\w*)\.(?P=type)\s*\((?P<params>.*)\)\s*;?\s*$")
+CSHARP_MEMBER_LINE = re.compile(
+    rf"^(?P<mods>{CSHARP_MODIFIERS})(?P<ret>\S.*?)\s+(?P<type>[A-Za-z_]\w*)\.(?P<name>[A-Za-z_]\w*)"
+    r"\s*(?P<rest>\(.*\)|\{.*\})?\s*;?\s*$")
+# 契約に現れたら `using UnityEngine;` を足す型。全部は知らないので、よく出る
+# ものだけを挙げる。無い型がコンパイルで落ちれば、RED_GATE がそのまま止める。
+CSHARP_UNITY_TYPES = re.compile(
+    r"\b(?:Vector[234](?:Int)?|Quaternion|Color(?:32)?|Mathf|Rect(?:Int)?|Bounds(?:Int)?|"
+    r"Matrix4x4|GameObject|Transform|MonoBehaviour|ScriptableObject|Sprite|Texture2D|"
+    r"AudioClip|KeyCode|Ray|RaycastHit)\b")
+
+
+def csharp_members(body: str) -> list[str]:
+    """型の本体をメンバーに分ける。深さ 0 の `;` と、深さ 0 に戻る `}` で切る。
+
+    `int Height { get; set; } int Score(Board b);` のように、プロパティの `}` の
+    後に `;` が無くても2つに分ける。
+    """
+    members, current, depth = [], [], 0
+    for ch in body:
+        current.append(ch)
+        if ch in "({[<":
+            depth += 1
+        elif ch in ")]>":
+            depth -= 1
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                members.append("".join(current))
+                current = []
+                continue
+        if ch == ";" and depth == 0:
+            members.append("".join(current)[:-1])
+            current = []
+    members.append("".join(current))
+    return [m.strip() for m in members if m.strip()]
+
+
+def csharp_stub_member(member: str) -> str:
+    """クラスか構造体のメンバー1つを、スタブの宣言にする。"""
+    if not CSHARP_ACCESS.match(member):
+        member = "public " + member
+    if "(" in member and member.rstrip().endswith(")") and "=>" not in member:
+        return f"{member} {CSHARP_STUB_BODY}"       # メソッドとコンストラクタ
+    if member.rstrip().endswith("}"):
+        return member                                # 自動プロパティ
+    return member + ";"                              # フィールド
+
+
+def csharp_namespace(path: str) -> str | None:
+    """新しいファイルの名前空間。柵の中のフォルダから作る（layout_note の決まり）。
+
+    根にあれば空文字（グローバル名前空間）。識別子にならないフォルダ名なら None。
+    """
+    prefix = LAYOUT["src"] + "/"
+    if not path.startswith(prefix):
+        return None
+    folders = path[len(prefix):].split("/")[:-1]
+    if not all(re.fullmatch(r"[A-Za-z_]\w*", f) for f in folders):
+        return None
+    return ".".join(folders)
+
+
+def generate_csharp_stub(step: dict, requires: list[str],
+                         originals: dict[str, str]) -> dict[str, str] | None:
+    """C# のスタブを契約から書く。None ならソルバーに頼む。
+
+    メソッドとコンストラクタの本体は CSHARP_STUB_BODY。フィールドと自動プロパティは
+    宣言のまま残す（値を持つだけで、振る舞いが無い）。読めない行が1つでもあれば、
+    既存のファイルがあれば（書き換えは別の作業）、None。
+    """
+    if any(path in originals for path in step["files_write"]):
+        return None
+    types: dict[str, dict] = {}     # 型の名前 -> {path, head, members}
+    order: list[str] = []
+    for line in step["contracts"]["provides"]:
+        match = re.match(r"^([\w./-]+\.cs)\s*:\s*(.+)$",
+                         line.split(" -- ")[0].split(chr(8212))[0].strip())
+        if not match:
+            return None
+        path, decl = match.group(1), match.group(2).strip()
+        if path not in step["files_write"]:
+            return None
+        declared = CSHARP_TYPE_LINE.match(decl)
+        if declared:
+            name, kind = declared.group("name"), declared.group("kind")
+            mods = declared.group("mods").strip()
+            if not CSHARP_ACCESS.match(mods):
+                mods = ("public " + mods).strip()
+            entry = types.setdefault(name, {"path": path, "members": []})
+            if entry["path"] != path or "head" in entry:
+                return None
+            entry["head"] = f"{mods} {kind} {name}{declared.group('bases') or ''}".rstrip()
+            entry["kind"] = kind
+            body = declared.group("body") or ""
+            if kind == "enum":
+                entry["members"].append(body.strip())
+            elif kind == "interface":
+                entry["members"] += [m if m.endswith("}") else m + ";"
+                                     for m in csharp_members(body)]
+            else:
+                entry["members"] += [csharp_stub_member(m) for m in csharp_members(body)]
+            if name not in order:
+                order.append(name)
+            continue
+        ctor = CSHARP_CTOR_LINE.match(decl)
+        member = CSHARP_MEMBER_LINE.match(decl) if not ctor else None
+        if ctor:
+            owner = ctor.group("type")
+            text = f"{ctor.group('mods')}{owner}({ctor.group('params')})"
+        elif member:
+            owner = member.group("type")
+            text = (f"{member.group('mods')}{member.group('ret')} {member.group('name')}"
+                    f"{member.group('rest') or ''}")
+        else:
+            return None
+        entry = types.setdefault(owner, {"path": path, "members": []})
+        if entry["path"] != path:
+            return None
+        entry["members"].append(csharp_stub_member(text.strip()))
+        if owner not in order:
+            order.append(owner)
+
+    if {t["path"] for t in types.values()} != set(step["files_write"]):
+        return None
+
+    # 型の宣言の行が無いメンバーは、普通のクラスに入れる。
+    for entry in types.values():
+        entry.setdefault("head", "public class " + next(
+            name for name, e in types.items() if e is entry))
+        entry.setdefault("kind", "class")
+
+    namespaces: dict[str, str] = {}
+    for path in set(step["files_write"]) | {
+            m.group(1) for line in requires
+            if (m := re.match(r"^([\w./-]+\.cs)\s*:", line.strip()))}:
+        ns = csharp_namespace(path)
+        if ns is None and path in step["files_write"]:
+            return None
+        if ns:
+            namespaces[path] = ns
+
+    unity = (UNITY_REFS / "refs").is_dir() and any(
+        CSHARP_UNITY_TYPES.search(line) for line in step["contracts"]["provides"] + requires)
+    files: dict[str, str] = {}
+    for path in step["files_write"]:
+        own = namespaces.get(path, "")
+        usings = ["System", "System.Collections.Generic", "System.Linq"] \
+            + (["UnityEngine"] if unity else []) \
+            + sorted({ns for p, ns in namespaces.items() if ns != own})
+        blocks = []
+        for name in order:
+            entry = types[name]
+            if entry["path"] != path:
+                continue
+            separator = ",\n" if entry["kind"] == "enum" else "\n"
+            inner = separator.join(f"    {m}" for m in entry["members"] if m)
+            blocks.append(f"{entry['head']}\n{{\n{inner}\n}}")
+        text = "\n\n".join(blocks)
+        if own:
+            text = f"namespace {own}\n{{\n" + "\n".join(
+                f"    {line}" if line else "" for line in text.splitlines()) + "\n}"
+        files[path] = "".join(f"using {u};\n" for u in usings) + "\n" + text + "\n"
+    return files
+
+
 def generate_stub(step: dict, requires: list[str],
                   originals: dict[str, str] | None = None) -> dict[str, str] | None:
     """スタブ全体を返す。None なら、やはりソルバーに頼む。
@@ -1804,6 +1989,8 @@ def generate_stub(step: dict, requires: list[str],
     丸ごと書き直すと、ステップに関係の無い関数まで消える。
     """
     originals = originals or {}
+    if LANGUAGE["name"] == "csharp":
+        return generate_csharp_stub(step, requires, originals)
     if LANGUAGE["name"] != "typescript":
         return None   # Python はいまも頼む。まだこれを要したことが無い
 
@@ -1931,6 +2118,36 @@ def brief_stub(step: dict, existing: list[str] | None = None) -> str:
     # 運ぶものがここにあると、それは忠実に実装され、それが覆う条件は一度も落ちる
     # のを見られないまま RED_GATE を通る（2026-08-18 にステップ S1 で痛い目を見て
     # 分かった）。
+    if LANGUAGE["name"] == "csharp":
+        # C# は番兵の値を使わない（CSHARP_STUB_BODY）。下の本文の半分は、値を
+        # 選ぶことの難しさについてで、ここでは要らない。
+        return f"""Create stubs only.
+
+# Signatures to provide
+{render_provides(step)}
+
+# Files you may create or modify
+{chr(10).join(step["files_write"])}
+{existing_files_section(existing or [])}
+Write each declaration with exactly the signature above. The body of every
+method, constructor and property accessor you write is exactly this one
+statement and nothing else:
+
+    {CSHARP_STUB_BODY}
+
+Keep the message "__stub__" exactly. The runner accepts a test that fails on
+this exception as a test that fails against the stub; any other exception --
+including a NotImplementedException with another message -- rejects the step.
+
+Do not return values. C# has no wrong value for a bool, and forcing one in
+with a cast throws InvalidCastException, which the runner rejects. Fields and
+auto-properties (`{{ get; set; }}`) stay as declared: they hold values and have
+no behaviour to stub.
+
+Put each type in the namespace that follows its folder under {LAYOUT["src"]}/,
+and add the `using` directives the signatures need. Implement no behaviour
+whatsoever.
+"""
     return f"""Create stubs only.
 
 # Signatures to provide

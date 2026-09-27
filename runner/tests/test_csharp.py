@@ -259,6 +259,103 @@ class TheContracts(CSharp):
         self.assertFalse(any(p.startswith("L15") for p in problems), problems)
 
 
+class TheRunnerWritesTheStub(CSharp):
+    """C# のスタブは値を返さず、印の付いた例外を投げる。
+
+    bool には誤った値が無く、文字列をキャストして押し込む手は
+    InvalidCastException になる（実測）。どの型にも同じ1行で済む。
+    """
+
+    STEP = {"files_write": ["src/Logic/Board.cs", "src/Logic/Cell.cs"],
+            "contracts": {"provides": [
+                "src/Logic/Cell.cs: enum Cell { Empty, Wall }",
+                "src/Logic/Board.cs: class Board { public int Width; public int Height { get; set; } }",
+                "src/Logic/Board.cs: Board.Board(int width, int height)",
+                "src/Logic/Board.cs: static int Board.Score(Board board)",
+                "src/Logic/Board.cs: bool Board.IsWall(int x, int y)",
+            ]}}
+
+    def setUp(self):
+        super().setUp()
+        for p in (mock.patch.dict(loop.LAYOUT, loop.LAYOUT_DEFAULT),
+                  mock.patch.object(loop, "UNITY_REFS", Path("/nonexistent/unity-refs"))):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def test_a_class_is_written_whole(self):
+        files = loop.generate_stub(self.STEP, [], {})
+        self.assertEqual(files["src/Logic/Board.cs"], """using System;
+using System.Collections.Generic;
+using System.Linq;
+
+namespace Logic
+{
+    public class Board
+    {
+        public int Width;
+        public int Height { get; set; }
+        public Board(int width, int height) { throw new System.NotImplementedException("__stub__"); }
+        public static int Score(Board board) { throw new System.NotImplementedException("__stub__"); }
+        public bool IsWall(int x, int y) { throw new System.NotImplementedException("__stub__"); }
+    }
+}
+""")
+
+    def test_an_enum_keeps_its_members(self):
+        files = loop.generate_stub(self.STEP, [], {})
+        self.assertIn("    public enum Cell\n    {\n        Empty, Wall\n    }",
+                      files["src/Logic/Cell.cs"])
+
+    def test_a_type_from_another_folder_is_brought_in_by_its_namespace(self):
+        step = {"files_write": ["src/Rules/Scorer.cs"],
+                "contracts": {"provides": ["src/Rules/Scorer.cs: static int Scorer.Total(Board board)"]}}
+        text = loop.generate_stub(step, ["src/Logic/Board.cs: class Board { }"], {})["src/Rules/Scorer.cs"]
+        self.assertIn("using Logic;\n", text)
+        self.assertIn("namespace Rules\n", text)
+        self.assertIn("    public class Scorer\n", text)
+
+    def test_unity_is_used_only_when_a_signature_names_it(self):
+        with tempfile.TemporaryDirectory() as t:
+            (Path(t) / "refs").mkdir()
+            with mock.patch.object(loop, "UNITY_REFS", Path(t)):
+                plain = loop.generate_stub(self.STEP, [], {})["src/Logic/Board.cs"]
+                step = {"files_write": ["src/Logic/Mover.cs"], "contracts": {"provides": [
+                    "src/Logic/Mover.cs: static Vector2Int Mover.Step(Vector2Int from)"]}}
+                unity = loop.generate_stub(step, [], {})["src/Logic/Mover.cs"]
+        self.assertNotIn("UnityEngine", plain)
+        self.assertIn("using UnityEngine;\n", unity)
+
+    def test_what_it_cannot_read_goes_back_to_the_solver(self):
+        for provides in (["src/Logic/Board.cs: something in prose"],
+                         ["Board.Score(Board board)"]):
+            with self.subTest(provides=provides):
+                self.assertIsNone(loop.generate_stub(
+                    {"files_write": ["src/Logic/Board.cs"],
+                     "contracts": {"provides": provides}}, [], {}))
+
+    def test_an_existing_file_goes_back_to_the_solver_for_now(self):
+        self.assertIsNone(loop.generate_stub(
+            self.STEP, [], {"src/Logic/Board.cs": "namespace Logic { }"}))
+
+    def test_a_folder_that_is_not_a_namespace_goes_back_to_the_solver(self):
+        self.assertIsNone(loop.generate_stub(
+            {"files_write": ["src/Game-Logic/Board.cs"],
+             "contracts": {"provides": ["src/Game-Logic/Board.cs: class Board { }"]}}, [], {}))
+
+    def test_the_marked_exception_is_red_and_an_unmarked_one_is_not(self):
+        marked = loop.failure_kind(self.failure("System.NotImplementedException : __stub__"))
+        self.assertEqual(marked, "StubNotImplemented")
+        self.assertTrue(loop.LANGUAGE["red_kinds"].match(marked))
+        unmarked = loop.failure_kind(self.failure("System.NotImplementedException : later"))
+        self.assertFalse(loop.LANGUAGE["red_kinds"].match(unmarked))
+
+    def test_the_solver_s_brief_asks_for_the_same_body(self):
+        brief = loop.brief_stub(self.STEP)
+        self.assertIn('throw new System.NotImplementedException("__stub__");', brief)
+        self.assertIn("Do not return values", brief)
+        self.assertNotIn("THERE IS NO WRONG BOOLEAN", brief)
+
+
 class WhatThePlannerIsTold(CSharp):
     def facts(self, unity: bool, project: Path):
         refs = project.parent / "unity-refs"
