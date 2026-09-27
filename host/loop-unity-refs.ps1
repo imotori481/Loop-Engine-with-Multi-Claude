@@ -14,7 +14,8 @@
 #  Left out on purpose:
 #    - native DLLs: they are not .NET assemblies and break the build
 #    - NetStandard facades: the .NET SDK brings its own netstandard
-#    - Assembly-CSharp*: that is the code the loop compiles itself
+#    - Assembly-CSharp and its editor twins: the loop compiles that code
+#      itself (Assembly-CSharp-firstpass, i.e. Assets/Plugins, is kept)
 #    - UNITY_EDITOR* symbols: the loop builds the player's code
 #
 #  The sandbox keeps them under /srv/loop/projects/<project>/unity-refs
@@ -77,7 +78,10 @@ try {
     $leaf = Split-Path $p -Leaf
     if (-not (Test-Path $p)) { Write-Host "WARN: missing $p"; continue }
     if ($p -match '[\\/]NetStandard[\\/]') { $skipped++; continue }
-    if ($leaf -like 'Assembly-CSharp*') { $skipped++; continue }
+    # Only the assembly the loop compiles itself, and the editor ones. Keep
+    # Assembly-CSharp-firstpass: it is Assets/Plugins (DOTween's modules,
+    # for one), which the project's code calls and the loop never builds.
+    if ($leaf -match '^Assembly-CSharp(-Editor.*)?\.dll$') { $skipped++; continue }
     if ($leaf -notmatch '^[A-Za-z0-9._+-]+\.dll$') { Write-Host "WARN: odd name, skipped: $p"; continue }
     try { [Reflection.AssemblyName]::GetAssemblyName($p) | Out-Null }
     catch { $skipped++; continue }   # native, not an assembly
