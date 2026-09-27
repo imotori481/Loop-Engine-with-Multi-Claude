@@ -284,7 +284,9 @@ cmd_unity_refs() {
   busy && die "ループかエージェントが走っている。終わるのを待つ"
 
   work="$(mktemp -d)"
-  trap 'rm -rf "$work"' EXIT
+  # パスは trap を仕掛けるときに埋め込む。EXIT で動くころには、この関数の
+  # local はもう無く、set -u が「unbound variable」で終了コードを変えてしまう。
+  trap "rm -rf -- '$work'" EXIT
   tar -xf "$tar" -C "$work" --no-same-owner --no-same-permissions \
     || die "tar を展開できない: $tar"
   bad="$(find "$work" -mindepth 1 ! -type f ! -type d)"

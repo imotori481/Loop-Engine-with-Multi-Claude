@@ -29,7 +29,9 @@ param(
   [switch]$DryRun
 )
 $ErrorActionPreference = "Stop"
+$Distro = "Ubuntu-24.04"
 $SshHost = "loop-dev"
+$Port = 2222
 
 $projectDir = (Resolve-Path $UnityProject).Path
 $csproj = Join-Path $projectDir "Assembly-CSharp.csproj"
@@ -119,9 +121,17 @@ try {
   if ($DryRun) { Write-Host "dry run: $tarPath was built and not sent"; exit 0 }
 
   # ---- to the sandbox -----------------------------------------------
-  # `loop project current` starts the distro and waits for sshd first.
-  & "$PSScriptRoot\loop.cmd" project current
-  if ($LASTEXITCODE -ne 0) { Write-Host "ERROR: the sandbox did not answer"; exit 1 }
+  # Start the distro and wait for sshd, the same way loop.cmd does. Done
+  # here rather than through a `loop` command, which would ask for the
+  # sudo password once more for nothing.
+  & wsl.exe -d $Distro -u root --exec /usr/bin/true
+  if ($LASTEXITCODE -ne 0) { Write-Host "ERROR: failed to start distro $Distro"; exit 1 }
+  $up = $false
+  for ($i = 0; $i -lt 40 -and -not $up; $i++) {
+    $up = Test-NetConnection -ComputerName 127.0.0.1 -Port $Port -InformationLevel Quiet -WarningAction SilentlyContinue
+    if (-not $up) { Start-Sleep -Milliseconds 500 }
+  }
+  if (-not $up) { Write-Host "ERROR: sshd did not come up within 20 seconds"; exit 1 }
   & scp -q $tarPath "${SshHost}:loop-unity-refs.tar"
   if ($LASTEXITCODE -ne 0) { Write-Host "ERROR: could not copy $tarPath to the sandbox"; exit 1 }
   # The remote shell expands ~ to the maintenance user's home before sudo.
