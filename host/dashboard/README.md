@@ -51,10 +51,10 @@ pytest の慣習で `src/` レイアウトを採り、`src/` を `sys.path` に�
 リポジトリのルートから:
 
 ```powershell
-python host/dashboard/server.py --project ..\project
+python host/dashboard/server.py --project C:\dev\roop-engin\project
 ```
 
-または `host\loop-dashboard.cmd` を実行します。その後、ブラウザで
+または `host\loop-dashboard.cmd` を実行します。`--project` は `host\loop-pull.cmd` が書くライブミラーです。その後、ブラウザで
 <http://127.0.0.1:8443> を開きます。
 
 ## いまの作業

@@ -43,6 +43,8 @@ PowerShell なら `.\host\loop.cmd <args>`、Git Bash なら `./host/loop.cmd <a
 | `<unity-project-dir>` | Unity で開いたことのあるプロジェクトのディレクトリ。`Assembly-CSharp.csproj` があるところ |
 | `<tests-dir>` | ソルバーがテストを書くディレクトリ。`<src-dir>` を含まず、`<src-dir>` に含まれない場所 |
 | `<you>` | Windows のユーザー名 |
+| `<mirror-dir>` | `loop-pull` が写したプロジェクトのディレクトリ。`plan\` があるところ |
+| `<port>` | ダッシュボードが待ち受けるポート。既定は 8443 |
 
 ## 走らせる（ホストでも箱でも）
 
@@ -183,13 +185,48 @@ git push origin <pr-branch>
 | やりたいこと | 場所 | コマンド |
 |---|---|---|
 | 成果物をホストに写す | ホスト | `loop-pull` |
-| ダッシュボードを開く | ホスト | `loop-dashboard` のあと <http://127.0.0.1:8443> |
-| スマホからダッシュボードを見る | ホスト | `tailscale serve --bg --https=8443 http://127.0.0.1:8443` |
 | VS Code で箱に入る | ホスト | `loop-dev` |
 | 端末で箱に入る | ホスト | `ssh loop-dev` |
 
-ダッシュボードの「いまの作業」と「ステップ」は箱から直接読む。それ以外の欄はホストの写しを読む。
-`loop-dashboard` は写しが無いと起動しないので、初回は先に `loop-pull` を流す。
+## ダッシュボード（ホスト）
+
+ダッシュボードは `127.0.0.1:8443` だけで待ち受ける。「いまの作業」と「ステップ」は箱から直接読み、
+それ以外の欄はホストの写し（`C:\dev\roop-engin\project`）を読む。
+
+### 起動する
+
+| やりたいこと | コマンド |
+|---|---|
+| 設定ファイルを作る（初回だけ） | `copy host\dashboard\config.example.json host\dashboard\config.json` |
+| 写しを最新にする | `loop-pull` |
+| 起動する | `loop-dashboard` |
+| 写しの場所を指定して起動する | `python host\dashboard\server.py --project <mirror-dir>` |
+| ポートを変えて起動する | `python host\dashboard\server.py --project <mirror-dir> --port <port>` |
+| 止める | 起動した端末で Ctrl-C |
+
+起動したら <http://127.0.0.1:8443> を開く。`config.json` が無くても進捗の画面は使える。
+
+`loop-dashboard` は写しが無いと起動しない。初回は先に `loop-pull` を流す。
+
+「いまの作業」は5秒ごとに `ssh loop-dev loop now` を `BatchMode=yes` で流す。鍵にパスフレーズが
+あるなら、先に ssh-agent に載せておく。
+
+### スマホや他の PC から見る
+
+| やりたいこと | コマンド |
+|---|---|
+| tailnet に公開する | `tailscale serve --bg --https=8443 http://127.0.0.1:8443` |
+| 公開の状態を見る | `tailscale serve status` |
+| 公開をやめる | `tailscale serve --https=8443 off` |
+| 名簿に書くログイン名を見る | `tailscale status` |
+
+公開するには、`config.json` の `remote` に公開名（`<machine>.<tailnet>.ts.net:8443`）と、見てよい人の
+Tailscale のログインを書く。どちらかが無ければ、tailnet からの要求はすべて拒まれる。
+`tailscale funnel` は使わない。インターネット全体に公開される。
+
+リモートから、予定レビューの承認はできない。差し戻し、エスカレーションへの回答、停止はできる。
+
+設定の詳細: [host/dashboard/README.md](../host/dashboard/README.md)
 
 ## 箱を保守する
 
@@ -250,5 +287,5 @@ python3 -m unittest discover -s host/dashboard/tests
 - 走らせ方と止まる場面: [provision/README.md](../provision/README.md) §2-10
 - プロジェクトの切り替え: [provision/README.md](../provision/README.md) §2-11
 - ホスト側のスクリプトと SSH の設定: [host/README.md](../host/README.md)
-- ダッシュボード: [host/dashboard/README.md](../host/dashboard/README.md)
+- ダッシュボードの設計と設定: [host/dashboard/README.md](../host/dashboard/README.md)
 - `loop.py` の動詞と終了コード: [RUNNER_SPEC.md](RUNNER_SPEC.md)

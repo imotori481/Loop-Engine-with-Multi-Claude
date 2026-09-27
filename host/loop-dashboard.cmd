@@ -2,7 +2,8 @@
 setlocal
 REM Host-only operator console. It reads the pulled project mirror and never
 REM places a credential or a listening socket inside the solver sandbox.
-set "PROJECT=%~dp0..\..\project"
+REM The live mirror host\loop-pull.cmd writes (MIRRORROOT there).
+set "PROJECT=C:\dev\roop-engin\project"
 if not exist "%PROJECT%\plan" (
   echo Project mirror not found: %PROJECT%
   echo Run host\loop-pull.cmd first.
