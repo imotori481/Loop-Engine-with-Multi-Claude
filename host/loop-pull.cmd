@@ -117,11 +117,21 @@ if /i "%NAME%"=="repo.git" (
   set "DEST=%MIRRORROOT%\project"
 ) else (
   REM repo.run4.git -> 4 -> run-004. Delayed expansion is required because
-  REM this subroutine is parsed before RUNNO and PAD are assigned.
-  set "RUNNO=%NAME:~8,-4%"
-  set "PAD=000!RUNNO!"
-  set "PAD=!PAD:~-3!"
-  set "DEST=%ARCHIVEROOT%\run-!PAD!"
+  REM this subroutine is parsed before these variables are assigned.
+  REM
+  REM Padding is for run numbers of up to three characters. Anything else
+  REM keeps its whole name: cutting it to three characters lets two names
+  REM land in the same directory. repo.<name>.git -> runs\<name>.
+  set "ARCHIVE=%NAME:~5,-4%"
+  if /i "!ARCHIVE:~0,3!"=="run" (
+    set "RUNNO=!ARCHIVE:~3!"
+    set "PAD=000!RUNNO!"
+    set "PAD=!PAD:~-3!"
+    if not "!RUNNO:~3!"=="" set "PAD=!RUNNO!"
+    set "DEST=%ARCHIVEROOT%\run-!PAD!"
+  ) else (
+    set "DEST=%ARCHIVEROOT%\!ARCHIVE!"
+  )
 )
 
 if not exist "%DEST%\.git" (

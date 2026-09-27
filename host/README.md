@@ -200,6 +200,7 @@ git clone loop-runner:/srv/loop/repo.git <置き場所>
 ```text
 /srv/loop/projects/<名前>/repo.git  ->  <MIRRORROOT>\projects\<名前>  （remote loop に fetch）
 /srv/loop/repo.runN.git             ->  <MIRRORROOT>\runs\run-NNN      （不変。ff のみ）
+/srv/loop/repo.<名前>.git            ->  <MIRRORROOT>\runs\<名前>        （不変。ff のみ）
 /srv/loop/repo.git                  ->  <MIRRORROOT>\project           （現行。毎回作り直す）
 ```
 
