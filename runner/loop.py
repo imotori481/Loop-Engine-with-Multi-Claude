@@ -4399,6 +4399,36 @@ def complete_run(done: set[str], tasks: dict) -> None:
     publish("run completion")
 
 
+def check_baseline() -> None:
+    """最初のステップの前に、リポジトリにすでにあるテストが緑であること。
+
+    VERIFY はスイート全体の緑を求める。取り込んだ時点で落ちているテストや、
+    スキップされるテストがあると、どのステップも緑にならない。それは実装の失敗に
+    見え、ソルバーは試行を使い切り、エスカレーションはプランナーに届く。どちらも
+    直せない。直せるのは人だけなので、エスカレーションせずに止める。
+
+    テストのファイルが無ければ何もしない。新しいプロジェクトはいつもそうだ。
+    """
+    if not TESTS.is_dir() or not any(f.suffix in LANGUAGE["test_suffixes"]
+                                     for f in source_files(TESTS)):
+        return
+    baseline = pytest_run("baseline", [TESTS.relative_to(PROJECT).as_posix()])
+    ledger("BASELINE", tests=baseline.tests, failures=baseline.failures,
+           errors=baseline.errors, skipped=baseline.skipped)
+    if not (baseline.failures or baseline.errors or baseline.skipped):
+        return
+    detail = list(baseline.failure_details)
+    if baseline.skipped_names:
+        detail.append("skipped:\n  " + "\n  ".join(baseline.skipped_names))
+    raise Halt(
+        "PLAN_LOAD",
+        f"the tests already in the repository are not green before the first step "
+        f"({baseline.failures} failed, {baseline.errors} errored, {baseline.skipped} "
+        f"skipped); every step is checked against the whole suite, so none could "
+        f"go green. Fix or remove them, commit, and run again",
+        ("\n".join(detail) or ANSI.sub("", baseline.output))[-4000:])
+
+
 def run_step(step_id: str, unvalidated: bool = False) -> int:
     NOW["step"], NOW["attempt"] = step_id, None
     tasks = json.loads((PLAN / "tasks.json").read_text(encoding="utf-8"))
@@ -4420,6 +4450,11 @@ def run_step(step_id: str, unvalidated: bool = False) -> int:
     if touched_paths():
         raise Halt("PLAN_LOAD", "the working tree is dirty; refusing to start",
                    "\n".join(sorted(touched_paths())))
+
+    # try の外で確かめる。落ちているのはこの計画の前からあるテストで、プランナーに
+    # エスカレーションしても直せない。
+    if not green_steps():
+        check_baseline()
 
     attempt = 0
     last_run: TestRun | None = None

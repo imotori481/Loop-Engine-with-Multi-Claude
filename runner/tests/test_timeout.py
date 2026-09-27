@@ -129,6 +129,7 @@ class TheLoopMovesOn(unittest.TestCase):
             "set_writable": lambda **kw: None,
             "assert_touched": lambda *a: None,
             "assert_written": lambda *a: None,
+            "check_baseline": lambda: None,
             "head_sources": lambda paths: {},
             "generate_stub": lambda step, lines, originals: {},
             "freeze_tests": lambda: {},
