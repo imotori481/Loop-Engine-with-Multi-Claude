@@ -1430,13 +1430,19 @@ def parse_contracts(lines: list[str]) -> list[dict] | None:
     return declarations
 
 
-def generate_stub(step: dict, requires: list[str]) -> dict[str, str] | None:
+def generate_stub(step: dict, requires: list[str],
+                  originals: dict[str, str] | None = None) -> dict[str, str] | None:
     """スタブ全体を返す。None なら、やはりソルバーに頼む。
 
     None は恥ずべき失敗ではない。これが言語の2つ目の、より劣った構文解析器に
     ならずに済むのは None のおかげだ。見慣れないものは、前から扱っていた経路に
     戻す。
+
+    `originals` は、files_write のうち最後のコミットにあるファイルの中身だ。
+    そのファイルでは、provides の名前の宣言だけをスタブに差し替え、ほかは残す。
+    丸ごと書き直すと、ステップに関係の無い関数まで消える。
     """
+    originals = originals or {}
     if LANGUAGE["name"] != "typescript":
         return None   # Python はいまも頼む。まだこれを要したことが無い
 
@@ -1473,6 +1479,7 @@ def generate_stub(step: dict, requires: list[str]) -> dict[str, str] | None:
         mine = [d for d in declarations if d["file"] == path]
         declared_here = {d["name"] for d in mine}
         body: list[str] = []
+        pieces: dict[str, str] = {}
         needed: dict[str, set] = {}
 
         for d in mine:
@@ -1482,37 +1489,51 @@ def generate_stub(step: dict, requires: list[str]) -> dict[str, str] | None:
                 # 読みにくい。
                 line = f"export {d['kind']} {d['name']}{d['rest']}".rstrip().rstrip(";")
                 body.append(line if line.endswith("}") else line + ";")
-                continue
-            if d["kind"] == "const":
+            elif d["kind"] == "const":
                 kind = d["rest"].split(":", 1)[-1].strip() if ":" in d["rest"] else "unknown"
                 body.append(f"export const {d['name']}: {kind} = "
                             f"{sentinel_for(kind, types, keys)};")
-                continue
-            signature = TS_SIGNATURE.match(d["rest"].strip())
-            if signature is None:
+            else:
+                signature = TS_SIGNATURE.match(d["rest"].strip())
+                if signature is None:
+                    return None
+                returns = signature.group("returns")
+                value = sentinel_for(returns, types, keys)
+                body.append(
+                    f"export function {d['name']}({signature.group('args')}): {returns} {{"
+                    + (f"{chr(10)}  return {value};{chr(10)}}}" if value else f"{chr(10)}}}"))
+            pieces[d["name"]] = body[-1]
+
+        # 既存のファイルでは、差し替えなかった部分がすでに宣言や import をしている
+        # 名前に import を足さない。同じ名前を2度 import すると、esbuild はファイル
+        # ごと拒む。
+        rest = ""
+        if path in originals:
+            merged = ts_merge_stub(originals[path], pieces)
+            if merged is None:
                 return None
-            returns = signature.group("returns")
-            value = sentinel_for(returns, types, keys)
-            body.append(
-                f"export function {d['name']}({signature.group('args')}): {returns} {{"
-                + (f"{chr(10)}  return {value};{chr(10)}}}" if value else f"{chr(10)}}}"))
+            merged_text, rest = merged
+
+        def known(name: str) -> bool:
+            return bool(re.search(rf"(?<![\w$]){re.escape(name)}(?![\w$])", rest))
 
         # import: このファイルが口にし、別のファイルが宣言している名前すべて。
         text = chr(10).join(body)
         for name, source in elsewhere.items():
-            if name in declared_here or not re.search(rf"(?<!\w){name}(?!\w)", text):
+            if name in declared_here or known(name) \
+                    or not re.search(rf"(?<!\w){name}(?!\w)", text):
                 continue
             needed.setdefault(relative_module(path, source), set()).add(name)
         for d in declarations:
-            if d["file"] == path or d["name"] in declared_here:
+            if d["file"] == path or d["name"] in declared_here or known(d["name"]):
                 continue
             if re.search(rf"(?<!\w){d['name']}(?!\w)", text):
                 needed.setdefault(relative_module(path, d["file"]), set()).add(d["name"])
 
         imports = [f'import {{ {", ".join(sorted(names))} }} from "{module}";'
                    for module, names in sorted(needed.items())]
-        files[path] = (chr(10).join(imports) + chr(10) * 2 if imports else "") \
-            + text + chr(10)
+        header = chr(10).join(imports) + chr(10) * 2 if imports else ""
+        files[path] = header + (merged_text if path in originals else text + chr(10))
     return files
 
 
@@ -1523,7 +1544,28 @@ def relative_module(importer: str, target: str) -> str:
     return rel if rel.startswith(".") else "./" + rel
 
 
-def brief_stub(step: dict) -> str:
+def existing_files_section(existing: list[str]) -> str:
+    """スタブのブリーフの、既存のファイルについての節。無ければ空。"""
+    if not existing:
+        return ""
+    return f"""
+# These files already exist
+{chr(10).join(existing)}
+
+They hold code that is not yours: other functions, classes, constants, imports
+and comments. Read each one before you write to it. Change only the
+declarations of the names under "Signatures to provide": replace each one with
+its stub as described below, keeping the signature given above. A name the file
+does not have yet goes at the end of the file. Leave every other line exactly
+as it is. Do not rewrite the file from scratch.
+
+The runner compares everything else in these files with the last commit, and a
+stub that changed or removed anything else stops the step. Adding an import
+that a new signature needs is allowed.
+"""
+
+
+def brief_stub(step: dict, existing: list[str] | None = None) -> str:
     # 署名だけを渡す。goal も acceptance も invariants も渡さない。形ではなく意味を
     # 運ぶものがここにあると、それは忠実に実装され、それが覆う条件は一度も落ちる
     # のを見られないまま RED_GATE を通る（2026-08-18 にステップ S1 で痛い目を見て
@@ -1535,7 +1577,7 @@ def brief_stub(step: dict) -> str:
 
 # Files you may create or modify
 {chr(10).join(step["files_write"])}
-
+{existing_files_section(existing or [])}
 Each function must have exactly the signature above and must return a
 CONSPICUOUS SENTINEL: a value of the declared return type that no correct
 implementation would produce for any input. For a str return a marker such as
@@ -2725,7 +2767,15 @@ def python_declarations(text: str, module: str) -> list[str]:
 
 
 def ts_statements(text: str) -> list[str]:
-    """TypeScript の最上位の文を、コメントを除いて順に返す。
+    """TypeScript の最上位の文を、コメントを除いて順に返す。"""
+    return [statement for _, _, statement in ts_statement_spans(text)]
+
+
+def ts_statement_spans(text: str) -> list[tuple[int, int, str]]:
+    """TypeScript の最上位の文を、元の文字列での範囲とともに順に返す。
+
+    範囲は (始まり, 終わり) で、`text[始まり:終わり]` がその文になる。前に付いた
+    コメントは含まない。文の中身の方はコメントを除いてある。
 
     箱には TypeScript のパーサが無い（vitest は esbuild で型を捨てるだけだ）。
     だから宣言の切れ目だけを数える。文字列、コメント、正規表現のリテラルの中の
@@ -2736,21 +2786,30 @@ def ts_statements(text: str) -> list[str]:
     値の `{` では終わらない。そうしないと、戻り値の型がオブジェクトの関数が、
     型の所で切れる。
     """
-    statements: list[str] = []
+    statements: list[tuple[int, int, str]] = []
     buf: list[str] = []
     depth = 0
     assigned = False   # 深さ 0 に `=` があった。その後の `{` は値で、本体ではない
     body = False       # 深さ 0 で開いた `{` が本体か
     last = ""          # 直前の空白でない文字
+    start = stop = 0   # いまの文の最初の文字と、最後の空白でない文字の次
+    started = False    # いまの文に空白でないものがもう入ったか
     i, n = 0, len(text)
 
     def end() -> None:
-        nonlocal assigned, body
+        nonlocal assigned, body, started
         statement = "".join(buf).strip()
         if statement:
-            statements.append(statement)
+            statements.append((start, stop, statement))
         buf.clear()
-        assigned = body = False
+        assigned = body = started = False
+
+    def mark(first: int, after: int) -> None:
+        """空白でないものを buf に足したときに、文の範囲を広げる。"""
+        nonlocal start, stop, started
+        if not started:
+            start, started = first, True
+        stop = after
 
     while i < n:
         c = text[i]
@@ -2781,6 +2840,7 @@ def ts_statements(text: str) -> list[str]:
                 elif text[j] == c and not in_class:
                     break
                 j += 1
+            mark(i, min(j + 1, n))
             buf.append(text[i:j + 1])
             last, i = c, j + 1
             continue
@@ -2793,15 +2853,16 @@ def ts_statements(text: str) -> list[str]:
         elif (c == "=" and depth == 0 and nxt not in "=>"
               and text[i - 1:i] not in ("=", "!", "<", ">")):
             assigned = True
+        if not c.isspace():
+            mark(i, i + 1)
         buf.append(c)
         if c == "}" and depth == 0 and body:
             end()
         elif c == ";" and depth == 0:
             end()
-        elif c == "\n" and depth == 0:
-            head = "".join(buf).rstrip()
-            ahead = text[i + 1:].lstrip()[:1]
-            if head and head[-1] not in "=,(+-*/&|?:<>.[{" \
+        elif c == "\n" and depth == 0 and started:
+            ahead = text[i + 1:i + 200].lstrip()[:1]
+            if last not in "=,(+-*/&|?:<>.[{" \
                     and (not ahead or ahead not in ".?:|&=,)>"):
                 end()
         if not c.isspace():
@@ -2928,6 +2989,135 @@ def existing_contracts() -> list[str]:
             if modules:
                 lines += python_declarations(shown.stdout, modules[0])
     return lines
+
+
+def head_sources(paths: list[str]) -> dict[str, str]:
+    """`paths` のうち、最後のコミットにあるファイルの中身。無いものは入れない。"""
+    sources = {}
+    for path in paths:
+        shown = run(["git", "show", f"HEAD:{path}"])
+        if shown.returncode == 0:
+            sources[path] = shown.stdout
+    return sources
+
+
+# export の有無を問わない。provides は export を求めるが、既存のファイルでは
+# export していない同じ名前の宣言を差し替えることもある。
+TS_DECLARED = re.compile(
+    r"^(?:export\s+)?(?:declare\s+)?(?:default\s+)?(?:abstract\s+)?(?:async\s+)?"
+    r"(?:function\*?|class|interface|type|enum|const|let|var)\s+([A-Za-z_$][\w$]*)")
+
+
+def ts_declared_names(flat: str) -> list[str]:
+    """1つの文が宣言する名前すべて。`const a = 1, b = 2` なら a と b。"""
+    match = TS_DECLARED.match(flat)
+    if not match:
+        return []
+    names = [match.group(1)]
+    if re.match(r"(?:export\s+)?(?:declare\s+)?(?:const|let|var)\b", flat):
+        depth = 0
+        for i, c in enumerate(flat):
+            if c in "({[":
+                depth += 1
+            elif c in ")}]":
+                depth -= 1
+            elif c == "," and depth == 0:
+                more = re.match(r"\s*([A-Za-z_$][\w$]*)\s*[:=]", flat[i + 1:])
+                if more:
+                    names.append(more.group(1))
+    return names
+
+
+def ts_merge_stub(original: str, pieces: dict[str, str]) -> tuple[str, str] | None:
+    """既存のファイルの、名前ごとの宣言だけをスタブの宣言に差し替える。
+
+    返すのは (差し替えた全文, 差し替えなかった部分)。後者は、import を足すか
+    どうかを決めるのに使う。ファイルにまだ無い名前は末尾に足す。1つの文が2つ
+    以上の名前を宣言している（`export const a = 1, b = 2`）なら、1つだけを
+    差し替えると残りが消えるので None を返し、ソルバーに回す。
+    """
+    spans: dict[str, tuple[int, int]] = {}
+    for start, stop, statement in ts_statement_spans(original):
+        names = ts_declared_names(" ".join(statement.split()))
+        if not any(name in pieces for name in names):
+            continue
+        if len(names) > 1:
+            return None
+        if names[0] not in spans:
+            spans[names[0]] = (start, stop)
+    text, rest = original, original
+    for name, (start, stop) in sorted(spans.items(), key=lambda kv: -kv[1][0]):
+        text = text[:start] + pieces[name] + text[stop:]
+        rest = rest[:start] + rest[stop:]
+    added = [piece for name, piece in pieces.items() if name not in spans]
+    if added:
+        text = text.rstrip() + chr(10) * 2 + chr(10).join(added) + chr(10)
+    return text, rest
+
+
+def top_level_units(text: str, path: str, provided: set[str]) -> dict[str, str] | None:
+    """ファイルの最上位の文のうち、`provided` の名前を宣言しないものの一覧。
+
+    キーは比べるための形、値は人に見せる1行目。import は入れない。スタブは新しい
+    型のために import を足すことがあり、足りない import はコンパイルで必ず分かる。
+    Python は ast.dump で比べるので、空白とコメントの違いは数えない。読めなければ
+    None。
+    """
+    units: dict[str, str] = {}
+    if path.endswith(".py"):
+        try:
+            tree = ast.parse(text)
+        except SyntaxError:
+            return None
+        for node in tree.body:
+            if isinstance(node, (ast.Import, ast.ImportFrom)):
+                continue
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                names = {node.name}
+            elif isinstance(node, ast.Assign):
+                names = {t.id for t in node.targets if isinstance(t, ast.Name)}
+            elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+                names = {node.target.id}
+            else:
+                names = set()
+            if names and names <= provided:
+                continue
+            units[ast.dump(node)] = ast.unparse(node).splitlines()[0][:100]
+        return units
+    for _, _, statement in ts_statement_spans(text):
+        # 末尾の `;` は、あっても無くても同じ文だ。
+        flat = " ".join(statement.split()).rstrip(";").rstrip()
+        if flat.startswith("import "):
+            continue
+        # 名前の一部だけを提供する文は、差し替えれば必ず変わるので比べる側に残す。
+        names = ts_declared_names(flat)
+        if names and set(names) <= provided:
+            continue
+        units[flat] = flat[:100]
+    return units
+
+
+def stub_kept_the_rest(step: dict, originals: dict[str, str]) -> list[str]:
+    """既存のファイルで、スタブが provides の名前のほかを変えていないこと。
+
+    スタブが変えてよいのは、このステップが提供する名前の宣言だけだ。ほかの関数を
+    消せば、それを使う既存のテストが VERIFY で落ちる。そのときには、どの位相の
+    誰が消したのかがもう分からない。だからここで、書いた直後に比べる。
+    """
+    provided = {declared_name(p) for p in step["contracts"]["provides"]}
+    problems = []
+    for path, before in sorted(originals.items()):
+        target = PROJECT / path
+        after = target.read_text(encoding="utf-8") if target.is_file() else ""
+        kept_before = top_level_units(before, path, provided) or {}
+        kept_after = top_level_units(after, path, provided)
+        if kept_after is None:
+            problems.append(f"{path}: no longer parses")
+            continue
+        for key, label in kept_before.items():
+            if key not in kept_after:
+                problems.append(f"{path}: changed or removed: {label}")
+    return problems
 
 
 def environment_facts() -> str:
@@ -4245,9 +4435,12 @@ def run_step(step_id: str, unvalidated: bool = False) -> int:
 
             # --- STUB ---------------------------------------------------
             set_writable(tests=False, src=True)
-            written = generate_stub(step, dep_contract_lines(step))
+            # 既存のファイルは、provides の名前だけを差し替える。丸ごと書き直すと、
+            # ステップに関係の無い関数まで消える。
+            originals = head_sources(step["files_write"])
+            written = generate_stub(step, dep_contract_lines(step), originals)
             if written is None:
-                call_solver("STUB", brief_stub(step))
+                call_solver("STUB", brief_stub(step, sorted(originals)))
                 ledger("STUB", step=step_id, ok=True, by="solver")
             else:
                 for rel, text in written.items():
@@ -4258,6 +4451,11 @@ def run_step(step_id: str, unvalidated: bool = False) -> int:
                        files=sorted(written))
             assert_touched("STUB", step["files_test"] + step["files_write"])
             assert_written("STUB", step["files_write"])
+            changed = stub_kept_the_rest(step, originals)
+            if changed:
+                raise Halt("STUB",
+                           "the stub changed existing code outside the names this "
+                           "step provides", "\n".join(changed))
 
             red = pytest_run(f"red-{write_attempt}", step["files_test"])
             broken = chr(10).join(k for k in red.failure_kinds

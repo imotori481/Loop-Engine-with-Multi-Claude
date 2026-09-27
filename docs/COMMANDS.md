@@ -170,7 +170,7 @@ git push origin <pr-branch>
 - 自前の `conftest.py`、`index.html`、`vitest.config.mjs` があると、プロビジョニングは上書きせずに止まる
 - `.gitignore` に `node_modules/` があると `35-node.sh` が止まる
 - 依存パッケージは入らない。箱にあるのは pytest と vitest だけだ
-- スタブは `files_write` のファイルを丸ごと上書きする。要件は、新しいファイルを足す形で書く
+- 既存のファイルでは、スタブは計画が挙げた名前の宣言だけを差し替える。既存のテストは凍結されるので、振る舞いを変えるとそのテストが回帰として落ちる
 
 ## 見る
 

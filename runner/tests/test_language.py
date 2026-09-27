@@ -599,6 +599,178 @@ class TheRunnerWritesTheStub(Language):
              "contracts": {"provides": ["src/pkg/a.py: def f() -> int"]}}, []))
 
 
+EXISTING_TS = '''import { Board } from "./board";
+
+/** 盤面の点数。 */
+export function score(board: Board): number {
+  return board.cells.length;
+}
+
+function helper(n: number): number {
+  return n + 1;
+}
+
+export const LIMIT = 10;
+'''
+
+
+class TheStubKeepsTheExistingCode(Language):
+    """既存のファイルでは、provides の名前だけをスタブに差し替える。
+
+    スタブはファイルを丸ごと書き直していた。既存のファイルを files_write に
+    入れると、ステップに関係の無い関数まで消える。
+    """
+
+    STEP = {"files_write": ["src/game/rules.ts"],
+            "contracts": {"provides": [
+                "src/game/rules.ts: function score(board: Board): number",
+                "src/game/rules.ts: function bonus(board: Board): number"]}}
+
+    def build(self, original=EXISTING_TS):
+        self.speak("typescript")
+        return loop.generate_stub(
+            self.STEP, ["src/game/board.ts: interface Board { cells: number[] }"],
+            {"src/game/rules.ts": original})["src/game/rules.ts"]
+
+    def test_only_the_provided_declaration_is_replaced(self):
+        text = self.build()
+        self.assertIn("function helper(n: number): number {\n  return n + 1;\n}", text)
+        self.assertIn("export const LIMIT = 10;", text)
+        self.assertIn("/** 盤面の点数。 */", text)
+        self.assertNotIn("board.cells.length", text)
+        self.assertIn("export function score(board: Board): number {\n  return -999999;\n}",
+                      text)
+
+    def test_a_name_the_file_lacks_goes_at_the_end(self):
+        text = self.build()
+        self.assertTrue(text.rstrip().endswith(
+            "export function bonus(board: Board): number {\n  return -999999;\n}"))
+
+    def test_a_name_already_imported_is_not_imported_again(self):
+        # 同じ名前を2度 import すると、esbuild はファイルごと拒む。
+        self.assertEqual(self.build().count("import { Board }"), 1)
+
+    def test_a_name_not_yet_imported_is_imported(self):
+        text = self.build(EXISTING_TS.replace('import { Board } from "./board";\n', ""))
+        self.assertTrue(text.startswith('import { Board } from "./board";'))
+
+    def test_the_result_passes_the_runner_s_own_check(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "src/game/rules.ts"
+            path.parent.mkdir(parents=True)
+            path.write_text(self.build(), encoding="utf-8")
+            with patch.object(loop, "PROJECT", Path(temp)):
+                self.assertEqual(loop.stub_kept_the_rest(
+                    self.STEP, {"src/game/rules.ts": EXISTING_TS}), [])
+
+    def test_one_statement_declaring_two_names_goes_back_to_the_solver(self):
+        self.speak("typescript")
+        step = {"files_write": ["src/m.ts"],
+                "contracts": {"provides": ["src/m.ts: const A: number",
+                                           "src/m.ts: const B: number"]}}
+        self.assertIsNone(loop.generate_stub(
+            step, [], {"src/m.ts": "export const A = 1, B = 2;\n"}))
+
+    def test_a_new_file_is_written_whole_as_before(self):
+        self.speak("typescript")
+        text = loop.generate_stub(
+            {"files_write": ["src/m.ts"],
+             "contracts": {"provides": ["src/m.ts: function f(): number"]}},
+            [], {})["src/m.ts"]
+        self.assertEqual(text, "export function f(): number {\n  return -999999;\n}\n")
+
+    def test_the_spans_point_at_the_statements(self):
+        text = "// head\nexport const A = 1;\n\nexport function f() {\n  return 1;\n}\n"
+        spans = loop.ts_statement_spans(text)
+        self.assertEqual([text[a:b] for a, b, _ in spans],
+                         ["export const A = 1;", "export function f() {\n  return 1;\n}"])
+
+
+PYTHON_BEFORE = '''"""ルール。"""
+from game.board import Board
+
+LIMIT = 10
+
+
+def score(board: Board) -> int:
+    return len(board.cells)
+
+
+def helper(n: int) -> int:
+    return n + 1
+'''
+
+
+class TheRunnerChecksWhatTheStubLeftAlone(unittest.TestCase):
+    """ソルバーが書いたスタブでも、provides の外が HEAD と同じかを確かめる。
+
+    消えた関数は、それを使う既存のテストを VERIFY で落とす。そのときには、どの
+    位相の誰が消したのかがもう分からない。
+    """
+
+    STEP = {"contracts": {"provides": ["def score(board: Board) -> int -- defined in game.rules"]}}
+
+    def check(self, after, path="src/game/rules.py", before=PYTHON_BEFORE, step=None):
+        with tempfile.TemporaryDirectory() as temp:
+            target = Path(temp) / path
+            target.parent.mkdir(parents=True)
+            target.write_text(after, encoding="utf-8")
+            with patch.object(loop, "PROJECT", Path(temp)):
+                return loop.stub_kept_the_rest(step or self.STEP, {path: before})
+
+    def test_replacing_only_the_provided_body_passes(self):
+        after = PYTHON_BEFORE.replace("return len(board.cells)", "return -999999")
+        self.assertEqual(self.check(after), [])
+
+    def test_whitespace_comments_and_a_new_import_are_not_changes(self):
+        after = ("from game.extra import Extra\n"
+                 + PYTHON_BEFORE.replace("def helper(n: int) -> int:",
+                                         "# 補助\ndef helper(n: int)  ->  int:"))
+        self.assertEqual(self.check(after), [])
+
+    def test_a_changed_function_outside_the_step_is_named(self):
+        after = PYTHON_BEFORE.replace("return n + 1", "return n + 2")
+        self.assertEqual(self.check(after),
+                         ["src/game/rules.py: changed or removed: def helper(n: int) -> int:"])
+
+    def test_a_removed_function_is_named(self):
+        after = PYTHON_BEFORE.split("def helper")[0]
+        self.assertEqual(len(self.check(after)), 1)
+        self.assertIn("def helper", self.check(after)[0])
+
+    def test_a_file_that_no_longer_parses_is_reported(self):
+        self.assertEqual(self.check("def score(:\n"), ["src/game/rules.py: no longer parses"])
+
+    def test_a_name_that_shared_a_statement_with_the_provided_one_is_not_lost(self):
+        # `const A = 1, C = 2` の A だけを差し替えると C が消える。文を A のものと
+        # して飛ばすと、それを見逃す。
+        step = {"contracts": {"provides": ["src/m.ts: const A: number"]}}
+        problems = self.check("export const A: number = -999999;\n", "src/m.ts",
+                              "export const A = 1, C = 2;\n", step)
+        self.assertEqual(problems, ["src/m.ts: changed or removed: export const A = 1, C = 2"])
+
+    def test_typescript_is_checked_the_same_way(self):
+        step = {"contracts": {"provides": ["src/game/rules.ts: function score(board: Board): number"]}}
+        after = EXISTING_TS.replace("return n + 1;", "return n;")
+        problems = self.check(after, "src/game/rules.ts", EXISTING_TS, step)
+        self.assertEqual(len(problems), 1)
+        self.assertIn("function helper(n: number): number", problems[0])
+
+
+class TheSolverIsToldTheFileExists(unittest.TestCase):
+    STEP = {"files_write": ["src/game/rules.py"],
+            "contracts": {"provides": ["def score(board: Board) -> int -- defined in game.rules"]}}
+
+    def test_an_existing_file_is_named_with_what_to_leave_alone(self):
+        brief = loop.brief_stub(self.STEP, ["src/game/rules.py"])
+        self.assertIn("# These files already exist\nsrc/game/rules.py", brief)
+        self.assertIn("Leave every other line exactly", brief)
+        self.assertIn("stops the step", brief)
+
+    def test_a_step_with_only_new_files_is_not_told(self):
+        self.assertNotIn("already exist", loop.brief_stub(self.STEP))
+
+
 class TheExistingCodeReachesTheSolver(unittest.TestCase):
     """requires が名指しした既存の宣言は、依存先の契約と一緒にソルバーへ届く。
 
