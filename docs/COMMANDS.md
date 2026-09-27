@@ -43,7 +43,7 @@ PowerShell なら `.\host\loop.cmd <args>`、Git Bash なら `./host/loop.cmd <a
 | `<unity-project-dir>` | Unity で開いたことのあるプロジェクトのディレクトリ。`Assembly-CSharp.csproj` があるところ |
 | `<tests-dir>` | ソルバーがテストを書くディレクトリ。`<src-dir>` を含まず、`<src-dir>` に含まれない場所 |
 | `<you>` | Windows のユーザー名 |
-| `<mirror-dir>` | `loop-pull` が写したプロジェクトのディレクトリ。`plan\` があるところ |
+| `<mirror-dir>` | `loop-pull` が写したプロジェクトのディレクトリ |
 | `<port>` | ダッシュボードが待ち受けるポート。既定は 8443 |
 
 ## 走らせる（ホストでも箱でも）
@@ -206,7 +206,8 @@ git push origin <pr-branch>
 
 起動したら <http://127.0.0.1:8443> を開く。`config.json` が無くても進捗の画面は使える。
 
-`loop-dashboard` は写しが無いと起動しない。初回は先に `loop-pull` を流す。
+`loop-dashboard` は写しのディレクトリが無いと起動しない。初回は先に `loop-pull` を流す。計画がまだ
+無いあいだは、「いまの作業」と「ステップ」だけが埋まる。
 
 「いまの作業」は5秒ごとに `ssh loop-dev loop now` を `BatchMode=yes` で流す。鍵にパスフレーズが
 あるなら、先に ssh-agent に載せておく。
