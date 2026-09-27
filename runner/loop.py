@@ -3204,6 +3204,18 @@ it stands, and needs no step to provide it (L3). If a step of this plan
 provides the same name, that step changes it: a step that uses the name then
 depends on that step instead.
 
+To change one of these, a step lists its file in `files_write` and the name in
+`contracts.provides`. Its stub replaces only the names in `provides`; every
+other declaration in the file keeps its real, working code while the tests
+first run. So a criterion that is already true because of code the step does
+not change passes against the stub, and RED_GATE stops the step (R4). Write
+each criterion so that it calls a name this step provides and fails until
+that name is written.
+
+Do not write criteria to show that the rest still works. The tests already in
+the repository run on every step, and a step that breaks one of them is not
+green. That is how unchanged behaviour is kept.
+
 """ + "\n".join(f"    {line}" for line in existing) + "\n"
 
     # テストが何に届くかを決めるファイル。言語ごとに名前は違うが仕事は同じで、

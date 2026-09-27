@@ -317,6 +317,17 @@ class WhatTheCodeAlreadyDeclares(unittest.TestCase):
         self.assertIn("puts that line in `contracts.requires`", facts)
         self.assertIn("depends on that step instead", facts)
 
+    def test_the_planner_is_told_criteria_about_unchanged_code_stop_at_r4(self):
+        # スタブが替えるのは provides の名前だけで、ほかの宣言は本物のまま動く。
+        # 書き換えない関数で満たされる条件は、スタブに対して通って R4 で止まる。
+        facts = self.facts(["def f(x: int) -> int -- defined in pkg.mod"])
+        self.assertIn("keeps its real, working code", facts)
+        self.assertIn("RED_GATE stops the step (R4)", facts)
+        self.assertIn("calls a name this step provides", facts)
+        # 変えない振る舞いは、条件ではなく既存のテストが守る。
+        self.assertIn("Do not write criteria to show that the rest still works", facts)
+        self.assertIn("The tests already in\nthe repository run on every step", facts)
+
     def test_a_new_project_is_not_told_about_code_it_does_not_have(self):
         self.assertNotIn("What the code already declares", self.facts([]))
 
