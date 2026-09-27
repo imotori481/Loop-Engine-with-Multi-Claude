@@ -333,9 +333,18 @@ namespace Logic
                     {"files_write": ["src/Logic/Board.cs"],
                      "contracts": {"provides": provides}}, [], {}))
 
-    def test_an_existing_file_goes_back_to_the_solver_for_now(self):
+    def test_an_existing_file_without_the_type_goes_back_to_the_solver(self):
         self.assertIsNone(loop.generate_stub(
             self.STEP, [], {"src/Logic/Board.cs": "namespace Logic { }"}))
+
+    def test_a_namespace_stated_on_a_required_line_is_used(self):
+        # 既存のファイルは、フォルダと違う名前空間を持ちうる。
+        step = {"files_write": ["src/Rules/Scorer.cs"],
+                "contracts": {"provides": ["src/Rules/Scorer.cs: static int Scorer.Total(Board board)"]}}
+        text = loop.generate_stub(
+            step, ["src/Logic/Board.cs: class Board -- namespace Game.Core"], {})["src/Rules/Scorer.cs"]
+        self.assertIn("using Game.Core;\n", text)
+        self.assertNotIn("using Logic;", text)
 
     def test_a_folder_that_is_not_a_namespace_goes_back_to_the_solver(self):
         self.assertIsNone(loop.generate_stub(
@@ -354,6 +363,243 @@ namespace Logic
         self.assertIn('throw new System.NotImplementedException("__stub__");', brief)
         self.assertIn("Do not return values", brief)
         self.assertNotIn("THERE IS NO WRONG BOOLEAN", brief)
+
+
+EXISTING_CS = '''﻿using System;
+
+namespace Game.Logic
+{
+    /// <summary>盤面。</summary>
+    [Serializable]
+    public class Board
+    {
+        private int width = 3;
+        public int Width => width;
+        public int Height { get; private set; }
+        public const string Brace = "}{";
+        public static readonly Board Empty = new Board(0, 0);
+
+        public Board(int width, int height)
+        {
+            this.width = width; Height = height;
+        }
+
+        public static int Score(Board board)
+        {
+            var s = $"{board.Width}}}{{ {(board.Height > 0 ? "}" : "{")}";
+            var v = @"a""}";
+            var c = '{';
+            // {
+            /* } */
+            return board.Width * board.Height;
+        }
+
+        public int Area() => Width * Height;
+
+#if UNITY_EDITOR
+        public void Gizmo() { Debug.Log("x"); }
+#else
+        public void Runtime() { }
+#endif
+
+        public int Helper(int n) { return n + 1; }
+    }
+
+    public interface IShape { int Area(); }
+    public enum Cell { Empty, Wall }
+    internal class Hidden { public void X() { } }
+}
+'''
+
+
+class WhatTheCodeAlreadyDeclares(CSharp):
+    """取り込んだ C# のファイルの public な宣言を、契約の書式で渡す。
+
+    C# の宣言は型の中にあるので、型の行とメンバーの行に分ける。名前空間は
+    フォルダと違いうるので、行の末尾に書く。
+    """
+
+    def setUp(self):
+        super().setUp()
+        p = mock.patch.object(loop, "UNITY_REFS", Path("/nonexistent/unity-refs"))
+        p.start()
+        self.addCleanup(p.stop)
+
+    def test_public_types_and_members_are_listed_with_their_namespace(self):
+        at, where = "src/Logic/Board.cs: ", " -- namespace Game.Logic"
+        self.assertEqual(loop.csharp_declarations(EXISTING_CS, "src/Logic/Board.cs"), [
+            at + "class Board" + where,
+            at + "int Board.Width { get; }" + where,
+            at + "int Board.Height { get; }" + where,
+            at + "const string Board.Brace" + where,
+            at + "static readonly Board Board.Empty" + where,
+            at + "Board.Board(int width, int height)" + where,
+            at + "static int Board.Score(Board board)" + where,
+            at + "int Board.Area()" + where,
+            at + "void Board.Runtime()" + where,
+            at + "int Board.Helper(int n)" + where,
+            at + "interface IShape { int Area(); }" + where,
+            at + "enum Cell { Empty, Wall }" + where,
+        ])
+
+    def test_code_the_build_leaves_out_is_not_listed(self):
+        # Unity の参照は UNITY_EDITOR を定義しない。テストからは呼べない。
+        lines = loop.csharp_declarations(EXISTING_CS, "src/Logic/Board.cs")
+        self.assertFalse(any("Gizmo" in line for line in lines))
+        self.assertFalse(any("Hidden" in line for line in lines))
+
+    def test_each_line_declares_the_name_requires_uses(self):
+        for line, name in (("src/B.cs: int Board.Width { get; } -- namespace Game.Logic", "Board.Width"),
+                           ("src/B.cs: const string Board.Brace -- namespace Game.Logic", "Board.Brace"),
+                           ("src/B.cs: T Board.Get<T>() -- namespace Game.Logic", "Board.Get"),
+                           ("src/B.cs: class Board -- namespace Game.Logic", "Board")):
+            with self.subTest(line=line):
+                self.assertEqual(loop.declared_name(line), name)
+
+    def test_the_condition_follows_the_symbols_of_the_build(self):
+        text = "#if !UNITY_EDITOR && (DEBUG || FOO)\npublic class A { }\n#elif true\npublic class B { }\n#endif\n"
+        self.assertEqual(loop.csharp_declarations(text, "src/A.cs"), ["src/A.cs: class A"])
+
+    def test_a_file_that_cannot_be_read_gives_nothing(self):
+        for text in ("#if DEBUG\npublic class A { }\n", "public class A { /* }\n",
+                     "namespace A;\npublic class B { }\n"):
+            with self.subTest(text=text):
+                self.assertEqual(loop.csharp_declarations(text, "src/A.cs"), [])
+
+    def test_existing_contracts_reads_the_c_sharp_files(self):
+        files = {"src/Logic/Cell.cs": "namespace Logic { public enum Cell { Empty } }\n",
+                 "src/Logic/Cell.cs.meta": "guid: 1\n"}
+
+        def run(cmd, **_):
+            if cmd[1] == "ls-tree":
+                return SimpleNamespace(returncode=0, stderr="", stdout="\0".join(files) + "\0")
+            return SimpleNamespace(returncode=0, stderr="", stdout=files[cmd[2].split(":", 1)[1]])
+
+        with mock.patch("loop.run", side_effect=run), \
+             mock.patch.dict(loop.LAYOUT, loop.LAYOUT_DEFAULT):
+            self.assertEqual(loop.existing_contracts(),
+                             ["src/Logic/Cell.cs: enum Cell { Empty } -- namespace Logic"])
+
+
+class TheStubKeepsTheExistingCSharp(CSharp):
+    """既存のファイルでは、provides のメンバーの本体だけを差し替える。"""
+
+    PATH = "src/Logic/Board.cs"
+
+    def setUp(self):
+        super().setUp()
+        for p in (mock.patch.dict(loop.LAYOUT, loop.LAYOUT_DEFAULT),
+                  mock.patch.object(loop, "UNITY_REFS", Path("/nonexistent/unity-refs"))):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def build(self, *provides, requires=(), original=EXISTING_CS):
+        step = {"files_write": [self.PATH],
+                "contracts": {"provides": [f"{self.PATH}: {p}" for p in provides]}}
+        files = loop.generate_stub(step, list(requires), {self.PATH: original})
+        return step, files and files[self.PATH]
+
+    def test_only_the_body_of_the_provided_method_is_replaced(self):
+        _, text = self.build("static int Board.Score(Board board)")
+        self.assertIn("public static int Score(Board board)\n"
+                      '        { throw new System.NotImplementedException("__stub__"); }', text)
+        self.assertNotIn("board.Width * board.Height", text)
+        for kept in ("/// <summary>盤面。</summary>", "[Serializable]",
+                     "public int Helper(int n) { return n + 1; }",
+                     'public void Gizmo() { Debug.Log("x"); }', "#if UNITY_EDITOR"):
+            self.assertIn(kept, text)
+        self.assertTrue(text.startswith("﻿using System;\n"))
+
+    def test_an_expression_body_becomes_the_same_throw(self):
+        _, text = self.build("int Board.Area()", "int Board.Width { get; }")
+        self.assertIn('public int Area() { throw new System.NotImplementedException("__stub__"); }',
+                      text)
+        self.assertIn('public int Width => throw new System.NotImplementedException("__stub__");',
+                      text)
+
+    def test_a_constructor_and_an_auto_property(self):
+        _, text = self.build("Board.Board(int width, int height)", "int Board.Height { get; }")
+        self.assertIn("public Board(int width, int height)\n"
+                      '        { throw new System.NotImplementedException("__stub__"); }', text)
+        # 自動プロパティは値を持つだけで、差し替える振る舞いが無い。
+        self.assertIn("public int Height { get; private set; }", text)
+
+    def test_a_member_the_type_lacks_goes_at_its_end_with_its_using(self):
+        _, text = self.build("int Board.Apply(Rule rule)",
+                             requires=["src/Rules/Rule.cs: class Rule -- namespace Game.Rules"])
+        self.assertIn("        public int Helper(int n) { return n + 1; }\n\n"
+                      '        public int Apply(Rule rule) { throw new System.NotImplementedException("__stub__"); }\n'
+                      "    }\n", text)
+        self.assertIn("using System;\nusing Game.Rules;\n", text)
+
+    def test_a_using_is_not_added_when_nothing_new_names_it(self):
+        _, text = self.build("int Board.Area()",
+                             requires=["src/Rules/Rule.cs: class Rule -- namespace Game.Rules"])
+        self.assertNotIn("using Game.Rules;", text)
+
+    def test_a_changed_signature_goes_back_to_the_solver(self):
+        _, text = self.build("static int Board.Score(Board board, int bonus)")
+        self.assertIsNone(text)
+
+    def test_a_type_line_that_does_not_match_goes_back_to_the_solver(self):
+        self.assertIsNone(self.build("struct Board { }")[1])
+        self.assertIsNone(self.build("enum Cell { Empty, Wall, Door }")[1])
+
+    def test_the_result_passes_the_runner_s_own_check(self):
+        step, text = self.build("static int Board.Score(Board board)", "int Board.Area()",
+                                "int Board.Width { get; }", "int Board.Apply(int rule)")
+        self.assertEqual(kept_the_rest(text, step), [])
+
+
+def kept_the_rest(after: str, step: dict) -> list[str]:
+    """EXISTING_CS を after に書き換えたときの stub_kept_the_rest。"""
+    with tempfile.TemporaryDirectory() as temp, \
+         mock.patch.object(loop, "UNITY_REFS", Path("/nonexistent/unity-refs")):
+        target = Path(temp) / "src/Logic/Board.cs"
+        target.parent.mkdir(parents=True)
+        target.write_text(after, encoding="utf-8")
+        with mock.patch.object(loop, "PROJECT", Path(temp)):
+            return loop.stub_kept_the_rest(step, {"src/Logic/Board.cs": EXISTING_CS})
+
+
+class TheRunnerChecksEachMember(CSharp):
+    """C# の比べる単位は型の頭とメンバー。クラスを1つの単位にすると、1つの
+    メソッドの差し替えでクラス全体が変わったことになる。"""
+
+    STEP = {"contracts": {"provides": ["src/Logic/Board.cs: static int Board.Score(Board board)"]}}
+
+    def check(self, after):
+        return kept_the_rest(after, self.STEP)
+
+    def test_replacing_the_provided_body_passes(self):
+        after = EXISTING_CS.replace("return board.Width * board.Height;", "return -1;")
+        self.assertEqual(self.check(after), [])
+
+    def test_comments_whitespace_and_a_new_using_are_not_changes(self):
+        after = ("using Game.Rules;\n"
+                 + EXISTING_CS.replace("public int Helper(int n) { return n + 1; }",
+                                       "// 補助\n        public int Helper(int n)\n        { return n + 1; }"))
+        self.assertEqual(self.check(after), [])
+
+    def test_another_method_of_the_same_class_is_named(self):
+        after = EXISTING_CS.replace("return n + 1;", "return n + 2;")
+        self.assertEqual(self.check(after), [
+            "src/Logic/Board.cs: changed or removed: public int Helper(int n) { return n + 1; }"])
+
+    def test_code_the_build_leaves_out_is_still_compared(self):
+        # UNITY_EDITOR の中は、テストでは動かないが Unity のエディタでは動く。
+        after = EXISTING_CS.replace('Debug.Log("x")', 'Debug.Log("y")')
+        self.assertEqual(self.check(after), [
+            'src/Logic/Board.cs: changed or removed: public void Gizmo() { Debug.Log("x"); }'])
+
+    def test_a_changed_type_head_is_named(self):
+        after = EXISTING_CS.replace("public class Board\n", "public class Board : IShape\n")
+        self.assertEqual(len(self.check(after)), 1)
+        self.assertIn("public class Board", self.check(after)[0])
+
+    def test_a_file_that_no_longer_parses_is_reported(self):
+        self.assertEqual(self.check("namespace A { public class B {"),
+                         ["src/Logic/Board.cs: no longer parses"])
 
 
 class WhatThePlannerIsTold(CSharp):

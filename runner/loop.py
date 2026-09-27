@@ -803,7 +803,7 @@ underscores only. Name it after the criterion in PascalCase with underscores
 """,
         "provides_pattern": re.compile(
             r"\b(?:class|struct|enum|interface)\s+([A-Za-z_]\w*)"
-            r"|([A-Za-z_]\w*\.[A-Za-z_]\w*)\s*(?:\(|\{|;|=|$)"),
+            r"|([A-Za-z_]\w*\.[A-Za-z_]\w*)\s*(?:\(|\{|;|=|$|--|<)"),
         # 型の後ろ、名前の前に型を書くので、":" や "->" の後ろを見る ANNOTATION は
         # 使えない。語の境目で、裸のコンテナ型を探す。
         "shape_pattern": re.compile(
@@ -840,7 +840,8 @@ One public type per file, and the file is named after the type
 (`Board.cs` holds `Board`). Unity requires this of every MonoBehaviour and it
 costs nothing elsewhere. A new file's namespace follows its folder under {SRC}/
 (`{SRC}/Logic/Board.cs` -> `namespace Logic`). A file that already exists keeps
-the namespace it has.
+the namespace it has: a declaration read from it ends in `-- namespace <name>`,
+and code that uses it writes `using <name>;`.
 
 Tests use NUnit 3: `using NUnit.Framework;`, a public class with `[Test]`
 methods, and `Assert.AreEqual(expected, actual)` or `Assert.That(actual,
@@ -1800,7 +1801,8 @@ def parse_contracts(lines: list[str]) -> list[dict] | None:
 # C# のスタブの本体。番兵の値は使わない。bool には誤った値が無く、文字列を
 # キャストして押し込む手は InvalidCastException になる（実測）。どの型にも同じ
 # 1行で済み、R5 はこの印の付いた例外だけを赤と認める（csharp_failure_kind）。
-CSHARP_STUB_BODY = '{ throw new System.NotImplementedException("__stub__"); }'
+CSHARP_STUB_EXPRESSION = 'throw new System.NotImplementedException("__stub__")'
+CSHARP_STUB_BODY = "{ " + CSHARP_STUB_EXPRESSION + "; }"
 CSHARP_STUB_MARK = re.compile(r"^\s*System\.NotImplementedException\s*:\s*__stub__\s*$")
 CSHARP_ACCESS = re.compile(r"^(?:public|internal|protected|private)\b")
 CSHARP_MODIFIERS = r"(?:(?:public|internal|protected|private|static|abstract|sealed|partial|readonly|virtual|override|new)\s+)*"
@@ -1878,12 +1880,11 @@ def generate_csharp_stub(step: dict, requires: list[str],
     """C# のスタブを契約から書く。None ならソルバーに頼む。
 
     メソッドとコンストラクタの本体は CSHARP_STUB_BODY。フィールドと自動プロパティは
-    宣言のまま残す（値を持つだけで、振る舞いが無い）。読めない行が1つでもあれば、
-    既存のファイルがあれば（書き換えは別の作業）、None。
+    宣言のまま残す（値を持つだけで、振る舞いが無い）。既存のファイルは
+    csharp_merge_stub がメンバーの本体だけを差し替える。読めない行が1つでもあれば
+    None。
     """
-    if any(path in originals for path in step["files_write"]):
-        return None
-    types: dict[str, dict] = {}     # 型の名前 -> {path, head, members}
+    types: dict[str, dict] = {}     # 型の名前 -> {path, head, members, specs}
     order: list[str] = []
     for line in step["contracts"]["provides"]:
         match = re.match(r"^([\w./-]+\.cs)\s*:\s*(.+)$",
@@ -1899,12 +1900,13 @@ def generate_csharp_stub(step: dict, requires: list[str],
             mods = declared.group("mods").strip()
             if not CSHARP_ACCESS.match(mods):
                 mods = ("public " + mods).strip()
-            entry = types.setdefault(name, {"path": path, "members": []})
+            entry = types.setdefault(name, {"path": path, "members": [], "specs": []})
             if entry["path"] != path or "head" in entry:
                 return None
             entry["head"] = f"{mods} {kind} {name}{declared.group('bases') or ''}".rstrip()
             entry["kind"] = kind
-            body = declared.group("body") or ""
+            entry["bases"] = declared.group("bases") or ""
+            body = entry["body"] = declared.group("body") or ""
             if kind == "enum":
                 entry["members"].append(body.strip())
             elif kind == "interface":
@@ -1912,6 +1914,7 @@ def generate_csharp_stub(step: dict, requires: list[str],
                                      for m in csharp_members(body)]
             else:
                 entry["members"] += [csharp_stub_member(m) for m in csharp_members(body)]
+                entry["specs"] += csharp_members(body)
             if name not in order:
                 order.append(name)
             continue
@@ -1926,40 +1929,71 @@ def generate_csharp_stub(step: dict, requires: list[str],
                     f"{member.group('rest') or ''}")
         else:
             return None
-        entry = types.setdefault(owner, {"path": path, "members": []})
+        entry = types.setdefault(owner, {"path": path, "members": [], "specs": []})
         if entry["path"] != path:
             return None
         entry["members"].append(csharp_stub_member(text.strip()))
+        entry["specs"].append(text.strip())
         if owner not in order:
             order.append(owner)
 
     if {t["path"] for t in types.values()} != set(step["files_write"]):
         return None
 
-    # 型の宣言の行が無いメンバーは、普通のクラスに入れる。
-    for entry in types.values():
-        entry.setdefault("head", "public class " + next(
-            name for name, e in types.items() if e is entry))
+    # 型の宣言の行が無いメンバーは、普通のクラスに入れる。既存のファイルでは、
+    # 型の行があったか（typed）で、型の頭を確かめるかどうかを分ける。
+    for name, entry in types.items():
+        entry["name"] = name
+        entry["typed"] = "head" in entry
+        entry.setdefault("head", "public class " + name)
         entry.setdefault("kind", "class")
 
+    # 名前空間。既存のファイルは今の名前空間を保つ（layout_note）。requires の行は
+    # `-- namespace X` を持てばそれ、無ければ作業ツリーのファイル、それも無ければ
+    # フォルダから決める。前のステップが書き換えた既存のファイルの行は、名前空間を
+    # 持たないが作業ツリーにある。
     namespaces: dict[str, str] = {}
-    for path in set(step["files_write"]) | {
-            m.group(1) for line in requires
-            if (m := re.match(r"^([\w./-]+\.cs)\s*:", line.strip()))}:
-        ns = csharp_namespace(path)
-        if ns is None and path in step["files_write"]:
-            return None
-        if ns:
-            namespaces[path] = ns
+    known: dict[str, str] = {}      # 型の名前 -> 名前空間。既存のファイルの using に使う
+    for path in step["files_write"]:
+        if path in originals:
+            outline = csharp_outline(originals[path])
+            ns = outline["types"][0]["namespace"] if outline and outline["types"] else ""
+        else:
+            ns = csharp_namespace(path)
+            if ns is None:
+                return None
+        namespaces[path] = ns
+        known.update({name: ns for name in order if types[name]["path"] == path})
+    for line in requires:
+        m = re.match(r"^([\w./-]+\.cs)\s*:", line.strip())
+        if not m:
+            continue
+        stated = re.search(r" -- namespace ([\w.]+)\s*$", line)
+        if stated:
+            ns = stated.group(1)
+        elif m.group(1) in namespaces:
+            ns = namespaces[m.group(1)]
+        else:
+            ns = csharp_file_namespace(m.group(1))
+        namespaces.setdefault(m.group(1), ns)
+        known.setdefault(declared_name(line).split(".")[0], ns)
 
     unity = (UNITY_REFS / "refs").is_dir() and any(
         CSHARP_UNITY_TYPES.search(line) for line in step["contracts"]["provides"] + requires)
     files: dict[str, str] = {}
     for path in step["files_write"]:
+        if path in originals:
+            merged = csharp_merge_stub(
+                originals[path], [types[name] for name in order if types[name]["path"] == path],
+                known, (UNITY_REFS / "refs").is_dir())
+            if merged is None:
+                return None
+            files[path] = merged
+            continue
         own = namespaces.get(path, "")
         usings = ["System", "System.Collections.Generic", "System.Linq"] \
             + (["UnityEngine"] if unity else []) \
-            + sorted({ns for p, ns in namespaces.items() if ns != own})
+            + sorted({ns for ns in namespaces.values() if ns and ns != own})
         blocks = []
         for name in order:
             entry = types[name]
@@ -3579,6 +3613,8 @@ def existing_contracts() -> list[str]:
             modules = modules_of([path])
             if modules:
                 lines += python_declarations(shown.stdout, modules[0])
+        elif LANGUAGE["name"] == "csharp":
+            lines += csharp_declarations(shown.stdout, path)
     return lines
 
 
@@ -3652,8 +3688,10 @@ def top_level_units(text: str, path: str, provided: set[str]) -> dict[str, str] 
     キーは比べるための形、値は人に見せる1行目。import は入れない。スタブは新しい
     型のために import を足すことがあり、足りない import はコンパイルで必ず分かる。
     Python は ast.dump で比べるので、空白とコメントの違いは数えない。読めなければ
-    None。
+    None。C# は型の頭とメンバーを単位にする（csharp_units）。
     """
+    if path.endswith(".cs"):
+        return csharp_units(text, provided)
     units: dict[str, str] = {}
     if path.endswith(".py"):
         try:
@@ -3695,7 +3733,8 @@ def stub_kept_the_rest(step: dict, originals: dict[str, str]) -> list[str]:
     消せば、それを使う既存のテストが VERIFY で落ちる。そのときには、どの位相の
     誰が消したのかがもう分からない。だからここで、書いた直後に比べる。
     """
-    provided = {declared_name(p) for p in step["contracts"]["provides"]}
+    provided = {declared_name(p) for p in step["contracts"]["provides"]} \
+        | csharp_listed_members(step["contracts"]["provides"])
     problems = []
     for path, before in sorted(originals.items()):
         target = PROJECT / path
@@ -3709,6 +3748,768 @@ def stub_kept_the_rest(step: dict, originals: dict[str, str]) -> list[str]:
             if key not in kept_after:
                 problems.append(f"{path}: changed or removed: {label}")
     return problems
+
+
+# --------------------------------------------------------------------------
+# C# の既存コードを読む
+#
+# 箱には C# のパーサが無い（Roslyn を呼ぶには、ビルドを1回待つ）。TypeScript と
+# 同じく、宣言の切れ目だけを数える。C# では宣言が型の中にあるので、単位は型と
+# そのメンバーだ。
+# --------------------------------------------------------------------------
+
+# テストのビルドで常に定義されるシンボル。dotnet test は Debug でビルドする。
+CSHARP_BASE_DEFINES = frozenset({"DEBUG", "TRACE", "NETSTANDARD", "NETSTANDARD2_1",
+                                 "NETSTANDARD2_0_OR_GREATER", "NETSTANDARD2_1_OR_GREATER"})
+CSHARP_MODIFIER_WORDS = frozenset({
+    "public", "private", "protected", "internal", "static", "virtual", "override",
+    "abstract", "sealed", "readonly", "extern", "unsafe", "new", "async", "partial",
+    "const", "volatile", "event", "implicit", "explicit"})
+CSHARP_TYPE_HEAD = re.compile(
+    r"^(?P<mods>(?:(?:" + "|".join(sorted(CSHARP_MODIFIER_WORDS | {"ref"})) + r")\s+)*)"
+    r"(?P<kind>class|struct|interface|enum|record)\s+(?P<name>[A-Za-z_]\w*)(?P<rest>.*)$")
+CSHARP_DIRECTIVE = re.compile(r"[ \t]*#[ \t]*(\w+)[ \t]*([^\n]*)")
+CSHARP_NAME_BEFORE = re.compile(r"(~?[A-Za-z_]\w*)\s*(<[^()]*>)?\s*$")
+
+
+def csharp_defines() -> set[str]:
+    """テストのビルドで定義されるシンボル。Unity の参照があれば、その定義も足す
+    （dotnet_projects と同じもの）。"""
+    defines = set(CSHARP_BASE_DEFINES)
+    if (UNITY_REFS / "refs").is_dir():
+        try:
+            defines |= {line.strip() for line in (UNITY_REFS / "defines.txt")
+                        .read_text(encoding="utf-8").splitlines() if line.strip()}
+        except OSError:
+            pass
+    return defines
+
+
+def csharp_condition(expr: str, defines: set[str]) -> bool:
+    """`#if` の条件を評価する。読めなければ ValueError。"""
+    tokens = re.findall(r"\|\||&&|==|!=|[!()]|\w+|\S", expr)
+    pos = 0
+
+    def peek() -> str:
+        return tokens[pos] if pos < len(tokens) else ""
+
+    def take() -> str:
+        nonlocal pos
+        pos += 1
+        return tokens[pos - 1] if pos <= len(tokens) else ""
+
+    def primary() -> bool:
+        token = take()
+        if token == "!":
+            return not primary()
+        if token == "(":
+            value = either()
+            if take() != ")":
+                raise ValueError(expr)
+            return value
+        if token in ("true", "false"):
+            return token == "true"
+        if re.fullmatch(r"[A-Za-z_]\w*", token):
+            return token in defines
+        raise ValueError(expr)
+
+    def equality() -> bool:
+        value = primary()
+        while peek() in ("==", "!="):
+            op, other = take(), primary()
+            value = (value == other) if op == "==" else (value != other)
+        return value
+
+    def both() -> bool:
+        value = equality()
+        while peek() == "&&":
+            take()
+            value = equality() and value
+        return value
+
+    def either() -> bool:
+        value = both()
+        while peek() == "||":
+            take()
+            value = both() or value
+        return value
+
+    value = either()
+    if pos != len(tokens):
+        raise ValueError(expr)
+    return value
+
+
+def csharp_scan(text: str, defines: set[str]) -> tuple[str, str, list[tuple[int, int]]] | None:
+    """C# のソースを、構造を数えられる形にする。(code, shape, 無効な範囲)。
+
+    code と shape は元と同じ長さで、位置がそのまま元の位置になる。code はコメント、
+    プリプロセッサの行、条件が偽の範囲を空白にしたもの。shape はさらに文字列と
+    文字のリテラルを空白にしたもので、括弧と `;` を数えるのに使う。無効な範囲は、
+    `#if` の条件が偽で飛ばした行の範囲。
+
+    条件は、テストのビルドと同じシンボルで評価する。Unity の参照は UNITY_EDITOR の
+    系統を外してあるので、`#if UNITY_EDITOR` の中はテストから見えない。無効な範囲は
+    字句として正しいとは限らない（C# の仕様）ので、行ごとに飛ばす。
+
+    閉じない `#if`、読めない条件、閉じないコメントなら None。
+    """
+    n = len(text)
+    code, shape = list(text), list(text)
+    inactive: list[tuple[int, int]] = []
+    stack: list[list[bool]] = []    # [どれかの枝を取ったか, いまの枝が有効か]
+    defines = set(defines)
+    region: int | None = None       # いま飛ばしている範囲の始まり
+
+    def blank(a: int, b: int, *targets: list[str]) -> None:
+        for target in targets:
+            for k in range(a, b):
+                if target[k] != "\n":
+                    target[k] = " "
+
+    def starts_literal(i: int) -> bool:
+        return text[i] in "\"'" or bool(re.match(r'(?:@\$?|\$@?)"', text[i:i + 3]))
+
+    def literal_end(i: int) -> int:
+        verbatim = interpolated = False
+        while text[i] in "@$":
+            verbatim |= text[i] == "@"
+            interpolated |= text[i] == "$"
+            i += 1
+        quote, j = text[i], i + 1
+        while j < n:
+            c = text[j]
+            if c == "\\" and not verbatim:
+                j += 2
+                continue
+            if c == quote:
+                if verbatim and text[j + 1:j + 2] == quote:
+                    j += 2
+                    continue
+                return j + 1
+            if interpolated and c == "{":
+                if text[j + 1:j + 2] == "{":
+                    j += 2
+                    continue
+                j = hole_end(j + 1)
+                continue
+            if c == "\n" and not verbatim:
+                return j        # 閉じない文字列は行で終える
+            j += 1
+        return n
+
+    def hole_end(j: int) -> int:
+        """補間文字列の `{ ... }` の、閉じる `}` の次。中の文字列も飛ばす。"""
+        depth = 0
+        while j < n:
+            c = text[j]
+            if starts_literal(j):
+                j = literal_end(j)
+                continue
+            if c == "{":
+                depth += 1
+            elif c == "}":
+                if depth == 0:
+                    return j + 1
+                depth -= 1
+            j += 1
+        return n
+
+    if text.startswith("﻿"):
+        blank(0, 1, code, shape)
+    i = 0
+    while i < n:
+        if i == 0 or text[i - 1] == "\n":
+            eol = text.find("\n", i)
+            eol = n if eol < 0 else eol
+            directive = CSHARP_DIRECTIVE.match(text, i, eol)
+            if directive:
+                if region is not None:
+                    inactive.append((region, i))
+                    region = None
+                word = directive.group(1)
+                arg = directive.group(2).split("//")[0].strip()
+                on = all(entry[1] for entry in stack)
+                try:
+                    if word == "if":
+                        value = csharp_condition(arg, defines)
+                        stack.append([value, value])
+                    elif word == "elif":
+                        entry = stack[-1]
+                        entry[1] = not entry[0] and csharp_condition(arg, defines)
+                        entry[0] = entry[0] or entry[1]
+                    elif word == "else":
+                        entry = stack[-1]
+                        entry[1], entry[0] = not entry[0], True
+                    elif word == "endif":
+                        stack.pop()
+                    elif word == "define" and on:
+                        defines.add(arg)
+                    elif word == "undef" and on:
+                        defines.discard(arg)
+                except (ValueError, IndexError):
+                    return None
+                blank(i, eol, code, shape)
+                i = eol
+                continue
+            if not all(entry[1] for entry in stack):
+                if region is None:
+                    region = i
+                blank(i, eol, code, shape)
+                i = eol
+                continue
+        c, nxt = text[i], text[i + 1:i + 2]
+        if c == "/" and nxt == "/":
+            eol = text.find("\n", i)
+            eol = n if eol < 0 else eol
+            blank(i, eol, code, shape)
+            i = eol
+        elif c == "/" and nxt == "*":
+            end = text.find("*/", i + 2)
+            if end < 0:
+                return None
+            blank(i, end + 2, code, shape)
+            i = end + 2
+        elif starts_literal(i):
+            end = literal_end(i)
+            blank(i, end, shape)
+            i = end
+        else:
+            i += 1
+    if stack:
+        return None
+    if region is not None:
+        inactive.append((region, n))
+    return "".join(code), "".join(shape), inactive
+
+
+def csharp_match(shape: str, i: int, hi: int) -> int | None:
+    """shape[i] の `{` を閉じる `}` の位置。"""
+    depth = 0
+    for j in range(i, hi):
+        if shape[j] == "{":
+            depth += 1
+        elif shape[j] == "}":
+            depth -= 1
+            if depth == 0:
+                return j
+    return None
+
+
+def csharp_split(shape: str, lo: int, hi: int) -> list[tuple[int, int, int | None, int | None]] | None:
+    """shape[lo:hi] の宣言を順に切る。(始まり, 終わり, 本体の `{`, それを閉じる `}`)。
+
+    宣言は、深さ 0 の `;` か、本体を閉じる `}` で終わる。`=` か `=>` の後の `{` は
+    値で、本体ではない（`int[] a = { 1 };`、`=> new Board { W = 1 };`）。本体の後に
+    `= 値;` が続けば、プロパティの初期値としてそこまで含める。
+    """
+    units = []
+    i = lo
+    while i < hi:
+        while i < hi and shape[i].isspace():
+            i += 1
+        if i >= hi:
+            break
+        start, depth, assigned = i, 0, False
+        open_: int | None = None
+        close: int | None = None
+        while i < hi:
+            c = shape[i]
+            if c == "{" and depth == 0 and not assigned and open_ is None:
+                close = csharp_match(shape, i, hi)
+                if close is None:
+                    return None
+                open_, i = i, close + 1
+                j = i
+                while j < hi and shape[j].isspace():
+                    j += 1
+                if j < hi and shape[j] == "=":
+                    i = j           # 初期値。`;` まで続ける
+                    continue
+                if j < hi and shape[j] == ";":
+                    i = j + 1
+                break
+            if c in "([{":
+                depth += 1
+            elif c in ")]}":
+                depth -= 1
+                if depth < 0:
+                    return None
+            elif c == "=" and depth == 0:
+                assigned = True
+            elif c == ";" and depth == 0:
+                i += 1
+                break
+            i += 1
+        units.append((start, i, open_, close))
+    return units
+
+
+def csharp_after_attributes(shape: str, i: int, hi: int) -> int:
+    """属性（`[SerializeField]`）と空白を飛ばした位置。"""
+    while True:
+        while i < hi and shape[i].isspace():
+            i += 1
+        if i >= hi or shape[i] != "[":
+            return i
+        depth = 0
+        while i < hi:
+            if shape[i] == "[":
+                depth += 1
+            elif shape[i] == "]":
+                depth -= 1
+                if depth == 0:
+                    break
+            i += 1
+        i += 1
+
+
+def csharp_norm(text: str) -> str:
+    """比べるための形。空白を詰め、記号の前後の空白を除く。"""
+    return re.sub(r"\s*([(),<>\[\]?.:])\s*", r"\1", " ".join(text.split()))
+
+
+def csharp_member_parts(header: str) -> dict:
+    """メンバーの宣言の頭（属性、本体、`=>` より後を除いたもの）を分ける。
+
+    返すのは mods（修飾子の集合）、kind（"method"、"operator"、"indexer"。どれでも
+    なければ None で、プロパティかフィールドかは呼び出し側が本体の有無で決める）、
+    name と names（フィールドは `int a, b` の全部）、type（戻り値かフィールドの型。
+    コンストラクタは空）、after（メソッドの名前より後。型引数と引数）、sig（修飾子を
+    除いた署名を csharp_norm で詰めたもの。比べるのに使う）。
+    """
+    rest = " ".join(header.split()).rstrip(";").strip()
+    mods: list[str] = []
+    while (m := re.match(r"([a-z]+)\s+", rest)) and m.group(1) in CSHARP_MODIFIER_WORDS:
+        mods.append(m.group(1))
+        rest = rest[m.end():]
+    parts = {"mods": mods, "kind": None, "name": "", "names": [], "type": "", "after": "",
+             "sig": ""}
+    if re.search(r"\boperator\b", rest):
+        return {**parts, "kind": "operator", "name": "operator", "sig": csharp_norm(rest)}
+    # 引数の括弧は `=` より前にある。後ろの括弧は初期値（`= new Board(0, 0)`）だ。
+    eq = ts_top_level(rest, "=")
+    depth = angle = 0
+    for i, c in enumerate(rest[:eq]):
+        if c == "<" and depth == 0:
+            angle += 1
+        elif c == ">" and depth == 0:
+            angle -= 1
+        elif c == "(":
+            if depth == 0 and angle == 0:
+                before = CSHARP_NAME_BEFORE.search(rest[:i])
+                if before and before.group(1) not in CSHARP_MODIFIER_WORDS:
+                    close, inner = i, 0
+                    for close in range(i, len(rest)):
+                        inner += {"(": 1, ")": -1}.get(rest[close], 0)
+                        if inner == 0:
+                            break
+                    name = before.group(1)
+                    return {**parts, "kind": "method", "name": name, "names": [name],
+                            "type": rest[:before.start()].strip(),
+                            "after": rest[before.start(1) + len(name):close + 1].strip(),
+                            "sig": csharp_norm(rest[:close + 1])}
+            depth += 1
+        elif c == ")":
+            depth -= 1
+    if re.search(r"\bthis\s*\[", rest):
+        return {**parts, "kind": "indexer", "name": "this", "names": ["this"],
+                "sig": csharp_norm(rest)}
+    # フィールドかプロパティ。`int a = 1, b` の2つ目からは、深さ 0 の `,` の後の名前。
+    pieces, depth, current = [], 0, ""
+    for c in rest:
+        if c in "([{<":
+            depth += 1
+        elif c in ")]}>":
+            depth -= 1
+        if c == "," and depth == 0:
+            pieces.append(current)
+            current = ""
+            continue
+        current += c
+    pieces.append(current)
+    first = pieces[0]
+    eq = ts_top_level(first, "=")
+    first = first[:eq] if eq is not None else first
+    named = re.search(r"([A-Za-z_]\w*)\s*$", first)
+    if not named:
+        return parts
+    names = [named.group(1)] + [m.group(1) for piece in pieces[1:]
+                                if (m := re.match(r"\s*([A-Za-z_]\w*)\s*(?:=|$)", piece))]
+    return {**parts, "name": names[0], "names": names,
+            "type": first[:named.start()].strip(), "sig": csharp_norm(first)}
+
+
+def csharp_spec(spec: str) -> tuple[str, dict]:
+    """契約のメンバー（型の名前を除いたもの）の種類と、csharp_member_parts の結果。"""
+    parts = csharp_member_parts(spec)
+    if parts["kind"]:
+        return parts["kind"], parts
+    if "{" in spec or "=>" in spec:
+        return "property", csharp_member_parts(re.split(r"\{|=>", spec, 1)[0])
+    return "field", parts
+
+
+def csharp_outline(text: str) -> dict | None:
+    """C# のファイルの型とメンバーの位置。読めなければ None。
+
+    返すのは code と shape（csharp_scan）、inactive（無効な範囲）、usings（using の
+    範囲）、others（型でも using でもない最上位の宣言の範囲）、types。型は
+    namespace の中まで降りて集め、入れ子の型はメンバーとして扱う。型もメンバーも、
+    start は属性の前、sig は属性の後、stop は終わりの次。open と close は本体の
+    `{` と `}`、arrow は `=>` の位置（無ければ None）。
+    """
+    scanned = csharp_scan(text, csharp_defines())
+    if scanned is None:
+        return None
+    code, shape, inactive = scanned
+    types: list[dict] = []
+    usings: list[tuple[int, int]] = []
+    others: list[tuple[int, int]] = []
+
+    def head_of(start: int, stop: int, open_: int | None) -> tuple[int, str]:
+        sig = csharp_after_attributes(shape, start, stop)
+        end = open_ if open_ is not None else stop
+        return sig, " ".join(code[sig:end].split()).rstrip(";").rstrip()
+
+    def members_of(lo: int, hi: int) -> list[dict] | None:
+        units = csharp_split(shape, lo, hi)
+        if units is None:
+            return None
+        members = []
+        for start, stop, open_, close in units:
+            sig, head = head_of(start, stop, open_)
+            member = {"start": start, "sig": sig, "stop": stop, "open": open_,
+                      "close": close, "arrow": None}
+            nested = CSHARP_TYPE_HEAD.match(head)
+            if nested:
+                name = nested.group("name")
+                members.append({**member, "kind": "type", "name": name, "names": [name],
+                                "parts": {"mods": nested.group("mods").split()}})
+                continue
+            end = open_ if open_ is not None else stop
+            arrow = ts_top_level(shape[sig:end], "=>")
+            eq = ts_top_level(shape[sig:end], "=")
+            if arrow is not None and (eq is None or arrow < eq):
+                member["arrow"] = sig + arrow
+                end = sig + arrow
+            parts = csharp_member_parts(code[sig:end])
+            kind = parts["kind"] or ("property" if open_ is not None or member["arrow"] is not None
+                                     else "field")
+            members.append({**member, "kind": kind, "name": parts["name"],
+                            "names": parts["names"], "parts": parts})
+        return members
+
+    def walk(lo: int, hi: int, namespace: str) -> bool:
+        units = csharp_split(shape, lo, hi)
+        if units is None:
+            return False
+        for start, stop, open_, close in units:
+            sig, head = head_of(start, stop, open_)
+            space = re.fullmatch(r"namespace\s+([\w.]+)", head)
+            declared = CSHARP_TYPE_HEAD.match(head)
+            if space:
+                if open_ is None:
+                    return False    # ファイル単位の namespace は C# 10 で、ここでは使えない
+                if not walk(open_ + 1, close, ".".join(filter(None, [namespace, space.group(1)]))):
+                    return False
+            elif re.match(r"(?:global\s+)?using\b", head):
+                usings.append((start, stop))
+            elif declared and open_ is not None:
+                kind = declared.group("kind")
+                members = [] if kind == "enum" else members_of(open_ + 1, close)
+                if members is None:
+                    return False
+                types.append({"name": declared.group("name"), "kind": kind,
+                              "mods": declared.group("mods").split(),
+                              "rest": declared.group("rest"), "namespace": namespace,
+                              "start": start, "sig": sig, "stop": stop, "open": open_,
+                              "close": close, "members": members})
+            else:
+                others.append((start, stop))
+        return True
+
+    if not walk(0, len(text), ""):
+        return None
+    return {"code": code, "shape": shape, "inactive": inactive, "usings": usings,
+            "others": others, "types": types}
+
+
+def csharp_file_namespace(path: str) -> str | None:
+    """作業ツリーにある C# のファイルの名前空間。無ければフォルダから決める。"""
+    target = PROJECT / path
+    if target.is_file():
+        outline = csharp_outline(target.read_text(encoding="utf-8"))
+        if outline and outline["types"]:
+            return outline["types"][0]["namespace"]
+    return csharp_namespace(path)
+
+
+def csharp_accessors(outline: dict, member: dict) -> str:
+    """プロパティの公開のアクセサ。`{ get; set; }` の形。"""
+    if member["open"] is None:
+        return "{ get; }"          # `int X => ...;`
+    heads = []
+    code, shape = outline["code"], outline["shape"]
+    for start, stop, open_, _ in csharp_split(shape, member["open"] + 1, member["close"]) or []:
+        end = open_ if open_ is not None else stop
+        arrow = ts_top_level(shape[start:end], "=>")
+        end = start + arrow if arrow is not None else end
+        head = " ".join(code[start:end].split()).rstrip(";").strip()
+        if head and not re.search(r"\b(?:private|protected|internal)\b", head):
+            heads.append(head + ";")
+    return "{ " + " ".join(heads) + " }"
+
+
+def csharp_declarations(text: str, path: str) -> list[str]:
+    """C# のファイルの public な型とメンバーを、契約と同じ書式で1行ずつ返す。
+
+    型は頭だけを1行にし（`class Board : MonoBehaviour`）、public なメンバーを
+    `static int Board.Score(Board board)` の形で1行ずつ続ける。名前が型とメンバーの
+    2つの単位を持つので、requires はメンバーを名指しできる。enum と interface は
+    形そのものなので、中身ごと1行にする。本体と初期値は返さない（BOOTSTRAP 1-1）。
+
+    名前空間があれば、行の末尾に `-- namespace X` を付ける。既存のファイルは今の
+    名前空間を保つので、フォルダから決めた名前と違いうる。その型を使うコードは、
+    これで `using` を書く。
+
+    演算子、インデクサ、入れ子の型は契約の名前で表せないので返さない。
+    """
+    outline = csharp_outline(text)
+    if outline is None:
+        return []
+    code = outline["code"]
+    lines = []
+
+    def signature(owner: str, member: dict) -> str:
+        parts = member["parts"]
+        mods = " ".join(m for m in parts["mods"] if m != "public")
+        name = f"{owner}.{member['name']}" if owner else member["name"]
+        if member["kind"] == "method":
+            text_ = f"{mods} {parts['type']} {name}{parts['after']}"
+        elif member["kind"] == "property":
+            text_ = f"{mods} {parts['type']} {name} {csharp_accessors(outline, member)}"
+        else:
+            return ""
+        return " ".join(text_.split())
+
+    for t in outline["types"]:
+        if "public" not in t["mods"]:
+            continue
+        where = f" -- namespace {t['namespace']}" if t["namespace"] else ""
+        mods = " ".join(m for m in t["mods"] if m not in ("public", "partial"))
+        head = " ".join(f"{mods} {t['kind']} {t['name']}{t['rest']}".split())
+        if t["kind"] == "enum":
+            body = " ".join(code[t["open"] + 1:t["close"]].split())
+            lines.append(f"{path}: {head} {{ {body} }}{where}")
+            continue
+        if t["kind"] == "interface":
+            members = [signature("", m) for m in t["members"]]
+            body = " ".join(f"{m};" if not m.endswith("}") else m for m in members if m)
+            lines.append(f"{path}: {head} {{ {body} }}{where}")
+            continue
+        lines.append(f"{path}: {head}{where}")
+        for m in t["members"]:
+            if "public" not in m["parts"]["mods"]:
+                continue
+            if m["kind"] == "field":
+                mods = " ".join(x for x in m["parts"]["mods"] if x != "public")
+                lines += [f"{path}: " + " ".join(f"{mods} {m['parts']['type']} {t['name']}.{n}"
+                                                 .split()) + where for n in m["names"]]
+            elif m["kind"] in ("method", "property"):
+                lines.append(f"{path}: {signature(t['name'], m)}{where}")
+    return lines
+
+
+def csharp_balanced(text: str) -> bool:
+    """差し替える範囲の中で、`#if` と `#endif` の数が合うか。"""
+    return (len(re.findall(r"(?m)^[ \t]*#[ \t]*if\b", text))
+            == len(re.findall(r"(?m)^[ \t]*#[ \t]*endif\b", text)))
+
+
+def csharp_merge_stub(original: str, entries: list[dict], known: dict[str, str],
+                      unity: bool) -> str | None:
+    """既存の C# のファイルで、provides のメンバーの本体だけをスタブにする。
+
+    署名が契約と同じメンバーは、本体（`{ ... }` か `=> ...;`）だけを
+    CSHARP_STUB_BODY に替える。属性、修飾子、コメント、ほかのメンバーは残る。
+    プロパティはアクセサの本体を替え、自動プロパティとフィールドは残す。ファイルに
+    無いメンバーは型の末尾に足し、それが口にするほかの名前空間の型には using を足す。
+
+    次のときは None でソルバーに回す。型がファイルに無い。同じ名前のメンバーは
+    あるが、署名が契約と同じものがちょうど1つではない（署名を変えるステップか、
+    オーバーロード）。本体の無いメソッド（abstract など）。enum か interface の中身が
+    契約と違う。ファイルが読めない。
+
+    `entries` は generate_csharp_stub の型ごとのまとまり、`known` は型の名前から
+    名前空間への対応。
+    """
+    outline = csharp_outline(original)
+    if outline is None:
+        return None
+    shape = outline["shape"]
+    edits: list[tuple[int, int, str]] = []
+    added: list[str] = []
+    file_namespace = ""
+    for entry in entries:
+        found = [t for t in outline["types"] if t["name"] == entry["name"]]
+        if len(found) != 1:
+            return None
+        t = found[0]
+        file_namespace = t["namespace"]
+        if entry["typed"]:
+            if entry["kind"] != t["kind"]:
+                return None
+            if entry["bases"] and csharp_norm(entry["bases"]) not in csharp_norm(t["rest"]):
+                return None
+            if t["kind"] in ("enum", "interface"):
+                inside = outline["code"][t["open"] + 1:t["close"]]
+                if re.sub(r"[\s;,]", "", entry["body"]) != re.sub(r"[\s;,]", "", inside):
+                    return None
+                continue
+
+        new: list[str] = []
+        for spec in entry["specs"]:
+            kind, parts = csharp_spec(spec)
+            named = [m for m in t["members"] if parts["name"] and parts["name"] in m["names"]]
+            if not named:
+                new.append(csharp_stub_member(spec))
+                continue
+            same = [m for m in named if m["kind"] == kind
+                    and m["parts"]["sig"] == parts["sig"]
+                    and (kind != "method"
+                         or ("static" in m["parts"]["mods"]) == ("static" in parts["mods"]))]
+            if len(same) != 1:
+                return None
+            m = same[0]
+            if kind == "method":
+                if m["open"] is not None:
+                    edits.append((m["open"], m["close"] + 1, CSHARP_STUB_BODY))
+                elif m["arrow"] is not None:
+                    edits.append((m["arrow"], m["stop"], CSHARP_STUB_BODY))
+                else:
+                    return None
+            elif kind == "property":
+                if m["open"] is None:
+                    edits.append((m["arrow"], m["stop"], f"=> {CSHARP_STUB_EXPRESSION};"))
+                    continue
+                for start, stop, open_, close in csharp_split(shape, m["open"] + 1, m["close"]) or []:
+                    arrow = ts_top_level(shape[start:stop], "=>")
+                    if open_ is not None:
+                        edits.append((open_, close + 1, CSHARP_STUB_BODY))
+                    elif arrow is not None:
+                        edits.append((start + arrow, stop, f"=> {CSHARP_STUB_EXPRESSION};"))
+
+        if new:
+            # 型の末尾、閉じる `}` の行の前に、ほかのメンバーと同じ字下げで足す。
+            close = t["close"]
+            line_start = original.rfind("\n", 0, close) + 1
+            before = original[line_start:close]
+            outer = re.match(r"[ \t]*", before).group(0)
+            indent = outer + "    "
+            if t["members"]:
+                first = t["members"][0]["start"]
+                lead = original[original.rfind("\n", 0, first) + 1:first]
+                if lead and not lead.strip():
+                    indent = lead
+            block = ("\n" if t["members"] else "") + "".join(f"{indent}{m}\n" for m in new)
+            if before.strip():
+                edits.append((close, close, "\n" + block + outer))
+            else:
+                edits.append((line_start, line_start, block))
+            added += new
+
+    if added:
+        text = "\n".join(added)
+        present = set()
+        for start, stop in outline["usings"]:
+            used = re.fullmatch(r"using\s+([\w.]+)\s*;?", " ".join(outline["code"][start:stop].split()))
+            if used:
+                present.add(used.group(1))
+        wanted = {ns for name, ns in known.items()
+                  if ns and ns != file_namespace and not file_namespace.startswith(ns + ".")
+                  and re.search(rf"(?<!\w){re.escape(name)}(?!\w)", text)}
+        if unity and CSHARP_UNITY_TYPES.search(text):
+            wanted.add("UnityEngine")
+        wanted -= present
+        if wanted:
+            directives = "".join(f"using {ns};\n" for ns in sorted(wanted))
+            if outline["usings"]:
+                at = outline["usings"][-1][1]
+                edits.append((at, at, "\n" + directives.rstrip("\n")))
+            else:
+                at = 1 if original.startswith("﻿") else 0
+                edits.append((at, at, directives + "\n"))
+
+    edits.sort(key=lambda e: (e[0], e[1]))
+    for (a, b, _), (c, _, _) in zip(edits, edits[1:]):
+        if b > c:
+            return None
+    if not all(csharp_balanced(original[a:b]) for a, b, _ in edits):
+        return None
+    text = original
+    for a, b, replacement in reversed(edits):
+        text = text[:a] + replacement + text[b:]
+    return text
+
+
+def csharp_listed_members(provides: list[str]) -> set[str]:
+    """型の行の本体に並んだメンバーの名前（`Board.Width`）。"""
+    names = set()
+    for line in provides:
+        m = re.match(r"^[\w./-]+\.cs\s*:\s*(.+)$", line.split(" -- ")[0].split(chr(8212))[0].strip())
+        declared = CSHARP_TYPE_LINE.match(m.group(1).strip()) if m else None
+        if declared and declared.group("kind") in ("class", "struct"):
+            for member in csharp_members(declared.group("body") or ""):
+                names |= {f"{declared.group('name')}.{n}" for n in csharp_spec(member)[1]["names"]}
+    return names
+
+
+def csharp_units(text: str, provided: set[str]) -> dict[str, str] | None:
+    """top_level_units の C# 版。単位は型の頭とメンバー。
+
+    クラスを1つの単位にすると、1つのメソッドの差し替えでクラス全体が変わった
+    ことになる。だから型の頭（属性、修飾子、基底）と、メンバーの1つずつを比べる。
+    `provided` の名前（`Board.Score` か型の `Board`）のメンバーは比べない。enum と
+    interface は形そのものなので、型ごと1つの単位にする。コメントとプリプロセッサの
+    行は数えない。条件が偽の範囲は、そのまま文字列で比べる（UNITY_EDITOR の中も、
+    Unity のエディタでは動く）。ただし比べないメンバーの中にあるものは除く。using は
+    比べない。
+    """
+    outline = csharp_outline(text)
+    if outline is None:
+        return None
+    code = outline["code"]
+    units: dict[str, str] = {}
+    skipped: list[tuple[int, int]] = []
+
+    def add(prefix: str, a: int, b: int) -> None:
+        flat = " ".join(code[a:b].split())
+        units[prefix + flat] = flat[:100]
+
+    for t in outline["types"]:
+        whole = t["kind"] in ("enum", "interface")
+        if t["name"] in provided and whole:
+            skipped.append((t["start"], t["stop"]))
+            continue
+        if whole:
+            add("", t["start"], t["stop"])
+            continue
+        if t["name"] not in provided:
+            add("", t["start"], t["open"] + 1)
+        for m in t["members"]:
+            if m["names"] and all(f"{t['name']}.{n}" in provided for n in m["names"]):
+                skipped.append((m["start"], m["stop"]))
+                continue
+            add(f"{t['name']}.", m["start"], m["stop"])
+    for a, b in outline["others"]:
+        add("", a, b)
+    for a, b in outline["inactive"]:
+        if any(s <= a and b <= e for s, e in skipped):
+            continue
+        flat = " ".join(text[a:b].split())
+        units["#inactive " + flat] = flat[:100]
+    return units
 
 
 def csharp_facts() -> tuple[str, str]:
