@@ -157,6 +157,24 @@ def request_id(kind: str, value: Any) -> str:
     return hashlib.sha256(kind.encode("ascii") + b"\0" + encoded).hexdigest()[:16]
 
 
+def approved_review(ledger: list[dict[str, Any]],
+                    decisions: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """写しの最後の ALL_GREEN に対する承認。無ければ None。
+
+    PR に出してよいのは、承認した ALL_GREEN が写しの最後のものである間だけだ。
+    次の回が緑になれば、前の承認はその回について何も言っていない。
+    """
+    all_green = next(
+        (record for record in reversed(ledger) if record.get("event") == "ALL_GREEN"), None)
+    if all_green is None:
+        return None
+    review_id = request_id("review", all_green)
+    return next((item for item in reversed(decisions)
+                 if item.get("event") == "HUMAN_DECISION" and item.get("kind") == "review"
+                 and item.get("request_id") == review_id
+                 and item.get("decision") == "approve"), None)
+
+
 class DashboardState:
     def __init__(self, project: Path, data_dir: Path, mirrors: Path | None = None):
         self.project = project.resolve()
@@ -212,6 +230,13 @@ class DashboardState:
                     "detail": "機械的な受け入れ条件は完了しました。成果物を起動し、承認または差し戻しを記録してください。",
                 }
 
+        pull_request = None
+        approved = approved_review(ledger, decisions)
+        if approved is not None:
+            pull_request = {"request_id": approved["request_id"], "result": next(
+                (item for item in reversed(decisions) if item.get("event") == "PULL_REQUEST"
+                 and item.get("request_id") == approved["request_id"]), None)}
+
         pending = stuck + ([review] if review is not None else [])
         last = ledger[-1] if ledger else None
         if any(item["kind"] == "planner" for item in stuck):
@@ -235,6 +260,7 @@ class DashboardState:
             "last_event": last,
             "recent_events": ledger[-50:],
             "token_runs": token_history(self.mirrors),
+            "pull_request": pull_request,
             "decisions": decisions[-50:],
         }
 
@@ -279,6 +305,23 @@ class DashboardState:
             "user": user,
         }
         self._append(record)
+        return record
+
+    def approved(self) -> dict[str, Any] | None:
+        """写しの最後の ALL_GREEN に対する承認と、その ALL_GREEN の記録。"""
+        ledger = read_jsonl(self.project / "plan" / "ledger.jsonl")
+        approval = approved_review(ledger, read_jsonl(self.decisions_file))
+        if approval is None:
+            return None
+        all_green = next(r for r in reversed(ledger) if r.get("event") == "ALL_GREEN")
+        return {**approval, "steps": all_green.get("steps") or []}
+
+    def record_pull_request(self, request: str, outcome: dict[str, Any]) -> dict[str, Any]:
+        """PR を出した結果を追記する。成功なら url、失敗なら error を持つ。"""
+        record = {"ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "event": "PULL_REQUEST",
+                  "request_id": request, **outcome}
+        with self._lock:
+            self._append(record)
         return record
 
     def _append(self, record: dict[str, Any]) -> None:

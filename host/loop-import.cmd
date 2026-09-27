@@ -80,23 +80,45 @@ if not errorlevel 1 goto switch_existing
 git -C "%DEST%" rev-parse -q --verify "refs/remotes/origin/%BRANCH%" >nul
 if not errorlevel 1 goto switch_existing
 
-set "START=origin/HEAD"
-if not "%BASE%"=="" set "START=origin/%BASE%"
-echo [2/5] Creating branch %BRANCH% from %START% ...
-REM --no-track: the new branch must not push to <base-branch>.
-git -C "%DEST%" switch --quiet --no-track -c "%BRANCH%" "%START%"
-if errorlevel 1 (
-  echo ERROR: could not create %BRANCH% from %START%.
+REM Without <base-branch>, the remote's default branch is the parent. Its name
+REM is recorded below, so it is read from origin/HEAD here.
+if "%BASE%"=="" (
+  for /f "delims=" %%H in ('git -C "%DEST%" symbolic-ref --short refs/remotes/origin/HEAD') do set "BASE=%%H"
+)
+if "%BASE:~0,7%"=="origin/" set "BASE=%BASE:~7%"
+if "%BASE%"=="" (
+  echo ERROR: cannot tell the default branch of origin. Pass ^<base-branch^>.
   exit /b 1
 )
-goto init
+echo [2/5] Creating branch %BRANCH% from origin/%BASE% ...
+REM --no-track: the new branch must not push to <base-branch>.
+git -C "%DEST%" switch --quiet --no-track -c "%BRANCH%" "origin/%BASE%"
+if errorlevel 1 (
+  echo ERROR: could not create %BRANCH% from origin/%BASE%.
+  exit /b 1
+)
+goto record_base
 
 :switch_existing
 echo [2/5] Switching to the existing branch %BRANCH% ...
-if not "%BASE%"=="" echo       %BRANCH% already exists, so %BASE% is not used.
+if not "%BASE%"=="" echo       %BRANCH% already exists; %BASE% is recorded as its parent only.
 git -C "%DEST%" switch --quiet "%BRANCH%"
 if errorlevel 1 (
   echo ERROR: could not switch to %BRANCH%.
+  exit /b 1
+)
+if "%BASE%"=="" (
+  echo       No ^<base-branch^> given. For pull requests from the dashboard, record it:
+  echo         git -C "%DEST%" config branch.%BRANCH%.loopBase ^<base-branch^>
+  goto init
+)
+
+
+:record_base
+REM The dashboard sends the approved work as a pull request to this branch.
+git -C "%DEST%" config "branch.%BRANCH%.loopBase" "%BASE%"
+if errorlevel 1 (
+  echo ERROR: could not record %BASE% as the parent of %BRANCH%.
   exit /b 1
 )
 

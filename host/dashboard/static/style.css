@@ -18,6 +18,7 @@ button:hover { background: #22865d; } button:disabled { opacity: .5; }
 table { width: 100%; border-collapse: collapse; } th, td { text-align: left; padding: 9px; border-bottom: 1px solid #263c34; } td { font-family: Consolas, monospace; font-size: .86rem; }
 .live { display: grid; gap: 8px; } .live strong { font-size: 1.3rem; } .live .badge { justify-self: start; }
 .live.idle strong { color: #9bb7a8; } .live.error strong { color: #f0b37e; }
+#pull-request a { color: #86c9a7; word-break: break-all; } #pull-request button { justify-self: start; }
 tr.active td { background: #173d30; } td.goal { font-family: inherit; }
 .chart { position: relative; } #token-chart svg { display: block; width: 100%; height: auto; overflow: visible; }
 #token-chart .grid { stroke: #263c34; } #token-chart .axis { fill: #9bb7a8; font-size: 12px; }

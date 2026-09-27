@@ -52,6 +52,7 @@ async function refresh() {
     }
     pending.append(card);
   }
+  renderPullRequest(state.pull_request);
   mirrorRuns = state.token_runs || []; drawTokens();
   const events = document.querySelector("#events"); events.replaceChildren();
   for (const event of [...state.recent_events].reverse()) {
@@ -59,6 +60,34 @@ async function refresh() {
     for (const value of [event.ts || "", event.event || "", event.step || ""]) { const cell = document.createElement("td"); cell.textContent = value; row.append(cell); }
     events.append(row);
   }
+}
+
+// 承認した回の PR。承認と同時に出す。失敗したら、この機械の前から出し直せる。
+function renderPullRequest(value) {
+  const section = document.querySelector("#pull-request-section");
+  const box = document.querySelector("#pull-request"); box.replaceChildren(); box.className = "live";
+  section.hidden = !value;
+  if (!value) return;
+  const result = value.result;
+  if (result?.url) {
+    const link = document.createElement("a");
+    link.href = result.url; link.textContent = result.url; link.target = "_blank"; link.rel = "noopener";
+    box.append(text("strong", `${result.head} → ${result.base}`), link,
+               text("p", `${result.created ? "作成" : "更新"}: ${result.ts}`, "why"));
+  } else {
+    box.classList.add("error");
+    box.append(text("strong", result ? "PR を出せませんでした" : "PR はまだ出していません"));
+    if (result) box.append(text("p", result.error, "why"));
+  }
+  if (session.scope !== "local") return;
+  const again = document.createElement("button");
+  again.textContent = result?.url ? "PR を更新" : "PR を出す";
+  again.onclick = async () => {
+    again.disabled = true;
+    try { await api("/api/pull-request", {method: "POST", body: "{}"}); await refresh(); }
+    catch (error) { alert(error.message); again.disabled = false; }
+  };
+  box.append(again);
 }
 
 // 色は役に付く。回ごとの順位では付けない。

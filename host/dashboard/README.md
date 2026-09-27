@@ -29,6 +29,8 @@
   ローカルのみ。画面を見られない端末が「遊べた」と記録できてしまったら、
   *機械には画面が確認できないから人間に訊く* という関門そのものが無意味になる。
   差し戻し・エスカレーションへの回答・停止はどこからでもできる
+- 予定レビューを承認すると、承認した状態を親ブランチへの PR にする。GitHub に書き込むのは
+  承認と同じくこの機械の前からだけ
 - 記録には `scope` と `user` が入る。**どこから答えたかは答えの一部**
 - HTTP リクエスト、計画、ソルバー出力をコマンドラインに展開しない
 - `shell=False` で引数配列をそのまま実行する
@@ -83,6 +85,42 @@ SSH は3秒に1回までしか流さない。止めるときは `"live": {"enabl
 "live": {
   "ssh_host": "loop-dev"
 }
+```
+
+## プルリクエスト
+
+予定レビューで「承認」を押すと、承認した状態を親ブランチへの PR として出す。
+中身は `pullrequest.py`。
+
+1. 写し `project` の HEAD を、`loop/<branch>` に持つクローンを `<mirrors>\projects\*` から探す。
+   無ければ断る。`loop-pull` が済んでいないか、`loop-import` で取り込んだプロジェクトではない
+2. 親ブランチを、クローンの `git config branch.<branch>.loopBase` から読む。無ければ断る
+3. `origin` から親ブランチを fetch する
+4. 一時的な index の上で、`loop/<branch>` から `plan`、`conftest.py`、`index.html`、
+   `vitest.config.mjs` を除き、`.gitignore` を親ブランチの版に戻したコミットを作る。
+   親ブランチに `.gitignore` が無ければ消す
+5. そのコミットを `origin` の `<branch>-pr` に強制 push する
+6. `gh pr create` で `<branch>-pr` から親ブランチへの PR を出す。同じ組の PR が開いていれば、
+   5 の push で更新されたものとして作らない
+
+クローンの作業ツリーと手元のブランチには触れない。Unity が書き換えた未コミットの変更が
+残っていても、そのまま出せる。
+
+`<branch>-pr` は承認のたびに作り直すので、そこに手でコミットしない。PR の本文には、
+ステップの一覧と承認のメモが入る。
+
+結果は `.state/decisions.jsonl` に `PULL_REQUEST` として追記し、画面の「プルリクエスト」に
+出す。失敗しても承認は取り消さない。原因を直して「PR を出す」を押せば出し直せる。
+
+前提は次のとおり。
+
+- ホストの `gh` が GitHub にログインしている（`gh auth status`）
+- クローンの `origin` が GitHub のリポジトリ
+- 親ブランチが記録されている。`loop-import` が取り込むときに書く。それより前に取り込んだ
+  プロジェクトは、クローンで1回だけ打つ
+
+```bash
+git -C <clone-dir> config branch.<branch>.loopBase <base-branch>
 ```
 
 ## 役割ごとのトークン消費

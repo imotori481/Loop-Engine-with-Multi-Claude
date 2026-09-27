@@ -180,6 +180,40 @@ class Decisions(DashboardFixture):
             self.state.decide("review", request["id"], "revise", "  ")
 
 
+class PullRequestRecord(DashboardFixture):
+    def approve(self):
+        self.ledger({"event": "ALL_GREEN", "steps": ["S1", "S2"]})
+        request = self.state.snapshot()["pending"][0]
+        self.state.decide("review", request["id"], "approve", "played it")
+        return request["id"]
+
+    def test_nothing_to_send_until_the_review_is_approved(self):
+        self.ledger({"event": "ALL_GREEN", "steps": ["S1", "S2"]})
+        self.assertIsNone(self.state.approved())
+        self.assertIsNone(self.state.snapshot()["pull_request"])
+
+    def test_the_approval_carries_the_steps_and_the_note(self):
+        request = self.approve()
+        approval = self.state.approved()
+        self.assertEqual((approval["request_id"], approval["steps"], approval["note"]),
+                         (request, ["S1", "S2"], "played it"))
+        self.assertEqual(self.state.snapshot()["pull_request"],
+                         {"request_id": request, "result": None})
+
+    def test_the_latest_result_for_the_approved_review_is_shown(self):
+        request = self.approve()
+        self.state.record_pull_request(request, {"error": "gh is not logged in"})
+        self.state.record_pull_request(request, {"url": "https://github.com/o/r/pull/1"})
+        result = self.state.snapshot()["pull_request"]["result"]
+        self.assertEqual(result["url"], "https://github.com/o/r/pull/1")
+
+    def test_a_later_all_green_is_not_covered_by_the_earlier_approval(self):
+        self.approve()
+        self.ledger({"event": "ALL_GREEN", "steps": ["S1", "S2"]},
+                    {"event": "ALL_GREEN", "steps": ["S1", "S2", "S3"]})
+        self.assertIsNone(self.state.approved())
+
+
 class TwoKindsOfStuck(DashboardFixture):
     """ランナーが詰まったことと、プランナーが断ったことは別の要求だ。
 

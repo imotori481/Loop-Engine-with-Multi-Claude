@@ -155,7 +155,17 @@ git merge loop/<branch>
 
 ### PR に出す（ホスト）
 
-`<branch>` には、箱が置いた環境のファイル（`conftest.py`、`index.html`、`vitest.config.mjs`、
+ダッシュボードで予定レビューを承認すると、`<branch>-pr` から `<base-branch>` への PR が出る。
+先に `loop-pull` を流して、写しを箱の先まで進めておく。仕組みと前提は
+[host/dashboard/README.md](../host/dashboard/README.md) の「プルリクエスト」にある。
+
+`loop-import` より前に取り込んだプロジェクトは、親ブランチを1回だけ記録する。
+
+```bash
+git -C <clone-dir> config branch.<branch>.loopBase <base-branch>
+```
+
+手で出すときは次のとおり。`<branch>` には、箱が置いた環境のファイル（`conftest.py`、`index.html`、`vitest.config.mjs`、
 `.gitignore` への追記）と計画（`plan/`）がコミットされている。PR には要らないので、別のブランチで
 消してから出す。`<branch>` そのものは消さずに残す。箱はこれからもそこで作業する。
 

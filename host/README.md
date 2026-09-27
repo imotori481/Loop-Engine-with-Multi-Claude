@@ -47,7 +47,7 @@ loop-import <project> <repo-url> <branch> [<base-branch>]
 次の順に流す。どこかで失敗したら、その場で止まり、次に打つコマンドを出す。
 
 1. `<repo-url>` を `C:\dev\roop-engin\projects\<project>` にクローンする。もうあれば使い回す。そのときは、`origin` が `<repo-url>` であることと、未コミットの変更が無いことを確かめてから fetch する
-2. `<branch>` に切り替える。手元にも `origin` にも無ければ、`<base-branch>` から作る。`<base-branch>` を省くと、`origin` の既定のブランチから作る
+2. `<branch>` に切り替える。手元にも `origin` にも無ければ、`<base-branch>` から作る。`<base-branch>` を省くと、`origin` の既定のブランチから作る。作ったときは、親ブランチを `git config branch.<branch>.loopBase` に記録する。ダッシュボードが PR を出す先になる。`<branch>` がもうあるときは、`<base-branch>` を渡したときだけ記録する
 3. 箱で `loop project init <project> --branch <branch>` を流す
 4. `loop-runner` で `<branch>` を箱の bare に push する
 5. 箱で `loop project use <project>` を流す
@@ -231,7 +231,7 @@ git clone loop-runner:/srv/loop/repo.git <置き場所>
 
 - 箱が作業するブランチは bare の HEAD から読む。手元のそのブランチは、早送りできるときだけ進める。早送りできないときと、手元の変更が邪魔をするときは `NOTE` を出して動かさない。写しは `loop/<ブランチ>` に入っているので、失敗とは数えない
 - ランナーのタグ（`step-S1` など）は `refs/loop-tags/` に入れる。`refs/tags/` に入れると、`git push --tags` で GitHub に届く
-- GitHub への push は人が行う。環境のファイルを除いて PR に出す手順は `docs/COMMANDS.md`
+- GitHub への push は、ダッシュボードで予定レビューを承認したときに PR として行う（`dashboard/README.md`）。手で出す手順は `docs/COMMANDS.md`
 
 `/srv/loop/repo.git` が今のプロジェクトへのリンクのときも、`project` は今のプロジェクトの写しになる。
 作り直す先は、bare の HEAD が指すブランチだ。
@@ -264,6 +264,7 @@ git clone loop-runner:/srv/loop/repo.git <置き場所>
 
 ## 更新履歴
 
+- 2026/09/27: `loop-import.cmd` が親ブランチを `branch.<branch>.loopBase` に記録するように変更
 - 2026/09/27: Unity の参照アセンブリを箱へ送る `loop-unity-refs` を追加
 - 2026/09/27: `loop-pull.cmd` がプロジェクトごとの写しを引くように変更
 - 2026/09/27: 既存リポジトリを取り込む `loop-import.cmd` を追加
