@@ -18,7 +18,8 @@ LOGS=$LOOP/logs
 REQUIREMENTS=$LOOP/human/in/REQUIREMENTS.md
 PENDING=$LOOP/planner/out/tasks.json
 PLAN=$LOOP/project/plan
-PROJECT_SH="${LOOP_ENGINE:-/opt/loop-engine}/provision/loop-project.sh"
+ENGINE="${LOOP_ENGINE:-/opt/loop-engine}"
+PROJECT_SH="$ENGINE/provision/loop-project.sh"
 SELF=/usr/local/bin/loop
 
 # 保守ユーザーのホームは 0700 で、runner はそこに cd できない（provision/README §3-14）。
@@ -175,36 +176,12 @@ cmd_status() {
   fi
 }
 
-# ランナーが書く now.json に、走っているかどうかと最後の結果を足して1つの JSON に
-# する。sudo を使わない。ダッシュボードは端末の無い SSH で呼ぶので、パスワードを
-# 訊けない。/srv/loop/logs は humanw 経由で保守ユーザーが読める。
+# ランナーが書く now.json に、走っているかどうか、最後の結果、今の回のトークン数と
+# クリティックの指摘を足して1つの JSON にする。sudo を使わない。中身は loop_now.py。
 cmd_now() {
   local active=false
   running && active=true
-  python3 - "$(project_name)" "$active" "$LOGS/now.json" "$(latest_log)" <<'PY'
-import json
-import sys
-
-project, active, now_path, log_path = sys.argv[1:5]
-
-
-def read(path, parse):
-    try:
-        with open(path, encoding="utf-8") as handle:
-            return parse(handle)
-    except (OSError, ValueError):
-        return None
-
-
-def last_result(handle):
-    lines = [line.strip()[4:] for line in handle if line.startswith("=== loop ")]
-    return lines[-1] if lines else None
-
-
-print(json.dumps({"project": project, "running": active == "true",
-                  "now": read(now_path, json.load),
-                  "last": read(log_path, last_result)}, ensure_ascii=False))
-PY
+  python3 "$ENGINE/provision/loop_now.py" "$(project_name)" "$active" "$LOGS"
 }
 
 cmd_log() {

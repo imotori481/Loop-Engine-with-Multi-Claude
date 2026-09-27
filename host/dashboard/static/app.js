@@ -52,7 +52,7 @@ async function refresh() {
     }
     pending.append(card);
   }
-  renderTokens(state.token_runs || []);
+  mirrorRuns = state.token_runs || []; drawTokens();
   const events = document.querySelector("#events"); events.replaceChildren();
   for (const event of [...state.recent_events].reverse()) {
     const row = document.createElement("tr");
@@ -67,7 +67,7 @@ const ROLES = [
   {key: "critic", label: "クリティック", color: "#d95926"},
   {key: "solver", label: "ソルバー", color: "#199e70"},
 ];
-const OUTCOME = {green: "完了", stopped: "停止", running: "未完了", abandoned: "中断"};
+const OUTCOME = {green: "完了", stopped: "停止", running: "未完了", abandoned: "中断", active: "走行中"};
 const SVG = "http://www.w3.org/2000/svg";
 const compact = new Intl.NumberFormat("ja-JP", {notation: "compact", maximumFractionDigits: 1});
 const exact = new Intl.NumberFormat("ja-JP");
@@ -83,6 +83,42 @@ function niceMax(value) {
   if (value <= 0) return 1;
   const unit = 10 ** Math.floor(Math.log10(value));
   return [1, 1.2, 1.6, 2, 2.4, 3, 4, 6, 8, 10].map(step => step * unit).find(step => step >= value);
+}
+
+// 写しの履歴（/api/state）と、箱が今の回についてログから数えたもの（/api/live）。
+let mirrorRuns = [], liveLoop = null, drawnTokens = "";
+
+// 箱の回を写しの履歴に重ねる。写しに届くのはコミットのときだけなので、同じ回なら
+// 箱の数を使う。同じ回かどうかは、同じプロジェクトで開始が5分以内かで決める。
+// 箱はログの先頭の時刻、写しは台帳の PLAN_BOOTSTRAP の時刻を持つ。
+function mergeRuns(mirror, live) {
+  const runs = mirror.map(run => ({...run}));
+  if (live?.loop?.calls) {
+    const at = parseStamp(live.loop.started);
+    const entry = {source: `箱: ${live.project}`, started: live.loop.started, tokens: live.loop.tokens,
+                   outcome: live.loop.outcome === "running" ? "active" : live.loop.outcome};
+    const same = runs.findIndex(run => [`projects/${live.project}`, "project"].includes(run.source)
+                                       && Math.abs(parseStamp(run.started) - at) < 5 * 60000);
+    if (same >= 0) runs[same] = entry; else runs.push(entry);
+  }
+  runs.sort((a, b) => parseStamp(a.started) - parseStamp(b.started));
+  runs.forEach((run, index) => { run.run = index + 1; });
+  return runs;
+}
+
+// 開いたまま5秒ごとに描き直すと、ツールチップが消える。変わったときだけ描く。
+function drawTokens() {
+  const runs = mergeRuns(mirrorRuns, liveLoop), key = JSON.stringify(runs);
+  if (key === drawnTokens) return;
+  drawnTokens = key;
+  renderTokens(runs);
+}
+
+function renderCritique(critique) {
+  const box = document.querySelector("#critique"); box.replaceChildren();
+  document.querySelector("#critique-at").textContent = critique?.at || "";
+  if (!critique) { box.append(text("p", "今の回にクリティックの指摘はありません。", "why")); return; }
+  box.append(text("pre", critique.text));
 }
 
 function renderTokens(runs) {
@@ -182,8 +218,12 @@ function text(tag, value, className) {
 }
 
 // ランナーの時刻は "+0900" の形で、Date はコロンの無いオフセットを読めない。
+function parseStamp(stamp) {
+  return Date.parse(String(stamp).replace(/([+-]\d\d)(\d\d)$/, "$1:$2"));
+}
+
 function minutesSince(stamp) {
-  const at = Date.parse(String(stamp).replace(/([+-]\d\d)(\d\d)$/, "$1:$2"));
+  const at = parseStamp(stamp);
   return Number.isNaN(at) ? null : Math.max(0, Math.floor((Date.now() - at) / 60000));
 }
 
@@ -192,11 +232,13 @@ function renderLive(value) {
   live.className = "live";
   document.querySelector("#live-updated").textContent =
     `${new Date().toLocaleTimeString()} 更新`;
+  liveLoop = value.error ? null : value; drawTokens();
   if (value.error) {
     live.classList.add("error");
     live.append(text("strong", "箱に届きません"), text("p", value.error, "why"));
     return;
   }
+  renderCritique(value.loop?.critique);
   const activity = value.now?.activity;
   if (value.running && activity) {
     const minutes = minutesSince(activity.since);
