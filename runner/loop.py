@@ -22,6 +22,7 @@ REVIEW_GATE は v1 では実装していない。人間の手順で、最初の�
 from __future__ import annotations
 
 import argparse
+import ast
 import atexit
 import hashlib
 import json
@@ -2637,6 +2638,261 @@ Output nothing but the files. Do not restate the plan in your final message.
 """
 
 
+def python_signature(node: ast.FunctionDef | ast.AsyncFunctionDef) -> str:
+    prefix = "async def" if isinstance(node, ast.AsyncFunctionDef) else "def"
+    returns = f" -> {ast.unparse(node.returns)}" if node.returns else ""
+    return f"{prefix} {node.name}({ast.unparse(node.args)}){returns}"
+
+
+def python_declarations(text: str, module: str) -> list[str]:
+    """Python のモジュールの公開の宣言を、契約と同じ書式で1行ずつ返す。
+
+    本体は返さない。プランナーは条件を書く側で、実装を見て書いた条件は要件では
+    なく実装を述べる（BOOTSTRAP 1-1）。クラスは、呼び出し側が使うフィールドと
+    メソッドの署名を1行にまとめる。declared_name がクラスの名前を拾えるよう、
+    `class` を行の先に置く。構文の壊れたファイルは読めないので、何も返さない。
+    """
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return []
+    where = f" -- defined in {module}"
+    lines = []
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            if not node.name.startswith("_"):
+                lines.append(python_signature(node) + where)
+        elif isinstance(node, ast.ClassDef):
+            if node.name.startswith("_"):
+                continue
+            decorators = "".join(f"@{ast.unparse(d)} " for d in node.decorator_list)
+            bases = [ast.unparse(b) for b in node.bases + node.keywords]
+            head = f"{decorators}class {node.name}" + (f"({', '.join(bases)})" if bases else "")
+            members = []
+            for member in node.body:
+                if isinstance(member, ast.AnnAssign) and isinstance(member.target, ast.Name):
+                    if not member.target.id.startswith("_"):
+                        members.append(f"{member.target.id}: {ast.unparse(member.annotation)}")
+                elif isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    if member.name == "__init__" or not member.name.startswith("_"):
+                        members.append(python_signature(member))
+            lines.append(head + (": " + "; ".join(members) if members else "") + where)
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            if not node.target.id.startswith("_"):
+                lines.append(f"{node.target.id}: {ast.unparse(node.annotation)}{where}")
+        elif isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name) and not target.id.startswith("_"):
+                    lines.append(target.id + where)
+    return lines
+
+
+def ts_statements(text: str) -> list[str]:
+    """TypeScript の最上位の文を、コメントを除いて順に返す。
+
+    箱には TypeScript のパーサが無い（vitest は esbuild で型を捨てるだけだ）。
+    だから宣言の切れ目だけを数える。文字列、コメント、正規表現のリテラルの中の
+    括弧は数えない。文は、深さ 0 の `;`、本体を閉じる `}`、続きの無い改行で
+    終わる。
+
+    `}` で終わるのは本体の `{` だけだ。`: {a: number}` のような型や、`=` の後の
+    値の `{` では終わらない。そうしないと、戻り値の型がオブジェクトの関数が、
+    型の所で切れる。
+    """
+    statements: list[str] = []
+    buf: list[str] = []
+    depth = 0
+    assigned = False   # 深さ 0 に `=` があった。その後の `{` は値で、本体ではない
+    body = False       # 深さ 0 で開いた `{` が本体か
+    last = ""          # 直前の空白でない文字
+    i, n = 0, len(text)
+
+    def end() -> None:
+        nonlocal assigned, body
+        statement = "".join(buf).strip()
+        if statement:
+            statements.append(statement)
+        buf.clear()
+        assigned = body = False
+
+    while i < n:
+        c = text[i]
+        nxt = text[i + 1] if i + 1 < n else ""
+        if c == "/" and nxt == "/":
+            j = text.find("\n", i)
+            i = n if j < 0 else j
+            continue
+        if c == "/" and nxt == "*":
+            j = text.find("*/", i + 2)
+            i = n if j < 0 else j + 2
+            buf.append(" ")
+            continue
+        # `/` は、値が来る位置なら正規表現、そうでなければ割り算。正規表現の中の
+        # 引用符を文字列の始まりと読むと、ファイルの残りが1つの文字列になる。
+        if c in "'\"`" or (c == "/" and (last == "" or last in "(,=:[!&|?{};")):
+            j, in_class = i + 1, False
+            while j < n:
+                if text[j] == "\\":
+                    j += 2
+                    continue
+                if c == "/" and text[j] == "\n":
+                    break
+                if c == "/" and text[j] == "[":
+                    in_class = True
+                elif c == "/" and text[j] == "]":
+                    in_class = False
+                elif text[j] == c and not in_class:
+                    break
+                j += 1
+            buf.append(text[i:j + 1])
+            last, i = c, j + 1
+            continue
+        if c in "({[":
+            if c == "{" and depth == 0:
+                body = not assigned and last not in ":|&<,=("
+            depth += 1
+        elif c in ")}]":
+            depth = max(depth - 1, 0)
+        elif (c == "=" and depth == 0 and nxt not in "=>"
+              and text[i - 1:i] not in ("=", "!", "<", ">")):
+            assigned = True
+        buf.append(c)
+        if c == "}" and depth == 0 and body:
+            end()
+        elif c == ";" and depth == 0:
+            end()
+        elif c == "\n" and depth == 0:
+            head = "".join(buf).rstrip()
+            ahead = text[i + 1:].lstrip()[:1]
+            if head and head[-1] not in "=,(+-*/&|?:<>.[{" \
+                    and (not ahead or ahead not in ".?:|&=,)>"):
+                end()
+        if not c.isspace():
+            last = c
+        i += 1
+    end()
+    return statements
+
+
+def ts_top_level(text: str, token: str) -> int | None:
+    """括弧の外にある `token` の位置。`=` は `==` `=>` `<=` `>=` `!=` を除く。"""
+    depth = 0
+    for i, c in enumerate(text):
+        if c in "({[":
+            depth += 1
+        elif c in ")}]":
+            depth -= 1
+        elif depth == 0 and text.startswith(token, i):
+            if token == "=" and (text[i + 1:i + 2] in ("=", ">")
+                                 or text[i - 1:i] in ("=", "!", "<", ">")):
+                continue
+            return i
+    return None
+
+
+def strip_body(text: str) -> str:
+    """末尾の `{ ... }` を除く。本体の無い宣言はそのまま返す。"""
+    if not text.endswith("}"):
+        return text
+    depth = 0
+    for i in range(len(text) - 1, -1, -1):
+        if text[i] == "}":
+            depth += 1
+        elif text[i] == "{":
+            depth -= 1
+            if depth == 0:
+                return text[:i].rstrip()
+    return text
+
+
+TS_EXPORT = re.compile(
+    r"^export\s+(?:declare\s+)?(?:default\s+)?"
+    r"(?P<kind>(?:abstract\s+)?class|(?:async\s+)?function\*?|interface|type|enum|const|let|var)"
+    r"\s+[A-Za-z_$][\w$]*")
+TS_HIDDEN = re.compile(r"^(?:#|(?:(?:static|readonly|abstract|override|async)\s+)*(?:private|protected)\b)")
+
+
+def ts_class(raw: str, head: str) -> str:
+    """クラスの頭と、公開のメンバーの署名。private と protected と # は外す。"""
+    body = raw[raw.index("{") + 1:raw.rindex("}")]
+    members = []
+    for member in ts_statements(body):
+        m = " ".join(member.split()).rstrip(";").rstrip()
+        if not m or TS_HIDDEN.match(m):
+            continue
+        m = re.sub(r"^public\s+", "", m)
+        eq, paren = ts_top_level(m, "="), m.find("(")
+        if eq is not None and (paren < 0 or eq < paren):
+            m = m[:eq].rstrip()        # フィールド。初期値は実装なので外す
+        else:
+            m = strip_body(m)          # メソッド
+        members.append(m)
+    return f"{head} {{ {'; '.join(members)} }}" if members else head
+
+
+def ts_declarations(text: str, path: str) -> list[str]:
+    """TypeScript のファイルの export を、契約と同じ書式で1行ずつ返す。
+
+    関数は本体を外す。interface、type、enum は形そのものなので全部を残す。const
+    は型の注釈まで。値が関数なら、署名と `=>` まで。クラスは公開のメンバーの
+    署名だけ。`export { a } from` のような再 export は、宣言している元の
+    ファイルの方で拾う。
+    """
+    lines = []
+    for statement in ts_statements(text):
+        raw = statement.strip().rstrip(";").rstrip()
+        flat = " ".join(raw.split())
+        match = TS_EXPORT.match(flat)
+        if not match:
+            continue
+        decl = re.sub(r"^export\s+(?:declare\s+)?(?:default\s+)?", "", flat)
+        kind = match.group("kind").split()[-1]
+        if kind.startswith("function"):
+            decl = strip_body(decl)
+        elif kind in ("const", "let", "var"):
+            eq = ts_top_level(decl, "=")
+            if eq is not None:
+                value = decl[eq + 1:].strip()
+                arrow = ts_top_level(value, "=>")
+                if arrow is not None and re.match(r"(?:async\s*)?[(<]", value):
+                    decl = f"{decl[:eq].rstrip()} = {value[:arrow + 2]}"
+                else:
+                    decl = decl[:eq].rstrip()
+        elif kind == "class" and "{" in raw:
+            decl = ts_class(raw, decl[:decl.index("{")].rstrip())
+        lines.append(f"{path}: {decl}")
+    return lines
+
+
+def existing_contracts() -> list[str]:
+    """最後のコミットの src/ にある公開の宣言。計画の言語のファイルだけを読む。
+
+    作業ツリーではなく HEAD から読む。ステップの途中の書きかけやスタブを、
+    すでにあるコードとして見せないためだ。
+    """
+    try:
+        listing = run(["git", "ls-tree", "-r", "-z", "--name-only", "HEAD", "--", "src"])
+    except OSError:
+        return []   # 作業ツリーがまだ無い
+    if listing.returncode != 0:
+        return []   # コミットがまだ無い
+    suffix = LANGUAGE["source_suffix"]
+    lines: list[str] = []
+    for path in listing.stdout.split("\0"):
+        if not path.startswith("src/") or not path.endswith(suffix):
+            continue
+        shown = run(["git", "show", f"HEAD:{path}"])
+        if shown.returncode != 0:
+            continue
+        if LANGUAGE["name"] == "typescript":
+            lines += ts_declarations(shown.stdout, path)
+        else:
+            modules = modules_of([path])
+            if modules:
+                lines += python_declarations(shown.stdout, modules[0])
+    return lines
+
+
 def environment_facts() -> str:
     """プロジェクトが実際にどうなっているかを、機械から読み取る。
 
@@ -2698,6 +2954,25 @@ file.
             provided_text += """For the page: call `start` on an element and check what it puts there. Do not
 write a criterion about the text of index.html.
 """
+
+    # 取り込んだリポジトリには、最初のステップより前からコードがある。プランナーは
+    # コードを読めない（BOOTSTRAP 1-1）ので、ここに無ければ、そこにある関数も型も
+    # 知らずに計画を書く。署名だけを渡し、本体は渡さない。
+    existing = existing_contracts()
+    existing_text = ""
+    if existing:
+        existing_text = """
+# What the code already declares
+
+The repository already has code under src/, written before this plan. These are
+its public declarations, read from the last commit and written in the same form
+as `contracts.provides`. They exist before the first step runs.
+
+Only the signatures are shown. The bodies are left out on purpose: you write
+the criteria, and criteria written while looking at an implementation describe
+that implementation rather than what the requirements ask for.
+
+""" + "\n".join(f"    {line}" for line in existing) + "\n"
 
     # テストが何に届くかを決めるファイル。言語ごとに名前は違うが仕事は同じで、
     # どちらでもプランナーに見せる必要がある。import のパスに逆らう計画は負ける。
@@ -2821,7 +3096,7 @@ Everything under the project root, except plan/, .git/ and the frozen
 toolchain -- this is the whole of what exists today:
 
 {tree}
-{provided_text}
+{provided_text}{existing_text}
 {wiring.name} at the root, which the test runner loads automatically:
 
 {wiring_text}
@@ -3176,6 +3451,11 @@ Then say plainly:
   file the user supplies, a response from a server), is a defect in the
   artifact's own logic: the read path is reachable, and what it finds is
   always nothing. Report that.
+
+  Code listed under "What the code already declares" is not such a thing. It
+  exists before the first step, so a step that calls it or reads what it
+  provides is using something that is already there. Do not report it as
+  something no step writes.
 
 Show your derivation with the actual numbers from the criteria, so that someone
 can check each step. Do not describe what the plan intends -- describe what it
