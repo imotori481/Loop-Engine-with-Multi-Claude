@@ -13,6 +13,7 @@ RED_GATE はそれを赤いテストではなく壊れた呼び出しと正し�
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -217,6 +218,56 @@ class TheExpectedResultIsAValue(unittest.TestCase):
                 problems = self.plan_with(then)
                 self.assertEqual(len(problems), 1)
                 self.assertIn("L8", problems[0])
+
+
+class TheCodeAlreadyThereCanBeRequired(unittest.TestCase):
+    """L3 は依存先の provides のほかに、取り込んだリポジトリの宣言も認める。
+
+    認めないと、既存の関数を呼ぶステップは書けない。プランナーは宣言を
+    environment_facts で見ており、requires にはその行を写す。
+    """
+
+    EXISTING = ["def score(board: Board) -> int  -- defined in legacy.rules",
+                "class Board: cells: list[int]  -- defined in legacy.rules"]
+
+    def lint(self, tasks, existing=EXISTING):
+        with patch("loop.existing_contracts", return_value=list(existing)) as found:
+            return validate_plan(tasks), found
+
+    def tasks(self, requires, s1_provides=("def a() -> int",)):
+        return {"version": 1, "steps": [
+            step("S1", "skeleton", list(s1_provides)),
+            step("S2", "integration", ["def b() -> int"],
+                 requires=requires, depends=["S1"]),
+        ]}
+
+    def test_a_name_the_existing_code_declares_is_accepted(self):
+        problems, _ = self.lint(self.tasks(
+            ["def score(board: Board) -> int", "class Board"]))
+        self.assertEqual(problems, [])
+
+    def test_a_name_nobody_declares_is_still_rejected(self):
+        problems, _ = self.lint(self.tasks(["def missing() -> int"]))
+        self.assertEqual(len(problems), 1)
+        self.assertIn("L3: step S2 requires `missing`", problems[0])
+        self.assertIn("the code already in the repository does not declare", problems[0])
+
+    def test_a_name_a_step_rewrites_must_come_from_that_step(self):
+        # S1 が score を書き換えるなら、S3 は S1 に依存して新しい score を使う。
+        # 既存のものとして認めると、書き換えの前か後かが決まらない。
+        tasks = self.tasks(["def score(board: Board) -> int"],
+                           s1_provides=("def score(board: Board) -> int",))
+        tasks["steps"].insert(1, step("S3", "unit", ["def c() -> int"],
+                                      requires=["def score(board: Board) -> int"]))
+        tasks["steps"][2]["contracts"]["requires"].append("def c() -> int")
+        tasks["steps"][2]["depends_on"].append("S3")
+        problems, _ = self.lint(tasks)
+        self.assertEqual(len(problems), 1)
+        self.assertIn("L3: step S3 requires `score`", problems[0])
+
+    def test_git_is_not_asked_when_the_dependencies_suffice(self):
+        _, found = self.lint(self.tasks(["def a() -> int"]))
+        found.assert_not_called()
 
 
 class RulesThatAreGone(unittest.TestCase):

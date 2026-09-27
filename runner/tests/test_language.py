@@ -16,6 +16,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 from xml.etree import ElementTree as ET
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -543,6 +544,21 @@ class TheRunnerWritesTheStub(Language):
         # アサーションが「一致」する。スタブに対して通るテストはステップを止める。
         self.assertIn('"__stub__":', text)
 
+    def test_one_unreadable_inherited_line_does_not_lose_the_others(self):
+        # 既存のコードの行には、クラスやアロー関数の const のように、この形に
+        # 合わないものがある。まとめて読むと、その1行で Catalog の中身が消え、
+        # 番兵の値はキャストに落ちる。
+        self.speak("typescript")
+        stub = loop.generate_stub(
+            {"files_write": ["src/idlegame/catalog.ts"],
+             "contracts": {"provides": ["src/idlegame/catalog.ts: const CATALOG: Catalog"]}},
+            ["src/legacy/engine.ts: class Engine { tick(dt: number): void }",
+             "src/idlegame/model.ts: interface GeneratorDef { id: string; baseCost: number }",
+             "src/idlegame/model.ts: type Catalog = Record<string, GeneratorDef>"])
+        text = stub["src/idlegame/catalog.ts"]
+        self.assertIn("baseCost: -999999", text)
+        self.assertNotIn("as unknown as Catalog", text)
+
     def test_what_it_cannot_parse_goes_back_to_the_solver(self):
         # None は恥ずべき失敗ではない。コンパイルできない生成スタブは、置き換える
         # 問題より悪い。
@@ -581,6 +597,51 @@ class TheRunnerWritesTheStub(Language):
         self.assertIsNone(loop.generate_stub(
             {"files_write": ["src/pkg/a.py"],
              "contracts": {"provides": ["src/pkg/a.py: def f() -> int"]}}, []))
+
+
+class TheExistingCodeReachesTheSolver(unittest.TestCase):
+    """requires が名指しした既存の宣言は、依存先の契約と一緒にソルバーへ届く。
+
+    L3 が認めても、ブリーフに行が無ければ、テストを書くソルバーは import する
+    モジュールも署名も知らない。行は HEAD から読んだものを渡す。
+    """
+
+    EXISTING = ["def score(board: Board) -> int -- defined in legacy.rules",
+                "def unused() -> None -- defined in legacy.rules"]
+
+    def step(self, requires):
+        return {"id": "S2", "depends_on": ["S1"],
+                "contracts": {"requires": requires, "provides": []}}
+
+    def run_with(self, requires, call):
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp)
+            (state / "contracts").mkdir()
+            (state / "contracts" / "S1.json").write_text(
+                '{"provides": ["def new_game() -> Game -- defined in pkg.game"]}',
+                encoding="utf-8")
+            with patch.object(loop, "STATE", state), \
+                 patch("loop.existing_contracts", return_value=self.EXISTING) as found:
+                return call(self.step(requires)), found
+
+    def test_the_brief_names_the_existing_declaration_it_requires(self):
+        text, _ = self.run_with(["def new_game() -> Game", "def score(board: Board) -> int"],
+                                loop.dep_contracts)
+        self.assertIn("From S1:", text)
+        self.assertIn("From the code already in the repository:\n"
+                      "def score(board: Board) -> int -- defined in legacy.rules", text)
+        # 求めていない宣言は渡さない。
+        self.assertNotIn("unused", text)
+
+    def test_the_stub_gets_the_same_lines(self):
+        lines, _ = self.run_with(["def score(board: Board) -> int"], loop.dep_contract_lines)
+        self.assertEqual(lines, ["def new_game() -> Game -- defined in pkg.game",
+                                 "def score(board: Board) -> int -- defined in legacy.rules"])
+
+    def test_git_is_not_asked_when_the_dependencies_suffice(self):
+        text, found = self.run_with(["def new_game() -> Game"], loop.dep_contracts)
+        self.assertNotIn("already in the repository", text)
+        found.assert_not_called()
 
 
 class APhaseHasToProduceWhatItWasAskedFor(unittest.TestCase):

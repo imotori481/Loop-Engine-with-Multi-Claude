@@ -1068,7 +1068,7 @@ TypeScript であって素の JavaScript でないのは L14 のため。契約�
 |---|---|
 | L1 | JSON Schema 準拠 |
 | L2 | `depends_on` が自分より若い id のみを参照し、循環がない |
-| L3 | 各ステップの `contracts.requires` が、依存先のいずれかの `provides` に存在する |
+| L3 | 各ステップの `contracts.requires` が、依存先のいずれかの `provides` に存在するか、HEAD の `src/` の既存のコードが宣言している。計画のどれかのステップが `provides` に挙げる名前は、既存のものとしては数えない |
 | L4 | `files_write` が全ステップで重複しない（1ファイル1所有者） |
 | L5 | `files_write` ∩ `files_test` == ∅ |
 | L6 | `acceptance` に `normal` / `boundary` / `error` が最低1つずつ |

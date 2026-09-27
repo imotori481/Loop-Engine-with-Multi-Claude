@@ -313,6 +313,9 @@ class WhatTheCodeAlreadyDeclares(unittest.TestCase):
         self.assertIn("# What the code already declares", facts)
         self.assertIn("    def f(x: int) -> int -- defined in pkg.mod", facts)
         self.assertIn("bodies are left out on purpose", facts)
+        # requires にどう書くかと、書き換えるステップがあるときの依存も伝える。
+        self.assertIn("puts that line in `contracts.requires`", facts)
+        self.assertIn("depends on that step instead", facts)
 
     def test_a_new_project_is_not_told_about_code_it_does_not_have(self):
         self.assertNotIn("What the code already declares", self.facts([]))

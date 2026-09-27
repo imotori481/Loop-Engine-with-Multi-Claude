@@ -1084,8 +1084,21 @@ def call_solver(phase: str, brief: str, backend: str | None = None) -> str:
 # --------------------------------------------------------------------------
 
 
-def dep_contract_lines(step: dict) -> list[str]:
+def existing_requirements(step: dict, provided: set[str]) -> list[str]:
+    """requires に書かれた名前のうち、依存先ではなく既存のコードが宣言するものの行。
+
+    行は計画の requires の文字列ではなく、HEAD から読んだものを渡す。プランナーが
+    写し間違えても、ソルバーには実際にある署名が届く。
+    """
+    wanted = {declared_name(r) for r in step["contracts"].get("requires", [])} - provided
+    if not wanted:
+        return []
+    return [line for line in existing_contracts() if declared_name(line) in wanted]
+
+
+def dep_contract_lines(step: dict, *, existing: bool = True) -> list[str]:
     """このステップが依存するすべてのステップの provides の行を、平らに並べる。
+    `existing` なら、requires が名指しする既存の宣言の行も足す。
 
     dep_contracts は同じものをブリーフ用に描く。そこではステップごとのまとまりに
     価値がある。スタブの生成に要るのは名前と置き場だけなので、行で渡す。
@@ -1102,6 +1115,8 @@ def dep_contract_lines(step: dict) -> list[str]:
         provides = value.get("provides") if isinstance(value, dict) else value
         if isinstance(provides, list):
             lines.extend(str(p) for p in provides)
+    if existing:
+        lines += existing_requirements(step, {declared_name(line) for line in lines})
     return lines
 
 
@@ -1112,6 +1127,10 @@ def dep_contracts(step: dict) -> str:
         if not path.exists():
             raise Halt("PLAN_LOAD", f"step {step['id']} depends on {dep}, which has no contract yet")
         parts.append(f"From {dep}:\n{path.read_text(encoding='utf-8')}")
+    found = existing_requirements(step, {declared_name(line) for line
+                                         in dep_contract_lines(step, existing=False)})
+    if found:
+        parts.append("From the code already in the repository:\n" + "\n".join(found))
     return "\n\n".join(parts) if parts else "(none -- this step depends on nothing)"
 
 
@@ -1436,7 +1455,10 @@ def generate_stub(step: dict, requires: list[str]) -> dict[str, str] | None:
     # アサーションの失敗ではなく TypeError を受け取る。RED_GATE はそれをそのまま
     # 拒む（R2/R5）。ブリーフはずっとそう言っていた。テストは確かめる前に値を
     # 分解するので、番兵の値は署名が述べる「形」を持たなければならない。
-    inherited = parse_contracts(requires) or []
+    # 1行ずつ読む。既存のコードの行には、クラスやアロー関数の const のように
+    # この形に合わないものがある。まとめて読むと、その1行のせいで依存先の型が
+    # すべて消える。
+    inherited = [d for line in requires for d in (parse_contracts([line]) or [])]
     keys = literal_keys(step)
     types = ts_type_values(inherited + declarations, keys)
     # よそから import する名前の置き場。書き出すファイルがそれを言えるようにする。
@@ -1881,6 +1903,14 @@ def validate_plan(tasks: dict) -> list[str]:
         for s in steps
     }
 
+    # L3 で認める既存の宣言。計画のどれかのステップが同じ名前を提供するなら、それは
+    # 書き換えなので、既存のものとしては数えない。求める側はそのステップに依存する。
+    # 走らせる途中では HEAD に前のステップのコードも入るので、それも同じ理由で
+    # 外れる。依存していないステップの提供物が、途中から認められることは無い。
+    # git を呼ぶので、依存先で足りないときだけ読む。
+    planned = set().union(*provides_by_step.values())
+    existing: set[str] | None = None
+
     for s in steps:
         sid = s["id"]
 
@@ -1890,13 +1920,19 @@ def validate_plan(tasks: dict) -> list[str]:
                 problems.append(f"L2: step {sid} depends on {dep}, which is not an earlier step")
         seen.add(sid)
 
-        # L3 -- 求めるものはすべて、依存先のどれかが提供している
+        # L3 -- 求めるものはすべて、依存先のどれかが提供しているか、既存のコードが
+        # 宣言している
         available = set().union(*(provides_by_step[d] for d in s["depends_on"] if d in provides_by_step)) \
             if s["depends_on"] else set()
         for req in s["contracts"].get("requires", []):
             name = declared_name(req)
-            if name not in available:
-                problems.append(f"L3: step {sid} requires `{name}`, which no dependency provides")
+            if name in available:
+                continue
+            if existing is None:
+                existing = {declared_name(line) for line in existing_contracts()} - planned
+            if name not in existing:
+                problems.append(f"L3: step {sid} requires `{name}`, which no dependency "
+                                f"provides and the code already in the repository does not declare")
 
         # L5 -- ファイルは書くか試すかのどちらかで、両方にはならない
         overlap = set(s["files_write"]) & set(s["files_test"])
@@ -2527,7 +2563,8 @@ A plan that breaks any of these is rejected without being run, so check them
 yourself first.
 
     L2   a step may depend only on steps listed BEFORE it
-    L3   everything in contracts.requires is provided by something it depends on
+    L3   everything in contracts.requires is provided by something it depends on,
+         or is declared by the code already in the repository
     L4   no file appears in files_write of two different steps
     L5   files_write and files_test never overlap
     L6   every step has at least one "normal", one "boundary" and one "error"
@@ -2971,6 +3008,11 @@ as `contracts.provides`. They exist before the first step runs.
 Only the signatures are shown. The bodies are left out on purpose: you write
 the criteria, and criteria written while looking at an implementation describe
 that implementation rather than what the requirements ask for.
+
+A step that uses one of these puts that line in `contracts.requires`, copied as
+it stands, and needs no step to provide it (L3). If a step of this plan
+provides the same name, that step changes it: a step that uses the name then
+depends on that step instead.
 
 """ + "\n".join(f"    {line}" for line in existing) + "\n"
 
