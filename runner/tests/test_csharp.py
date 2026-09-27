@@ -460,6 +460,17 @@ class WhatTheCodeAlreadyDeclares(CSharp):
         text = "#if !UNITY_EDITOR && (DEBUG || FOO)\npublic class A { }\n#elif true\npublic class B { }\n#endif\n"
         self.assertEqual(loop.csharp_declarations(text, "src/A.cs"), ["src/A.cs: class A"])
 
+    def test_an_empty_line_in_code_the_build_leaves_out_is_passed(self):
+        # 空の行では行の終わりが始まりと同じ位置になり、走査が進まなくなっていた。
+        text = "#if UNITY_EDITOR\n\npublic class A { }\n\n#endif\n\npublic class B { }\n"
+        self.assertEqual(loop.csharp_declarations(text, "src/A.cs"), ["src/A.cs: class B"])
+
+    def test_a_verbatim_type_name_is_read_without_its_at(self):
+        # Input System が生成するクラスは `@GameInputs` と書かれる。
+        self.assertEqual(loop.csharp_declarations(
+            "public partial class @Inputs: IDisposable { public void Enable() { } }", "src/I.cs"),
+            ["src/I.cs: class Inputs: IDisposable", "src/I.cs: void Inputs.Enable()"])
+
     def test_a_file_that_cannot_be_read_gives_nothing(self):
         for text in ("#if DEBUG\npublic class A { }\n", "public class A { /* }\n",
                      "namespace A;\npublic class B { }\n"):

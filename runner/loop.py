@@ -3767,7 +3767,7 @@ CSHARP_MODIFIER_WORDS = frozenset({
     "const", "volatile", "event", "implicit", "explicit"})
 CSHARP_TYPE_HEAD = re.compile(
     r"^(?P<mods>(?:(?:" + "|".join(sorted(CSHARP_MODIFIER_WORDS | {"ref"})) + r")\s+)*)"
-    r"(?P<kind>class|struct|interface|enum|record)\s+(?P<name>[A-Za-z_]\w*)(?P<rest>.*)$")
+    r"(?P<kind>class|struct|interface|enum|record)\s+@?(?P<name>[A-Za-z_]\w*)(?P<rest>.*)$")
 CSHARP_DIRECTIVE = re.compile(r"[ \t]*#[ \t]*(\w+)[ \t]*([^\n]*)")
 CSHARP_NAME_BEFORE = re.compile(r"(~?[A-Za-z_]\w*)\s*(<[^()]*>)?\s*$")
 
@@ -3950,13 +3950,13 @@ def csharp_scan(text: str, defines: set[str]) -> tuple[str, str, list[tuple[int,
                 except (ValueError, IndexError):
                     return None
                 blank(i, eol, code, shape)
-                i = eol
+                i = eol + 1     # 改行ごと進む。空の行では eol が i と同じだ
                 continue
             if not all(entry[1] for entry in stack):
                 if region is None:
                     region = i
                 blank(i, eol, code, shape)
-                i = eol
+                i = eol + 1
                 continue
         c, nxt = text[i], text[i + 1:i + 2]
         if c == "/" and nxt == "/":
