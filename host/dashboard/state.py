@@ -64,6 +64,53 @@ ESCALATION_FILES = {
 }
 
 
+# グラフに出す役。台帳の USAGE の who と同じ名前を使う。
+ROLES = ("planner", "critic", "solver")
+
+
+def usage_tokens(record: dict[str, Any]) -> int:
+    """USAGE 1件のトークン数。数え方はランナーの画面の in と out に合わせる。
+
+    入力は、キャッシュから読んだ分と書いた分を足す。
+    """
+    usage = record.get("usage")
+    if not isinstance(usage, dict):
+        return 0
+    total = 0
+    for key in ("input_tokens", "cache_creation_input_tokens",
+                "cache_read_input_tokens", "output_tokens"):
+        value = usage.get(key)
+        if isinstance(value, (int, float)):
+            total += int(value)
+    return total
+
+
+def token_runs(ledger: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """`run --all` 1回ごとに、役ごとのトークン数を足す。
+
+    1回は RUN_ALL_START から始まり、次の RUN_ALL_START の手前で終わる。
+    最初の RUN_ALL_START より前の USAGE は、どの回にも入れない。
+    結果は ALL_GREEN なら完了、RUN_ALL_STOP なら停止、どちらも無ければ未完了とする。
+    """
+    runs: list[dict[str, Any]] = []
+    current: dict[str, Any] | None = None
+    for record in ledger:
+        event = record.get("event")
+        if event == "RUN_ALL_START":
+            current = {"run": len(runs) + 1, "started": record.get("ts", ""),
+                       "outcome": "running", "tokens": dict.fromkeys(ROLES, 0)}
+            runs.append(current)
+        elif current is None:
+            continue
+        elif event == "USAGE" and record.get("who") in ROLES:
+            current["tokens"][record["who"]] += usage_tokens(record)
+        elif event == "ALL_GREEN":
+            current["outcome"] = "green"
+        elif event == "RUN_ALL_STOP":
+            current["outcome"] = "stopped"
+    return runs
+
+
 def request_id(kind: str, value: Any) -> str:
     encoded = json.dumps(value, ensure_ascii=False, sort_keys=True).encode("utf-8")
     return hashlib.sha256(kind.encode("ascii") + b"\0" + encoded).hexdigest()[:16]
@@ -143,6 +190,7 @@ class DashboardState:
             "pending": pending,
             "last_event": last,
             "recent_events": ledger[-50:],
+            "token_runs": token_runs(ledger),
             "decisions": decisions[-50:],
         }
 

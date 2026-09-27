@@ -19,6 +19,7 @@
     <section><h2>ステップ</h2><div class="table-wrap"><table><thead><tr><th>ID</th><th>状態</th><th>内容</th></tr></thead><tbody id="steps"></tbody></table></div></section>
     <section><div class="section-title"><h2>人間の対応待ち</h2><button id="refresh">更新</button></div><div id="pending" class="stack"></div></section>
     <section><h2>成果物</h2><div id="launchers" class="actions"></div></section>
+    <section><div class="section-title"><h2>役割ごとのトークン消費</h2><div id="token-legend" class="legend"></div></div><article class="chart"><div id="token-chart"></div><details><summary>表で見る</summary><div class="table-wrap"><table><thead><tr><th>回</th><th>開始</th><th>結果</th><th>プランナー</th><th>クリティック</th><th>ソルバー</th></tr></thead><tbody id="token-table"></tbody></table></div></details></article></section>
     <section><h2>最近の台帳</h2><div class="table-wrap"><table><thead><tr><th>時刻</th><th>イベント</th><th>ステップ</th></tr></thead><tbody id="events"></tbody></table></div></section>
   </main>
   <template id="request-template"><article class="request"><div><span class="badge"></span><h3></h3></div><pre></pre><textarea maxlength="4000" placeholder="確認結果やプランナーへの回答を記録"></textarea><div class="request-actions"></div></article></template>

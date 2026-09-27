@@ -50,6 +50,39 @@ class ReadingState(DashboardFixture):
         self.assertEqual(read_jsonl(path)[1], {"event": "UNREADABLE_LEDGER_RECORD", "line": 2})
 
 
+def usage(who, **tokens):
+    return {"event": "USAGE", "who": who, "usage": tokens}
+
+
+class TokenRuns(DashboardFixture):
+    def test_each_run_all_sums_tokens_per_role(self):
+        self.ledger(
+            {"event": "RUN_ALL_START"},
+            usage("solver", input_tokens=10, cache_read_input_tokens=5, output_tokens=2),
+            usage("solver", input_tokens=3),
+            usage("critic", cache_creation_input_tokens=7),
+            {"event": "ALL_GREEN", "steps": ["S1", "S2"]},
+            {"event": "RUN_ALL_START"},
+            usage("planner", output_tokens=4),
+            {"event": "RUN_ALL_STOP", "reason": "cap reached"},
+        )
+        runs = self.state.snapshot()["token_runs"]
+        self.assertEqual([(r["run"], r["outcome"], r["tokens"]) for r in runs], [
+            (1, "green", {"planner": 0, "critic": 7, "solver": 20}),
+            (2, "stopped", {"planner": 4, "critic": 0, "solver": 0}),
+        ])
+
+    def test_usage_before_the_first_run_is_not_counted(self):
+        self.ledger(usage("planner", input_tokens=100), {"event": "RUN_ALL_START"})
+        runs = self.state.snapshot()["token_runs"]
+        self.assertEqual(runs[0]["tokens"]["planner"], 0)
+        self.assertEqual(runs[0]["outcome"], "running")
+
+    def test_a_record_without_usage_counts_as_zero(self):
+        self.ledger({"event": "RUN_ALL_START"}, {"event": "USAGE", "who": "solver"})
+        self.assertEqual(self.state.snapshot()["token_runs"][0]["tokens"]["solver"], 0)
+
+
 class Decisions(DashboardFixture):
     def test_a_decision_answers_only_the_exact_pending_review(self):
         self.ledger({"event": "ALL_GREEN", "steps": ["S1", "S2"]})
