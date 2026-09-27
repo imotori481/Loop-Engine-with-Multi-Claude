@@ -143,6 +143,9 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Loop Engine operator dashboard")
     parser.add_argument("--project", type=Path, required=True,
                         help="host-side project mirror containing plan/ledger.jsonl")
+    parser.add_argument("--mirrors", type=Path, default=None,
+                        help="directory holding every mirror for the token history "
+                             "(default: the parent of --project)")
     parser.add_argument("--data", type=Path, default=Path(__file__).with_name(".state"))
     parser.add_argument("--config", type=Path, default=Path(__file__).with_name("config.json"))
     parser.add_argument("--port", type=int, default=8443)
@@ -150,7 +153,7 @@ def main() -> int:
     token = secrets.token_urlsafe(32)
     server = ThreadingHTTPServer(
         ("127.0.0.1", args.port),
-        handler_for(DashboardState(args.project, args.data), Launchers(args.config),
+        handler_for(DashboardState(args.project, args.data, args.mirrors), Launchers(args.config),
                     Reach(args.config), token, Live(args.config)),
     )
     print(f"Loop dashboard: http://127.0.0.1:{args.port}")

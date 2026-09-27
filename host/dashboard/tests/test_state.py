@@ -55,32 +55,64 @@ def usage(who, **tokens):
 
 
 class TokenRuns(DashboardFixture):
-    def test_each_run_all_sums_tokens_per_role(self):
+    def mirror(self, name, *records):
+        path = Path(self.temp.name) / name / "plan" / "ledger.jsonl"
+        path.parent.mkdir(parents=True)
+        path.write_text("".join(json.dumps(item) + "\n" for item in records), encoding="utf-8")
+
+    def test_a_loop_runs_from_bootstrap_and_counts_the_planning_too(self):
+        # 計画づくりと批評は run --all より前に流れる。そこを落とすと、
+        # クリティックは常に 0 になる。
         self.ledger(
-            {"event": "RUN_ALL_START"},
-            usage("solver", input_tokens=10, cache_read_input_tokens=5, output_tokens=2),
-            usage("solver", input_tokens=3),
+            {"ts": "1", "event": "PLAN_BOOTSTRAP"},
+            usage("planner", input_tokens=10, cache_read_input_tokens=5, output_tokens=2),
             usage("critic", cache_creation_input_tokens=7),
-            {"event": "ALL_GREEN", "steps": ["S1", "S2"]},
             {"event": "RUN_ALL_START"},
-            usage("planner", output_tokens=4),
+            usage("solver", input_tokens=3),
             {"event": "RUN_ALL_STOP", "reason": "cap reached"},
+            {"event": "RUN_ALL_START"},
+            usage("solver", input_tokens=4),
+            {"event": "ALL_GREEN", "steps": ["S1", "S2"]},
         )
         runs = self.state.snapshot()["token_runs"]
         self.assertEqual([(r["run"], r["outcome"], r["tokens"]) for r in runs], [
-            (1, "green", {"planner": 0, "critic": 7, "solver": 20}),
-            (2, "stopped", {"planner": 4, "critic": 0, "solver": 0}),
+            (1, "green", {"planner": 17, "critic": 7, "solver": 7}),
         ])
 
-    def test_usage_before_the_first_run_is_not_counted(self):
-        self.ledger(usage("planner", input_tokens=100), {"event": "RUN_ALL_START"})
+    def test_a_second_bootstrap_starts_the_next_loop(self):
+        self.ledger(
+            {"ts": "1", "event": "PLAN_BOOTSTRAP"}, usage("planner", output_tokens=1),
+            {"ts": "2", "event": "PLAN_BOOTSTRAP"}, usage("planner", output_tokens=2),
+        )
         runs = self.state.snapshot()["token_runs"]
-        self.assertEqual(runs[0]["tokens"]["planner"], 0)
-        self.assertEqual(runs[0]["outcome"], "running")
+        self.assertEqual([(r["outcome"], r["tokens"]["planner"]) for r in runs],
+                         [("abandoned", 1), ("running", 2)])
 
-    def test_a_record_without_usage_counts_as_zero(self):
-        self.ledger({"event": "RUN_ALL_START"}, {"event": "USAGE", "who": "solver"})
-        self.assertEqual(self.state.snapshot()["token_runs"][0]["tokens"]["solver"], 0)
+    def test_records_before_any_bootstrap_form_the_first_loop(self):
+        self.ledger({"ts": "1", "event": "PLAN_APPLY"}, usage("solver", input_tokens=5))
+        self.assertEqual(self.state.snapshot()["token_runs"][0]["tokens"]["solver"], 5)
+
+    def test_a_loop_without_usage_is_left_out(self):
+        self.ledger({"ts": "1", "event": "PLAN_BOOTSTRAP"}, {"event": "ALL_GREEN"})
+        self.assertEqual(self.state.snapshot()["token_runs"], [])
+
+    def test_the_history_spans_every_mirror_in_start_order(self):
+        # 1つの台帳には、ふつう1回分しか入らない。点が1つでは線にならない。
+        self.mirror("runs/run-001", {"ts": "1", "event": "PLAN_BOOTSTRAP"},
+                    usage("planner", output_tokens=1))
+        self.mirror("projects/game", {"ts": "3", "event": "PLAN_BOOTSTRAP"},
+                    usage("planner", output_tokens=3))
+        self.ledger({"ts": "2", "event": "PLAN_BOOTSTRAP"}, usage("planner", output_tokens=2))
+        runs = self.state.snapshot()["token_runs"]
+        self.assertEqual([(r["run"], r["source"]) for r in runs],
+                         [(1, "runs/run-001"), (2, "project"), (3, "projects/game")])
+
+    def test_the_live_mirror_does_not_repeat_its_project(self):
+        records = ({"ts": "1", "event": "PLAN_BOOTSTRAP"}, usage("planner", output_tokens=1))
+        self.mirror("projects/game", *records)
+        self.ledger(*records)
+        runs = self.state.snapshot()["token_runs"]
+        self.assertEqual([r["source"] for r in runs], ["projects/game"])
 
 
 class Decisions(DashboardFixture):

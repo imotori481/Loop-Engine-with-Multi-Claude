@@ -85,29 +85,70 @@ def usage_tokens(record: dict[str, Any]) -> int:
     return total
 
 
-def token_runs(ledger: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """`run --all` 1回ごとに、役ごとのトークン数を足す。
+def token_runs(ledger: list[dict[str, Any]], source: str = "") -> list[dict[str, Any]]:
+    """1つの台帳を、loop go から完了までの回に分け、回ごと役ごとのトークン数を足す。
 
-    1回は RUN_ALL_START から始まり、次の RUN_ALL_START の手前で終わる。
-    最初の RUN_ALL_START より前の USAGE は、どの回にも入れない。
-    結果は ALL_GREEN なら完了、RUN_ALL_STOP なら停止、どちらも無ければ未完了とする。
+    1回は PLAN_BOOTSTRAP から始まり、次の PLAN_BOOTSTRAP の手前で終わる。
+    計画づくりと批評は run --all より前に流れるので、RUN_ALL_START では区切らない。
+    PLAN_BOOTSTRAP より前に記録があれば、最初の記録から1回目を始める。
+    USAGE が1件も無い回は、消費を記録する前の台帳なので返さない。
+
+    結果は最後に起きたものを取る。ALL_GREEN なら完了、RUN_ALL_STOP なら停止。
+    次の PLAN_BOOTSTRAP が来た回は、完了していなければ中断とする。
     """
     runs: list[dict[str, Any]] = []
     current: dict[str, Any] | None = None
     for record in ledger:
         event = record.get("event")
-        if event == "RUN_ALL_START":
-            current = {"run": len(runs) + 1, "started": record.get("ts", ""),
-                       "outcome": "running", "tokens": dict.fromkeys(ROLES, 0)}
+        if event == "PLAN_BOOTSTRAP" or current is None:
+            if current is not None and current["outcome"] != "green":
+                current["outcome"] = "abandoned"
+            current = {"source": source, "started": record.get("ts", ""),
+                       "outcome": "running", "calls": 0,
+                       "tokens": dict.fromkeys(ROLES, 0)}
             runs.append(current)
-        elif current is None:
-            continue
-        elif event == "USAGE" and record.get("who") in ROLES:
+        if event == "USAGE" and record.get("who") in ROLES:
             current["tokens"][record["who"]] += usage_tokens(record)
+            current["calls"] += 1
         elif event == "ALL_GREEN":
             current["outcome"] = "green"
         elif event == "RUN_ALL_STOP":
             current["outcome"] = "stopped"
+        elif event == "RUN_ALL_START":
+            current["outcome"] = "running"
+    return [run for run in runs if run["calls"]]
+
+
+def ledger_files(root: Path) -> list[Path]:
+    """写しの置き場の下にある台帳。loop-pull の projects\\*、runs\\*、project を拾う。
+
+    同じ回が2か所にあるときは先に拾ったほうの名前が残る。project より
+    projects\\<name> のほうが、どのプロジェクトかが分かるので先に拾う。
+    """
+    return sorted(root.glob("*/*/plan/ledger.jsonl")) + sorted(root.glob("*/plan/ledger.jsonl"))
+
+
+def token_history(root: Path) -> list[dict[str, Any]]:
+    """写しの置き場にある全台帳の回を、開始時刻の順に並べて番号を振る。
+
+    1つのプロジェクトの台帳には、ふつう1回分しか入らない。bootstrap は緑の
+    ステップがあると断るからだ。だから回の履歴は、写しを横断して作る。
+    project は今のプロジェクトの写しで、projects の下と同じ回を持つ。
+    開始時刻とトークン数が同じ回は1つにまとめる。
+    """
+    seen = set()
+    runs = []
+    for path in ledger_files(root):
+        source = path.parent.parent.relative_to(root).as_posix()
+        for run in token_runs(read_jsonl(path), source):
+            key = (run["started"], tuple(run["tokens"].values()))
+            if key in seen:
+                continue
+            seen.add(key)
+            runs.append(run)
+    runs.sort(key=lambda run: run["started"])
+    for number, run in enumerate(runs, 1):
+        run["run"] = number
     return runs
 
 
@@ -117,9 +158,12 @@ def request_id(kind: str, value: Any) -> str:
 
 
 class DashboardState:
-    def __init__(self, project: Path, data_dir: Path):
+    def __init__(self, project: Path, data_dir: Path, mirrors: Path | None = None):
         self.project = project.resolve()
         self.data_dir = data_dir.resolve()
+        # トークンの履歴を読む写しの置き場。loop-pull は project と同じ場所に
+        # projects と runs を置く。
+        self.mirrors = mirrors.resolve() if mirrors is not None else self.project.parent
         self.decisions_file = self.data_dir / "decisions.jsonl"
         # サーバはスレッドで動くので、2つの判断が同時に届くことがある。
         # 要求がまだ保留中かを確かめることと、答えを記録することは、分けられ
@@ -190,7 +234,7 @@ class DashboardState:
             "pending": pending,
             "last_event": last,
             "recent_events": ledger[-50:],
-            "token_runs": token_runs(ledger),
+            "token_runs": token_history(self.mirrors),
             "decisions": decisions[-50:],
         }
 

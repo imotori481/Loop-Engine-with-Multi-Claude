@@ -67,7 +67,7 @@ const ROLES = [
   {key: "critic", label: "クリティック", color: "#d95926"},
   {key: "solver", label: "ソルバー", color: "#199e70"},
 ];
-const OUTCOME = {green: "完了", stopped: "停止", running: "未完了"};
+const OUTCOME = {green: "完了", stopped: "停止", running: "未完了", abandoned: "中断"};
 const SVG = "http://www.w3.org/2000/svg";
 const compact = new Intl.NumberFormat("ja-JP", {notation: "compact", maximumFractionDigits: 1});
 const exact = new Intl.NumberFormat("ja-JP");
@@ -95,13 +95,14 @@ function renderTokens(runs) {
   const table = document.querySelector("#token-table"); table.replaceChildren();
   for (const run of [...runs].reverse()) {
     const row = document.createElement("tr");
-    row.append(text("td", run.run), text("td", run.started), text("td", OUTCOME[run.outcome] || run.outcome),
+    row.append(text("td", run.run), text("td", run.source), text("td", run.started),
+               text("td", OUTCOME[run.outcome] || run.outcome),
                ...ROLES.map(role => text("td", exact.format(run.tokens[role.key]))));
     table.append(row);
   }
 
   const chart = document.querySelector("#token-chart"); chart.replaceChildren();
-  if (!runs.length) { chart.append(text("p", "台帳に run --all の記録がまだありません。", "why")); return; }
+  if (!runs.length) { chart.append(text("p", "写しの台帳に消費の記録がまだありません。", "why")); return; }
 
   const width = 800, height = 280, left = 56, right = 96, top = 12, bottom = 30;
   const plotWidth = width - left - right, plotHeight = height - top - bottom;
@@ -151,7 +152,7 @@ function renderTokens(runs) {
     const run = runs[index];
     cross.setAttribute("x1", x(index)); cross.setAttribute("x2", x(index)); cross.setAttribute("visibility", "visible");
     tip.replaceChildren(text("strong", `${run.run}回目（${OUTCOME[run.outcome] || run.outcome}）`),
-                        text("p", run.started, "why"));
+                        text("p", `${run.source} / ${run.started}`, "why"));
     for (const role of ROLES) {
       const line = document.createElement("div"), swatch = document.createElement("i");
       swatch.style.background = role.color;
