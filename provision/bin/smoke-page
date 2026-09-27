@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 開発サーバで開いたページが、src/main.ts の start まで届くか。
+# 開発サーバで開いたページが、柵の中の main.ts の start まで届くか。
 #
 #     sudo -u runner /srv/loop/bin/smoke-page
 #
@@ -20,6 +20,10 @@ set -euo pipefail
 
 TOOLS="${LOOP_NODE_TOOLS:-/srv/loop/node}"
 PAGE="${LOOP_PAGE:-/srv/loop/project/index.html}"
+# 柵の場所。index.html はそこの main.ts を読む（35-node.sh）。規則は loop.py の
+# LAYOUT にしか書かないので、そこから読む。
+SRC="${LOOP_SRC:-$(python3 -B -c "import sys; sys.path.insert(0, '/srv/loop/runner'); import loop; print(loop.LAYOUT['src'])")}"
+export MAIN="/$SRC/main.ts"
 
 [ -d "$TOOLS/node_modules/vite" ] || { echo "smoke-page: no vite under $TOOLS; run 35-node.sh" >&2; exit 2; }
 [ -r "$PAGE" ] || { echo "smoke-page: cannot read $PAGE" >&2; exit 2; }
@@ -27,10 +31,10 @@ PAGE="${LOOP_PAGE:-/srv/loop/project/index.html}"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
-mkdir -p "$WORK/src"
+mkdir -p "$WORK/$SRC"
 cp "$PAGE" "$WORK/index.html"
 ln -s "$TOOLS/node_modules" "$WORK/node_modules"
-cat > "$WORK/src/main.ts" <<'EOF'
+cat > "$WORK$MAIN" <<'EOF'
 export function start(root: HTMLElement): void {
   root.textContent = "smoke-page";
 }
@@ -43,6 +47,7 @@ import { readFileSync } from "node:fs";
 import { createServer } from "vite";
 
 const root = process.cwd();
+const MAIN = process.env.MAIN;
 const server = await createServer({
   root,
   configFile: false,
@@ -65,21 +70,21 @@ try {
 
   let loader = null;
   for (const src of sources) {
-    if (src === "/src/main.ts") { loader = src; break; }
+    if (src === MAIN) { loader = src; break; }
     const module = await server.transformRequest(src);
-    if (module && module.code.includes("/src/main.ts")) { loader = src; break; }
+    if (module && module.code.includes(MAIN)) { loader = src; break; }
   }
   if (loader) {
-    console.log(`ok: ${loader} loads /src/main.ts`);
+    console.log(`ok: ${loader} loads ${MAIN}`);
   } else {
-    fail(`no module script served for index.html loads /src/main.ts (saw: ${sources.join(", ") || "none"})`);
+    fail(`no module script served for index.html loads ${MAIN} (saw: ${sources.join(", ") || "none"})`);
   }
 
-  const main = await server.transformRequest("/src/main.ts");
+  const main = await server.transformRequest(MAIN);
   if (main && /export\s+function\s+start\b/.test(main.code)) {
-    console.log("ok: /src/main.ts is served and exports start");
+    console.log(`ok: ${MAIN} is served and exports start`);
   } else {
-    fail("/src/main.ts was not served as a module exporting start");
+    fail(`${MAIN} was not served as a module exporting start`);
   }
 } catch (error) {
   fail(error?.message ?? String(error));
@@ -91,8 +96,8 @@ EOF
 
 echo "vite: $(node -p "require('$TOOLS/node_modules/vite/package.json').version")"
 if (cd "$WORK" && node check.mjs); then
-  echo "smoke-page: ok。開発サーバが index.html を配り、それが src/main.ts の start に届く"
+  echo "smoke-page: ok。開発サーバが index.html を配り、それが $SRC/main.ts の start に届く"
 else
-  echo "smoke-page: 壊れている。開発サーバで開いたページが src/main.ts に届かない" >&2
+  echo "smoke-page: 壊れている。開発サーバで開いたページが $SRC/main.ts に届かない" >&2
   exit 1
 fi

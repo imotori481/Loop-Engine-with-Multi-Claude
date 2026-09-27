@@ -39,8 +39,79 @@ from pathlib import Path
 LOOP = Path("/srv/loop")
 PROJECT = LOOP / "project"
 PLAN = PROJECT / "plan"
-TESTS = PROJECT / "tests"
-SRC = PROJECT / "src"
+
+# 書き込みの柵の場所。プロジェクトごとに決まる（Unity はコードを Assets/ の下に
+# 置く）。loop-project.sh が /srv/loop/layout.json を今のプロジェクトのものへの
+# リンクにする。root の所有なので、ランナーもソルバーも書き換えられない。無ければ
+# src/ と tests/。
+LAYOUT_FILE = LOOP / "layout.json"
+LAYOUT_DEFAULT = {"src": "src", "tests": "tests"}
+# 柵にしてはならない場所。ランナーの持ち物か、凍結したツールチェーンだ。
+LAYOUT_RESERVED = {".git", "plan", ".runner", ".venv", "node_modules"}
+
+
+def layout_problems(layout: object) -> list[str]:
+    """柵の場所として使えない理由。使えるなら空。loop-project.sh と同じ規則。"""
+    if not isinstance(layout, dict) or set(layout) != {"src", "tests"}:
+        return ['layout must be {"src": <dir>, "tests": <dir>}']
+    problems = []
+    parts = {}
+    for key, value in layout.items():
+        if not isinstance(value, str) or not value:
+            problems.append(f"{key} must be a non-empty string")
+            continue
+        parts[key] = tuple(value.split("/"))
+        # 空白や記号は、プロビジョニングの bash が引用し損ねたときに別のパスになる。
+        if not re.fullmatch(r"[A-Za-z0-9._/-]+", value):
+            problems.append(f"{key} may use only letters, digits, '.', '_', '-' "
+                            f"and '/': {value!r}")
+        elif value.startswith("/") or value.endswith("/") \
+                or any(p in ("", ".", "..") for p in parts[key]):
+            problems.append(f"{key} must be a relative path without '.', '..' or "
+                            f"empty parts: {value!r}")
+        elif parts[key][0] in LAYOUT_RESERVED:
+            problems.append(f"{key} may not be under {parts[key][0]}/: {value!r}")
+    if len(parts) == 2:
+        short, long_ = sorted(parts.values(), key=len)
+        if long_[:len(short)] == short:
+            problems.append("src and tests may not contain one another")
+    return problems
+
+
+def read_layout() -> dict[str, str]:
+    try:
+        layout = json.loads(LAYOUT_FILE.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return dict(LAYOUT_DEFAULT)
+    except (OSError, json.JSONDecodeError) as e:
+        sys.exit(f"cannot read {LAYOUT_FILE}: {e}")
+    problems = layout_problems(layout)
+    if problems:
+        sys.exit(f"{LAYOUT_FILE} is not a usable layout: " + "; ".join(problems))
+    return layout
+
+
+def layout_text(text: str) -> str:
+    """ブリーフの文の {SRC} {TESTS} {SRC_FROM_TESTS} を、今の柵の場所に置き換える。
+
+    プランナーに渡す場所は、書き写さずに、ランナーが実際に強制するものから取る。
+    """
+    from_tests = os.path.relpath(LAYOUT["src"], LAYOUT["tests"]).replace(os.sep, "/")
+    return (text.replace("{SRC_FROM_TESTS}", from_tests)
+            .replace("{SRC}", LAYOUT["src"]).replace("{TESTS}", LAYOUT["tests"]))
+
+
+def in_layout(path: str, key: str) -> bool:
+    """`path` が柵の `key`（"src" か "tests"）の下にあるか。`..` で抜けるものは外。"""
+    parts = path.split("/")
+    base = LAYOUT[key].split("/")
+    return (len(parts) > len(base) and parts[:len(base)] == base
+            and not any(p in ("", ".", "..") for p in parts))
+
+
+LAYOUT = read_layout()
+TESTS = PROJECT / LAYOUT["tests"]
+SRC = PROJECT / LAYOUT["src"]
 STATE = PROJECT / ".runner"
 BRIEF_DIR = LOOP / "brief"
 PYTEST = PROJECT / ".venv" / "bin" / "pytest"
@@ -643,10 +714,10 @@ LANGUAGES = {
         # 文字。ドットを含めるのは Python の区切り文字だからだ。
         # `incgame.engine.sub` の中に現れる `incgame.engine` は、別のモジュールを指す。
         "name_boundary": r"[\w.]",
-        "layout_note": """Put the package inside src/, e.g. `src/yourpkg/models.py`, and import it as
-`from yourpkg.models import Thing` -- `src` is on sys.path, so the `src.`
-prefix does not appear in imports. Say this in CONTEXT.md; the solver has no
-other way to learn it.""",
+        "layout_note": """Put the package inside {SRC}/, e.g. `{SRC}/yourpkg/models.py`, and import it as
+`from yourpkg.models import Thing` -- `{SRC}` is on sys.path, so it does not
+appear in imports. Say this in CONTEXT.md; the solver has no other way to
+learn it.""",
     },
     "typescript": {
         "name": "typescript",
@@ -684,25 +755,26 @@ compiling and not one of your tests runs.
         # bootstrap の1回目で見つかった。B3 の欠陥と同じ形で、誤っていたのは
         # 計画ではなく規則で、そのために試行を1回使った。
         "name_boundary": r"[\w]",
-        "layout_note": """Every source file is `.ts` under src/, e.g. `src/idlegame/models.ts`, and
-every test file is `.ts` under tests/. Import with a RELATIVE path and no
+        "layout_note": """Every source file is `.ts` under {SRC}/, e.g. `{SRC}/idlegame/models.ts`, and
+every test file is `.ts` under {TESTS}/. Import with a RELATIVE path and no
 extension in the specifier is wrong here -- write the extension:
-`import { Thing } from "../src/idlegame/models.ts"`. vitest resolves it and
-esbuild strips the types; there is no build step and no tsc, so a type is
-something the next step READS, not something a compiler checks.
+`import { Thing } from "{SRC_FROM_TESTS}/idlegame/models.ts"` from a test file
+directly in {TESTS}/. vitest resolves it and esbuild strips the types; there is
+no build step and no tsc, so a type is something the next step READS, not
+something a compiler checks.
 
 THE PAGE ALREADY EXISTS AND YOU DO NOT WRITE IT. `index.html` sits at the
 repository root, which is outside the write fence, so it belongs to the
 environment rather than to any step. It is four lines and it does exactly one
 thing:
 
-    import { start } from "/src/main.ts";
+    import { start } from "/{SRC}/main.ts";
     start(document.getElementById("app"));
 
-So the plan MUST end with a step whose files_write includes `src/main.ts`, and
+So the plan MUST end with a step whose files_write includes `{SRC}/main.ts`, and
 that module MUST export `start(root: HTMLElement): void`. Nothing else about
 the page is yours to decide. Everything `start` does is ordinary code under
-src/: it is under the fence, the tests can reach it, and its criteria are
+{SRC}/: it is under the fence, the tests can reach it, and its criteria are
 written against what it puts in the document -- what the element contains,
 which buttons exist, which of them are disabled, and what changes when one is
 clicked.
@@ -1875,11 +1947,12 @@ def modules_of(files_write: list[str]) -> list[str]:
     suffix = LANGUAGE["source_suffix"]
     separator = LANGUAGE["module_separator"]
     index = LANGUAGE["index_name"]
+    prefix = LAYOUT["src"] + "/"
     names = []
     for f in files_write:
-        if not f.startswith("src/") or not f.endswith(suffix):
+        if not f.startswith(prefix) or not f.endswith(suffix):
             continue
-        parts = f[len("src/"):-len(suffix)].split("/")
+        parts = f[len(prefix):-len(suffix)].split("/")
         if parts[-1] == index:
             parts = parts[:-1]
         if parts:
@@ -1994,12 +2067,14 @@ def validate_plan(tasks: dict) -> list[str]:
         # 最初の計画はふつうこれを誤る。「パッケージはリポジトリの根に置く」は
         # 普通の Python の配置だからだ。だからブリーフの助言ではなく、リンタが
         # 持つ規則にする。
+        #
+        # 2つのディレクトリの場所はプロジェクトごとに決まる（LAYOUT）。
         for f in s["files_write"]:
-            if not f.startswith("src/"):
-                problems.append(f"L12: step {sid} writes {f}, which is outside src/")
+            if not in_layout(f, "src"):
+                problems.append(f"L12: step {sid} writes {f}, which is outside {LAYOUT['src']}/")
         for f in s["files_test"]:
-            if not f.startswith("tests/"):
-                problems.append(f"L12: step {sid} tests {f}, which is outside tests/")
+            if not in_layout(f, "tests"):
+                problems.append(f"L12: step {sid} tests {f}, which is outside {LAYOUT['tests']}/")
 
         # L14 -- 契約は、渡すものの形を述べる
         #
@@ -2592,8 +2667,8 @@ only if the requirements rule out every answer.
 
 # Where the code goes -- not negotiable
 
-Every path in `files_write` starts with `src/`, and every path in `files_test`
-starts with `tests/`. Those two directories are the only ones the runner can
+Every path in `files_write` starts with `{SRC}/`, and every path in `files_test`
+starts with `{TESTS}/`. Those two directories are the only ones the runner can
 open and close for writing, so a plan that puts code anywhere else cannot be
 enforced and is rejected.
 
@@ -2617,7 +2692,7 @@ yourself first.
          empty collection ([] {} ()), or True / False / None
     L10  the LAST step is kind "integration"
     L11  a "unit" step may not provide something that no later step requires
-    L12  files_write is under src/, files_test is under tests/
+    L12  files_write is under {SRC}/, files_test is under {TESTS}/
     L13  the FIRST step is kind "skeleton", and it is the only one
     L14  every type in contracts.provides states its contents: dict[str, Item],
          tuple[State, int], list[str]. A bare dict, list, tuple or set is
@@ -2710,7 +2785,7 @@ making a plan this machine accepts is your problem, not the author's.
 # The requirements, written by the human
 {requirements}
 {environment_facts()}
-{BOOTSTRAP_RULES.replace('{LAYOUT_NOTE}', LANGUAGE['layout_note'])}
+{layout_text(BOOTSTRAP_RULES.replace('{LAYOUT_NOTE}', LANGUAGE['layout_note']))}
 {BOOTSTRAP_ESCALATE}
 {feedback_section(feedback)}
 Output nothing but the files. Do not restate the plan in your final message.
@@ -2963,13 +3038,15 @@ def ts_declarations(text: str, path: str) -> list[str]:
 
 
 def existing_contracts() -> list[str]:
-    """最後のコミットの src/ にある公開の宣言。計画の言語のファイルだけを読む。
+    """最後のコミットの柵の中（LAYOUT["src"]）にある公開の宣言。計画の言語の
+    ファイルだけを読む。
 
     作業ツリーではなく HEAD から読む。ステップの途中の書きかけやスタブを、
     すでにあるコードとして見せないためだ。
     """
     try:
-        listing = run(["git", "ls-tree", "-r", "-z", "--name-only", "HEAD", "--", "src"])
+        listing = run(["git", "ls-tree", "-r", "-z", "--name-only", "HEAD", "--",
+                       LAYOUT["src"]])
     except OSError:
         return []   # 作業ツリーがまだ無い
     if listing.returncode != 0:
@@ -2977,7 +3054,7 @@ def existing_contracts() -> list[str]:
     suffix = LANGUAGE["source_suffix"]
     lines: list[str] = []
     for path in listing.stdout.split("\0"):
-        if not path.startswith("src/") or not path.endswith(suffix):
+        if not in_layout(path, "src") or not path.endswith(suffix):
             continue
         shown = run(["git", "show", f"HEAD:{path}"])
         if shown.returncode != 0:
@@ -3167,16 +3244,16 @@ def environment_facts() -> str:
         if PROJECT.is_dir() else []
     provided_text = ""
     if provided:
-        provided_text = f"""
+        provided_text = layout_text(f"""
 These files at the root belong to the environment: {", ".join(provided)}.
 No step writes them, and each is already in its final form before the first
 step runs. So a criterion that checks only one of them -- what it says, what it
 imports, that it exists -- is already true against the stub. RED_GATE runs every
 test before anything is implemented, sees that one pass, and stops the step
-(R4). Every criterion has to stay false until this step's own code under src/
+(R4). Every criterion has to stay false until this step's own code under {{SRC}}/
 is written. Where one of these files matters, test the code it calls, not the
 file.
-"""
+""")
         if "index.html" in provided:
             provided_text += """For the page: call `start` on an element and check what it puts there. Do not
 write a criterion about the text of index.html.
@@ -3188,10 +3265,10 @@ write a criterion about the text of index.html.
     existing = existing_contracts()
     existing_text = ""
     if existing:
-        existing_text = """
+        existing_text = layout_text("""
 # What the code already declares
 
-The repository already has code under src/, written before this plan. These are
+The repository already has code under {SRC}/, written before this plan. These are
 its public declarations, read from the last commit and written in the same form
 as `contracts.provides`. They exist before the first step runs.
 
@@ -3216,7 +3293,7 @@ Do not write criteria to show that the rest still works. The tests already in
 the repository run on every step, and a step that breaks one of them is not
 green. That is how unchanged behaviour is kept.
 
-""" + "\n".join(f"    {line}" for line in existing) + "\n"
+""") + "\n".join(f"    {line}" for line in existing) + "\n"
 
     # テストが何に届くかを決めるファイル。言語ごとに名前は違うが仕事は同じで、
     # どちらでもプランナーに見せる必要がある。import のパスに逆らう計画は負ける。
@@ -3244,10 +3321,10 @@ It is what a person opens, and it is already wired:
     # どの実装でも変わらず、ソルバーは時間切れまで考えた。開けることは箱の検査が
     # 確かめ、計画には start が何を組み立てるかだけを書かせる。
     if page_text:
-        page_text += """
+        page_text += layout_text("""
 Opening the page through a development server (Vite, for example) is also the
 environment's job. The server serves index.html, and index.html loads `start`
-from src/main.ts; that path is checked when the machine is provisioned. If the
+from {SRC}/main.ts; that path is checked when the machine is provisioned. If the
 requirements say the page must open from a dev server, a step that exports
 `start` satisfies it. Write criteria about what `start` puts in the document.
 
@@ -3255,7 +3332,7 @@ Do not write criteria that start a development server, transform index.html, or
 check what a server sends back. That output is decided by the server, not by
 any code a step writes: no implementation can change it, and the step spends
 every attempt on it.
-"""
+""")
 
     # ここのほかのものと同じ理由で、書き写さずに集める。ただし、これは効き目が
     # 大きい。「窓が開く」のような条件は TclError で落ちるテストになり、それは

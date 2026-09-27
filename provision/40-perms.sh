@@ -6,8 +6,12 @@
 # 最後に solver の視点でモデルを確かめる。誰も試していない権限モデルは、
 # 存在しないのと同じだ。
 set -euo pipefail
+. "$(dirname "$0")/layout.sh"
 P=/srv/loop/project
 ADMIN_USER="${ADMIN_USER:-maint}"
+# 柵の2つのディレクトリ。場所はプロジェクトごとに決まる（layout.sh）。
+SRC="$P/$LAYOUT_SRC"
+TESTS="$P/$LAYOUT_TESTS"
 
 chown -R runner:runner "$P"
 
@@ -55,8 +59,8 @@ chmod 700 "$P/.git" "$P/plan" "$P/.runner"
 
 # solver が書ける場所。setgid にして、solver が作ったファイルがグループ solverw を
 # 保ち、runner が扱えるようにする。
-chown -R runner:solverw "$P/src" "$P/tests"
-chmod 2770 "$P/src" "$P/tests"
+chown -R runner:solverw "$SRC" "$TESTS"
+chmod 2770 "$SRC" "$TESTS"
 
 # インタプリタとライブラリ。読めて実行できるが、書けない。
 chmod -R go-w "$P/.venv"
@@ -79,8 +83,8 @@ chk_cannot rm -f "$P/.perm-probe-runner"                       # スティッキ
 chk_cannot mv "$P/.perm-probe-runner" "$P/.perm-probe-moved"   # スティッキービット
 rm -f "$P/.perm-probe-runner" "$P/.perm-probe-solver" "$P/.perm-probe-moved"
 
-chk_can    test -w "$P/src"
-chk_can    test -w "$P/tests"
+chk_can    test -w "$SRC"
+chk_can    test -w "$TESTS"
 chk_can    test -x "$P/.venv/bin/python"
 chk_can    test -r /srv/loop/brief
 
@@ -103,7 +107,7 @@ chk_cannot ls /home/runner
 # 見れば判定の拠り所にしてしまうテストを見てはならない。
 for stranger in planner critic; do
   id -u "$stranger" >/dev/null 2>&1 || continue
-  for target in "$P" "$P/src" "$P/tests"; do
+  for target in "$P" "$SRC" "$TESTS"; do
     if sudo -u "$stranger" ls "$target" >/dev/null 2>&1; then
       echo "FAIL: $stranger should NOT be able to: ls $target"
       fail=1

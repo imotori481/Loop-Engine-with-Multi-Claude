@@ -104,11 +104,17 @@ solver  : uid 1002. sudo なし。SSH 鍵なし。sshd の AllowUsers に載せ�
 | `.git/` | runner:runner | 700 | **不可**（読みも不要） |
 | `plan/` (tasks.json, CONTEXT.md, ledger.jsonl) | runner:runner | 700 | **不可** |
 | `.runner/` (凍結マニフェスト) | runner:runner | 700 | **不可**（何を照合しているか見せない） |
-| `tests/` | runner:solverw | `X`: 2775 → **555** | TEST_WRITE 中のみ書、FREEZE 以降 読のみ |
-| `src/` | runner:solverw | 2775 | 書（§4-4 の経路チェックあり） |
+| `tests/`（柵のテストの場所） | runner:solverw | `X`: 2775 → **555** | TEST_WRITE 中のみ書、FREEZE 以降 読のみ |
+| `src/`（柵のコードの場所） | runner:solverw | 2775 | 書（§4-4 の経路チェックあり） |
 | `conftest.py`, `pytest.ini`, `pyproject.toml` | runner:runner | 644 | 読のみ（常時。**スティッキー依存** ── 下記） |
 | `.venv/` | runner:runner | 755 | 読・実行のみ、**書不可** |
 | `/srv/loop/brief/` | runner:solverw | 750 | 読のみ |
+
+柵の2つのディレクトリの場所はプロジェクトごとに決まる。`/srv/loop/layout.json`（root 所有。
+`loop-project.sh` が今のプロジェクトのものへ向けるリンク）の `src` と `tests` で、無ければ
+`src/` と `tests/`。Unity のプロジェクトはコードを `Assets/` の下に置く。この節と以降で
+`src/` と `tests/` と書くのは、柵のその2つの場所のこと。ランナーは起動時に一度だけ読み、
+壊れた値なら既定に戻らずに止まる。既定に戻ると、柵が黙って別の場所に開くからだ。
 
 **ルートが書ける理由と、スティッキーが要る理由**（2026-08-18 実測）。Codex の
 `apply_patch` はワークスペースのルートを経由して書くため、ルートが読み取り専用だと
@@ -1103,7 +1109,7 @@ TypeScript であって素の JavaScript でないのは L14 のため。契約�
 | ~~L9~~ | **廃止**（2026-08-21）。L13 が「最初のステップは skeleton」を要求した時点で恒真になった。番号は再利用しない |
 | L10 | `kind: "integration"` が最終ステップに1つ以上存在する |
 | L11 | どのステップからも参照されない `provides` がない（デッドコントラクト） |
-| L12 | `files_write` が `src/` 配下、`files_test` が `tests/` 配下（2026-08-19 追加） |
+| L12 | `files_write` が柵のコードの場所（既定 `src/`）の配下、`files_test` が柵のテストの場所（既定 `tests/`）の配下（2026-08-19 追加） |
 | L13 | **最初のステップが `kind: "skeleton"`**、かつ計画中にちょうど1つ（2026-08-19 追加） |
 | L14 | `contracts.provides` の型注釈が**中身を述べている**こと。裸の `tuple`/`list`/`dict`/`set`（および `Tuple`/`Sequence`/`Mapping` 等）を拒否（2026-08-21 追加） |
 | L15 | `contracts.provides` の各行が**居場所のモジュール**を述べ、それがそのステップ自身の `files_write` から導けること（2026-08-21 追加） |

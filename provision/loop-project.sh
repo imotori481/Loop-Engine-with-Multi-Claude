@@ -60,6 +60,43 @@ link_repo() {
   mv -T "$LOOP/.repo.git.new" "$LOOP/repo.git"
 }
 
+# 書き込みの柵の場所。ランナーとプロビジョニングは /srv/loop/layout.json を読む。
+# プロジェクトが layout.json を持っていればそこへのリンクにし、持っていなければ
+# 消す（既定の src と tests）。リンクもファイルも root の所有なので、ランナーは
+# 自分の柵を動かせない。
+link_layout() {
+  if [ -f "$PROJECTS/$1/layout.json" ]; then
+    ln -sfn "$PROJECTS/$1/layout.json" "$LOOP/.layout.json.new"
+    mv -T "$LOOP/.layout.json.new" "$LOOP/layout.json"
+  else
+    rm -f "$LOOP/layout.json"
+  fi
+}
+
+# 柵の場所を検査する。規則は loop.py の layout_problems にしか書かない。何かを
+# 作る前に呼ぶ。
+check_layout() {
+  local src="$1" tests="$2"
+  python3 -B - "$HERE/../runner" "$src" "$tests" <<'PY' \
+    || die "柵の場所に使えない（src='$src' tests='$tests'）"
+import sys
+sys.path.insert(0, sys.argv[1])
+import loop
+problems = loop.layout_problems({"src": sys.argv[2], "tests": sys.argv[3]})
+for p in problems:
+    print(f"  {p}", file=sys.stderr)
+sys.exit(1 if problems else 0)
+PY
+}
+
+# 検査を通った値を書く。値に使える文字は英数字と . _ / - だけなので、JSON の
+# 引用は要らない。
+write_layout() {
+  local name="$1" src="$2" tests="$3"
+  printf '{"src": "%s", "tests": "%s"}\n' "$src" "$tests" \
+    | install -o root -g root -m 644 /dev/stdin "$PROJECTS/$name/layout.json"
+}
+
 ensure_root() {
   install -d -o root -g root -m 755 "$PROJECTS"
 }
@@ -101,6 +138,7 @@ cmd_adopt() {
   install -d -o root -g root -m 755 "$PROJECTS/$name"
   mv "$LOOP/repo.git" "$PROJECTS/$name/repo.git"
   link_repo "$name"
+  link_layout "$name"
   echo "$name" > "$CURRENT"
   echo "今の箱に '$name' という名前を付けた"
 }
@@ -109,16 +147,21 @@ cmd_adopt() {
 # `use` が作業ツリーを作る。bare は runner の所有にする。ホストは runner として
 # SSH で push するからだ。
 cmd_init() {
-  local name="$1" branch="${2:-}"
+  local name="$1" branch="${2:-}" src="${3:-}" tests="${4:-}"
   valid_name "$name"
   [ ! -e "$PROJECTS/$name" ] || die "$PROJECTS/$name がもうある"
   if [ -n "$branch" ]; then
     git check-ref-format --branch "$branch" >/dev/null 2>&1 \
       || die "ブランチ名に使えない: '$branch'"
   fi
+  [ -z "$src$tests" ] || check_layout "${src:-src}" "${tests:-tests}"
 
   ensure_root
   install -d -o root -g root -m 755 "$PROJECTS/$name"
+  if [ -n "$src$tests" ]; then
+    write_layout "$name" "${src:-src}" "${tests:-tests}"
+    echo "柵の場所: ${src:-src}/ と ${tests:-tests}/"
+  fi
   install -d -o runner -g runner -m 755 "$PROJECTS/$name/repo.git"
   sudo -u runner git init -q --bare -b "${branch:-main}" "$PROJECTS/$name/repo.git"
   # 取り込むブランチの名前を控える。push される前に `use` が走ると、空のリポジトリ
@@ -178,6 +221,7 @@ cmd_use() {
 
   [ -z "$cur" ] || park "$cur"
   link_repo "$name"
+  link_layout "$name"
   echo "$name" > "$CURRENT"
 
   if [ -d "$PROJECTS/$name/parked" ]; then
@@ -196,6 +240,25 @@ cmd_use() {
   echo "今のプロジェクト: $name"
 }
 
+# 作ってあるプロジェクトの柵の場所を変える。今のプロジェクトなら、新しい場所の
+# ディレクトリと権限を作るために provision.sh を流す。前の場所は 40-perms.sh が
+# runner だけのものに戻すので、solver はもう書けない。
+cmd_layout() {
+  local name="$1" src="$2" tests="$3"
+  valid_name "$name"
+  [ -d "$PROJECTS/$name/repo.git" ] || die "プロジェクト '$name' は無い。先に 'loop project init $name'"
+  check_layout "$src" "$tests"
+  busy && die "ループかエージェントが走っている。終わるのを待つ"
+  write_layout "$name" "$src" "$tests"
+  echo "'$name' の柵の場所: $src/ と $tests/"
+  [ "$(current)" = "$name" ] || return 0
+  link_layout "$name"
+  echo "今のプロジェクトなので、ディレクトリと権限を作り直す"
+  ADMIN_USER="${ADMIN_USER:-maint}" bash "$HERE/provision.sh" \
+    || die "プロビジョニングが途中で止まった。原因を直してから次で流し直す:
+    cd /tmp && sudo ADMIN_USER=${ADMIN_USER:-maint} bash $HERE/provision.sh"
+}
+
 usage() {
   cat >&2 <<EOF
 使い方: loop project <コマンド>
@@ -203,10 +266,14 @@ usage() {
 
   list                            プロジェクトの一覧。* が今のもの
   current                         今のプロジェクトの名前
-  init <名前> [--branch <ブランチ>]
+  init <名前> [--branch <ブランチ>] [--src <ディレクトリ>] [--tests <ディレクトリ>]
                                   空のプロジェクトを用意する。--branch を付けると、
-                                  ホストから push されるそのブランチを受け入れる
+                                  ホストから push されるそのブランチを受け入れる。
+                                  --src と --tests は書き込みの柵の場所（既定 src と
+                                  tests）。作業ツリーの根からの相対パス
   use <名前>                      切り替える。初めてなら作る
+  layout <名前> --src <ディレクトリ> --tests <ディレクトリ>
+                                  作ってあるプロジェクトの柵の場所を変える
   adopt <名前>                    loop-project.sh より前に作った箱に名前を付ける
 EOF
   exit 2
@@ -216,10 +283,27 @@ case "${1:-}" in
   list)    cmd_list ;;
   current) current ;;
   adopt)   [ $# -eq 2 ] || usage; cmd_adopt "$2" ;;
-  init)
-    if [ $# -eq 2 ]; then cmd_init "$2"
-    elif [ $# -eq 4 ] && [ "$3" = "--branch" ]; then cmd_init "$2" "$4"
-    else usage
+  init|layout)
+    command="$1"
+    [ $# -ge 2 ] || usage
+    name="$2"
+    shift 2
+    branch="" src="" tests=""
+    while [ $# -gt 0 ]; do
+      [ $# -ge 2 ] || usage
+      case "$1" in
+        --branch) [ "$command" = init ] || usage; branch="$2" ;;
+        --src)    src="$2" ;;
+        --tests)  tests="$2" ;;
+        *)        usage ;;
+      esac
+      shift 2
+    done
+    if [ "$command" = init ]; then
+      cmd_init "$name" "$branch" "$src" "$tests"
+    else
+      [ -n "$src" ] && [ -n "$tests" ] || usage
+      cmd_layout "$name" "$src" "$tests"
     fi ;;
   use)     [ $# -eq 2 ] || usage; cmd_use "$2" ;;
   *)       usage ;;

@@ -73,8 +73,10 @@ else
   bad "plan/ is '$planmode', expected 'runner:runner 700'"
 fi
 
+# 柵の場所。規則は loop.py の LAYOUT にしか書かないので、そこから読む。
+read -r LAYOUT_SRC LAYOUT_TESTS <<<"$(python3 -B -c "import sys; sys.path.insert(0, '/srv/loop/runner'); import loop; print(loop.LAYOUT['src'], loop.LAYOUT['tests'])")"
 planner_groups=" $(id -nG planner) "
-for d in src tests; do
+for d in "$LAYOUT_SRC" "$LAYOUT_TESTS"; do
   grp="$(stat -c '%G' "/srv/loop/project/$d")"
   case "$planner_groups" in
     *" $grp "*) bad "planner is in group $grp, which owns $d/ -- it could write there" ;;

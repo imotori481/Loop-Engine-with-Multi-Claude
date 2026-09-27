@@ -23,6 +23,7 @@ set -euo pipefail
 
 TOOLS=/srv/loop/node
 P=/srv/loop/project
+. "$(dirname "$0")/layout.sh"
 
 # 版を固定する。範囲で書くと、数か月後の `npm install` が、誰も選ばない
 # うちに関門の意味を変えてしまう。
@@ -118,13 +119,13 @@ for f in vitest.config.mjs index.html; do
     exit 1
   fi
 done
-sudo -u runner tee "$P/vitest.config.mjs" >/dev/null <<'EOF'
+sudo -u runner tee "$P/vitest.config.mjs" >/dev/null <<EOF
 // happy-dom gives every test file a document without a display. This is the
 // whole reason the Node track exists: a UI that can be clicked by a machine.
 export default {
   test: {
     environment: "happy-dom",
-    include: ["tests/**/*.test.{js,mjs,ts}"],
+    include: ["$LAYOUT_TESTS/**/*.test.{js,mjs,ts}"],
     root: ".",
   },
 };
@@ -144,15 +145,15 @@ chmod 644 "$P/vitest.config.mjs"
 # だった。テストがそこを作り話で迂回した唯一の経路だったからだ。ここでは
 # それが箱の事実になる。常に存在し、常に同じ export された関数を呼ぶ。
 # 残るのは `src/main.ts` で、これは柵の内側にあり、確かめられ、計画が書く。
-sudo -u runner tee "$P/index.html" >/dev/null <<'EOF'
+sudo -u runner tee "$P/index.html" >/dev/null <<EOF
 <!doctype html>
 <meta charset="utf-8">
 <title>loop artifact</title>
 <div id="app"></div>
 <script type="module">
-  // The whole of the shell. Everything else is under src/, where the runner
+  // The whole of the shell. Everything else is under $LAYOUT_SRC/, where the runner
   // can fence it and the tests can reach it.
-  import { start } from "/src/main.ts";
+  import { start } from "/$LAYOUT_SRC/main.ts";
   start(document.getElementById("app"));
 </script>
 EOF
@@ -196,7 +197,7 @@ chk_cannot rm -f "$P/node_modules"
 # 確かめる条件を書かせないので（loop.py の environment_facts）、要件の「開発
 # サーバで開ける」はここで確かめる。
 if ! sudo -u runner /srv/loop/bin/smoke-page; then
-  echo "FAIL: 開発サーバで開いたページが src/main.ts の start に届かない"; fail=1
+  echo "FAIL: 開発サーバで開いたページが $LAYOUT_SRC/main.ts の start に届かない"; fail=1
 fi
 
 if [ "$fail" -eq 0 ]; then

@@ -17,6 +17,7 @@
 #                        RUNNER_SPEC 5 を守っている。solver は plan/ を読まず、
 #                        したがって tasks.json を見ることがない。
 set -euo pipefail
+. "$(dirname "$0")/layout.sh"
 
 # /srv/loop そのものは root 所有。runner の所有にすると、runner は直下の
 # エントリを改名できる。中身が root 所有でも関係なく、bin/ を退けて自分の
@@ -66,9 +67,11 @@ if [ ! -d /srv/loop/project/.git ]; then
   sudo -u runner git clone /srv/loop/repo.git /srv/loop/project
 fi
 
+# 柵の2つのディレクトリ。場所はプロジェクトごとに決まる（layout.sh）。途中の
+# ディレクトリも runner が作る。
 sudo -u runner install -d -m 755 \
-  /srv/loop/project/src \
-  /srv/loop/project/tests
+  "/srv/loop/project/$LAYOUT_SRC" \
+  "/srv/loop/project/$LAYOUT_TESTS"
 
 # 開いた状態で作って 40-perms.sh が後から締めるのではなく、できた瞬間から
 # 非公開にする。柵を閉じるのを別のスクリプトに任せると、開いたまま残る。
@@ -104,11 +107,11 @@ if sudo -u runner git log --format=%an -- conftest.py 2>/dev/null | grep -qvx 'l
   echo "20-layout: リポジトリが自分の conftest.py を持っている。上書きしない" >&2
   exit 1
 fi
-sudo -u runner tee conftest.py >/dev/null <<'PYEOF'
+sudo -u runner tee conftest.py >/dev/null <<PYEOF
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent / "src"))
+sys.path.insert(0, str(Path(__file__).parent / "$LAYOUT_SRC"))
 PYEOF
 
 # 作業ツリーに置くが、コミットしないもの。無いと `git status` がこれらを紛れ込んだ
@@ -117,7 +120,7 @@ IGNORED=(.venv/ .runner/ __pycache__/ '*.pyc')
 
 if ! sudo -u runner git rev-parse HEAD >/dev/null 2>&1; then
   # 空のリポジトリ。ホストがクローンできるよう、最初のコミットを置く。
-  sudo -u runner touch src/.gitkeep tests/.gitkeep plan/.gitkeep
+  sudo -u runner touch "$LAYOUT_SRC/.gitkeep" "$LAYOUT_TESTS/.gitkeep" plan/.gitkeep
   printf '%s\n' "${IGNORED[@]}" | sudo -u runner tee .gitignore >/dev/null
   sudo -u runner git add -A
   sudo -u runner git commit -q -m "chore: initial skeleton"

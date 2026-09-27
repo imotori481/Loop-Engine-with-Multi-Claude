@@ -13,6 +13,7 @@
 # 禁じているが、ランナーが監督するアカウントに降りることは禁じていない。
 set -euo pipefail
 cd "$(dirname "$0")"
+. ./layout.sh
 
 install -d -o root -g root -m 755 /srv/loop/bin
 install -o root -g root -m 755 bin/solver-run   /srv/loop/bin/solver-run
@@ -193,7 +194,7 @@ c_can    test -w /srv/loop/critic/out
 
 # 判定する対象の作業。
 c_cannot ls /srv/loop/project/plan          # 見れば判定の拠り所にしてしまう基準
-c_cannot ls /srv/loop/project/tests         # すでに通ったテスト
+c_cannot ls "/srv/loop/project/$LAYOUT_TESTS"   # すでに通ったテスト
 c_cannot ls /srv/loop/project/.git          # 両方を含む履歴
 c_cannot ls /srv/loop/planner/out           # 書かれている最中の提案
 c_cannot ls /srv/loop/brief                 # solver に伝えた内容

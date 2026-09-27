@@ -376,8 +376,23 @@ loop project list                              # プロジェクトの一覧。*
 loop project current                           # 今のプロジェクトの名前
 loop project init <名前>                        # 空のプロジェクトを用意する
 loop project init <名前> --branch <ブランチ>     # 既存リポジトリのブランチを受け入れる用意をする
+loop project init <名前> --src <ディレクトリ> --tests <ディレクトリ>
+                                                # 書き込みの柵の場所を決めて用意する
+loop project layout <名前> --src <ディレクトリ> --tests <ディレクトリ>
+                                                # 作ってあるプロジェクトの柵の場所を変える
 loop project use <名前>                         # 切り替える
 ```
+
+書き込みの柵は、ソルバーが書ける2つのディレクトリだ。コードの場所（`--src`）とテストの場所
+（`--tests`）で、既定は `src` と `tests`。Unity のプロジェクトのようにコードを別の場所に置く
+リポジトリでは、作業ツリーの根からの相対パスで指定する。
+
+- 使える文字は英数字と `.` `_` `-` `/` だけ。`..` と、`plan` `.git` `.runner` `.venv` `node_modules` の下は使えない
+- 一方がもう一方を含んではならない
+- 規則は `runner/loop.py` の `layout_problems` にしか書かない。`loop-project.sh` とプロビジョニングも、それを import して確かめる
+
+`layout` を今のプロジェクトに流すと、新しい場所のディレクトリと権限を作るために `provision.sh`
+を流す。前の場所は `40-perms.sh` が runner だけのものに戻す。
 
 `loop project` は `loop-project.sh` を root で流す。`loop` がまだ無い箱では、直接流す。
 
@@ -391,15 +406,17 @@ cd /tmp && sudo ADMIN_USER=<保守ユーザー> bash /opt/loop-engine/provision/
 |---|---|
 | `/srv/loop/projects/<名前>/repo.git` | そのプロジェクトの bare リポジトリ。ホストはここから引き、ここへ push する |
 | `/srv/loop/projects/<名前>/parked/` | 使っていないあいだの作業場所。root だけが入れる |
+| `/srv/loop/projects/<名前>/layout.json` | そのプロジェクトの柵の場所。root 所有。既定の場所なら無い |
 | `/srv/loop/projects/CURRENT` | 今のプロジェクトの名前 |
 | `/srv/loop/repo.git` | 今のプロジェクトの bare を指すリンク |
+| `/srv/loop/layout.json` | 今のプロジェクトの `layout.json` を指すリンク。無ければ既定の場所。ランナーとプロビジョニングが読む |
 | `/srv/loop/project` | 今のプロジェクトの作業ツリー（実体） |
 
 `use` は次の順で動く。
 
 1. runner の `loop.py` と、solver・planner・critic のプロセスが無いことを確かめる。あれば止まる
 2. 今のプロジェクトの作業場所を `parked/` に `mv` で退避する。対象は `project`、`human/in`、`planner/out`、`planner/brief`、`critic/out`、`critic/brief`、`brief`。`plan apply` を待つ提案と要件も一緒に動く
-3. `/srv/loop/repo.git` を切り替え先に向け直す
+3. `/srv/loop/repo.git` と `/srv/loop/layout.json` を切り替え先に向け直す
 4. 切り替え先に退避分があれば戻し、`40-perms.sh` で権限を確かめる。無ければ `provision.sh` で作る。作業ツリーは bare の HEAD が指すブランチになる
 
 `init --branch` で用意したプロジェクトは、そのブランチが push されるまで `use` できない。

@@ -39,6 +39,8 @@ PowerShell なら `.\host\loop.cmd <args>`、Git Bash なら `./host/loop.cmd <a
 | `<base-branch>` | 元にするブランチの名前（`main` など） |
 | `<pr-branch>` | PR に出すブランチの名前 |
 | `<admin-user>` | 箱の保守ユーザーの名前 |
+| `<src-dir>` | ソルバーがコードを書くディレクトリ。作業ツリーの根からの相対パス（`Assets/Source` など） |
+| `<tests-dir>` | ソルバーがテストを書くディレクトリ。`<src-dir>` を含まず、`<src-dir>` に含まれない場所 |
 | `<you>` | Windows のユーザー名 |
 
 ## 走らせる（ホストでも箱でも）
@@ -79,6 +81,8 @@ PowerShell なら `.\host\loop.cmd <args>`、Git Bash なら `./host/loop.cmd <a
 | 今のプロジェクトの名前 | `loop project current` |
 | 空のプロジェクトを用意する | `loop project init <project>` |
 | 既存リポジトリのブランチを受け入れる用意をする | `loop project init <project> --branch <branch>` |
+| 書き込みの柵の場所を決めて用意する | `loop project init <project> --src <src-dir> --tests <tests-dir>` |
+| 作ってあるプロジェクトの柵の場所を変える | `loop project layout <project> --src <src-dir> --tests <tests-dir>` |
 | 切り替える | `loop project use <project>` |
 | `loop-project.sh` より前に作った箱に名前を付ける | `loop project adopt <project>` |
 
@@ -166,7 +170,7 @@ git push origin <pr-branch>
 
 ### 取り込むときの条件
 
-- コードは `src/`、テストは `tests/` に置かれている必要がある
+- ソルバーが書けるのは、柵の2つのディレクトリの下だけだ。既定は `src/` と `tests/`。コードが別の場所にあるリポジトリ（Unity なら `Assets/` の下）は、`loop project layout` で場所を決める
 - 自前の `conftest.py`、`index.html`、`vitest.config.mjs` があると、プロビジョニングは上書きせずに止まる
 - `.gitignore` に `node_modules/` があると `35-node.sh` が止まる
 - 依存パッケージは入らない。箱にあるのは pytest と vitest だけだ
