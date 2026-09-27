@@ -12,7 +12,7 @@ WSL2 では起動と生存管理がホスト側の責務になった（`RUNNER_S
 | `loop.cmd` | このリポジトリのまま（`host` を PATH に足す） | ディストロ起動 → sshd 待機 → 箱の `loop` コマンドを実行 |
 | `loop-import.cmd` | このリポジトリのまま（`host` を PATH に足す） | 既存リポジトリのブランチを箱のプロジェクトとして取り込む |
 | `wsl-keepalive.vbs` | このリポジトリのまま（タスクが絶対パスで参照する） | VM を**窓を出さずに**生かし続ける。下の keepalive タスクの実体 |
-| `loop-pull.cmd` | このリポジトリのまま | **すべての** `repo*.git` を run ごとのミラーに引く。**VHDX を失っても残る唯一の複製** |
+| `loop-pull.cmd` | このリポジトリのまま | **すべての** `repo*.git` と `projects/*/repo.git` をホストのミラーに引く。**VHDX を失っても残る唯一の複製** |
 | `loop-dashboard.cmd` | このリポジトリのまま | 進捗、エスカレーション、予定レビューを扱うGUIを起動（`127.0.0.1:8443`） |
 
 **ASCII のみで書くこと。** PowerShell 5.1 と cmd.exe は BOM 無し UTF-8 を ANSI として
@@ -186,21 +186,32 @@ git clone loop-runner:/srv/loop/repo.git <置き場所>
 | 段 | どこへ | 何から守るか |
 |---|---|---|
 | 1 | `project` → `/srv/loop/repo.git` | `reset` / `clean`。**同じ VHDX の中**なので、それ以上は守らない |
-| 2 | `repo.git` → `<MIRRORROOT>\project`、過去run → `runs\run-NNN` | **VHDX の消失**。ここで初めて別のディスクに乗る |
+| 2 | `repo.git` → `<MIRRORROOT>\project`、過去run → `runs\run-NNN`、プロジェクト → `projects\<名前>` | **VHDX の消失**。ここで初めて別のディスクに乗る |
 | 3 | ミラー → GitHub など | ホストの故障。やるなら**鍵はホストだけが持つ** |
 
 段1 はランナーが自動でやる（`loop.py` の `publish()`、GREEN と `plan apply` の直後）。
 段2 が `loop-pull.cmd`。**引数も事前のクローンも要らない** ── サンドボックスにある
-`repo*.git` を全部列挙し、無ければクローン、有れば fetch する。
+`repo*.git` と `projects/*/repo.git` を全部列挙し、無ければクローン、有れば fetch する。
 1件でも clone / fetch / reset / clean / fast-forward に失敗すれば、その場で非ゼロ終了する。
-不変アーカイブをすべて確認してから最後にライブミラーへ進むため、アーカイブ同期に失敗した
-状態でライブを作り直さない。成功済みの独立アーカイブは巻き戻さないが、部分成功を
+プロジェクト、不変アーカイブの順にすべて確認してから最後にライブミラーへ進むため、どちらかの
+同期に失敗した状態でライブを作り直さない。成功済みの独立アーカイブは巻き戻さないが、部分成功を
 「done」と表示してはならない。
 
 ```text
-/srv/loop/repo.runN.git  ->  <MIRRORROOT>\runs\run-NNN  （不変。ff のみ）
-/srv/loop/repo.git       ->  <MIRRORROOT>\project        （現行。毎回作り直す）
+/srv/loop/projects/<名前>/repo.git  ->  <MIRRORROOT>\projects\<名前>  （remote loop に fetch）
+/srv/loop/repo.runN.git             ->  <MIRRORROOT>\runs\run-NNN      （不変。ff のみ）
+/srv/loop/repo.git                  ->  <MIRRORROOT>\project           （現行。毎回作り直す）
 ```
+
+プロジェクトの写しは `loop-import.cmd` のクローンと同じ場所で、`origin` は GitHub のままにする。
+箱のコミットは remote `loop` として入る。
+
+- 箱が作業するブランチは bare の HEAD から読む。手元のそのブランチは、早送りできるときだけ進める。早送りできないときと、手元の変更が邪魔をするときは `NOTE` を出して動かさない。写しは `loop/<ブランチ>` に入っているので、失敗とは数えない
+- ランナーのタグ（`step-S1` など）は `refs/loop-tags/` に入れる。`refs/tags/` に入れると、`git push --tags` で GitHub に届く
+- GitHub への push は人が行う。環境のファイルを除いて PR に出す手順は `docs/COMMANDS.md`
+
+`/srv/loop/repo.git` が今のプロジェクトへのリンクのときも、`project` は今のプロジェクトの写しになる。
+作り直す先は、bare の HEAD が指すブランチだ。
 
 `<MIRRORROOT>` は `loop-pull.cmd` 冒頭の `set "MIRRORROOT=..."` で決まる。使う前に自分の置き場所に書き換える。
 
@@ -230,6 +241,7 @@ git clone loop-runner:/srv/loop/repo.git <置き場所>
 
 ## 更新履歴
 
+- 2026/09/27: `loop-pull.cmd` がプロジェクトごとの写しを引くように変更
 - 2026/09/27: 既存リポジトリを取り込む `loop-import.cmd` を追加
 - 2026/09/26: 箱の `loop` コマンドを呼ぶ `loop.cmd` を追加
 - 2026/09/26: `~/.ssh/config` の鍵の名前を `loop-dev` / `loop-runner` に、keepalive とミラーのパスを置き換え前提の書き方に変更

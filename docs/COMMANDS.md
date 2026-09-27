@@ -135,7 +135,14 @@ loop-import <project> <repo-url> <branch> [<base-branch>]
 ### 成果を引き取る（ホスト）
 
 ```bash
-git pull loop-runner:/srv/loop/projects/<project>/repo.git <branch>
+loop-pull
+```
+
+`C:\dev\roop-engin\projects\<project>` の `<branch>` が箱の先まで進む。早送りできないときは `NOTE` が
+出て、箱の成果は `loop/<branch>` にだけ入る。そのときは `<clone-dir>` で自分で合わせる。
+
+```bash
+git merge loop/<branch>
 ```
 
 ### PR に出す（ホスト）
