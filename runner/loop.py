@@ -694,7 +694,8 @@ LANGUAGES = {
         "label": "Python",
         "test_runner": PYTEST,
         "wiring": "conftest.py",
-        "environment_files": frozenset(),
+        # 20-layout.sh はどの言語の箱にも置く。ほかの言語の計画には見せない。
+        "environment_files": frozenset({"conftest.py"}),
         "naming_note": "",
         "provides_pattern": re.compile(r"(?:def|class)\s+([A-Za-z_]\w*)"),
         "red_kinds": RED_KINDS,
@@ -781,6 +782,83 @@ clicked.
 
 Say all of this in CONTEXT.md; the solver has no other way to learn it.""",
     },
+    # C# は Unity に持ち込むコードのためにある。コードは netstandard2.1、テストは
+    # net8.0 の NUnit 3（Unity の Test Framework と同じ系統）で、36-dotnet.sh が凍結した
+    # フィードだけから restore する。csproj はランナーが /srv/loop/dotnet/build に
+    # 書く（dotnet_projects）。取り込んだ Unity のプロジェクトの根に置くと、IDE が
+    # Unity の csproj と一緒に拾ってしまう。
+    #
+    # C# の宣言は型の中にあるので、契約の名前は型（`Board`）とメンバー
+    # （`Board.Score`）の2つの単位を持つ。provides_pattern の2つの組がそれだ。
+    "csharp": {
+        "name": "csharp",
+        "label": "C#",
+        "test_runner": Path("/usr/bin/dotnet"),
+        "wiring": None,
+        "environment_files": frozenset(),
+        "naming_note": """
+A test is a C# method, and its name is an identifier: letters, digits and
+underscores only. Name it after the criterion in PascalCase with underscores
+(`Score_counts_every_row`); do not copy the criterion's prose into it.
+""",
+        "provides_pattern": re.compile(
+            r"\b(?:class|struct|enum|interface)\s+([A-Za-z_]\w*)"
+            r"|([A-Za-z_]\w*\.[A-Za-z_]\w*)\s*(?:\(|\{|;|=|$)"),
+        # 型の後ろ、名前の前に型を書くので、":" や "->" の後ろを見る ANNOTATION は
+        # 使えない。語の境目で、裸のコンテナ型を探す。
+        "shape_pattern": re.compile(
+            r"(?<![\w.])(List|IList|IReadOnlyList|Dictionary|IDictionary|"
+            r"IReadOnlyDictionary|HashSet|ISet|IEnumerable|ICollection|"
+            r"IReadOnlyCollection|Queue|Stack|Tuple|ArrayList|Hashtable|object|dynamic)"
+            r"\b\s*(<?)"),
+        # junit の type は常に "failure" で、例外の型を持たない（smoke-dotnet の
+        # 実測）。failure_kind が message から読み、アサーションをこの名前にする。
+        "red_kinds": re.compile(r"^AssertionException$"),
+        "source_suffix": ".cs",
+        "test_suffixes": (".cs",),
+        # テストの前にビルドする。Unity の参照を写すので、初回は1分を超えうる。
+        "min_test_timeout": 600,
+        # C# には「ディレクトリそのもの」を表すファイルが無い。
+        "index_name": "",
+        "module_separator": "/",
+        "shapeless": frozenset({
+            "List", "IList", "IReadOnlyList", "Dictionary", "IDictionary",
+            "IReadOnlyDictionary", "HashSet", "ISet", "IEnumerable", "ICollection",
+            "IReadOnlyCollection", "Queue", "Stack", "Tuple", "ArrayList", "Hashtable",
+            "object", "dynamic",
+        }),
+        "shape_bracket": "<",
+        "shape_example": "List<Cell>, Dictionary<string, int>, (Board board, int score)",
+        "name_boundary": r"[\w]",
+        "layout_note": """Every source file is `.cs` under {SRC}/, e.g. `{SRC}/Logic/Board.cs`, and
+every test file is `.cs` under {TESTS}/. The code compiles as one assembly
+(netstandard2.1, C# 9) and the tests as another that references it, so a test
+uses the code through `using <its namespace>;` -- there are no file imports.
+
+One public type per file, and the file is named after the type
+(`Board.cs` holds `Board`). Unity requires this of every MonoBehaviour and it
+costs nothing elsewhere. A new file's namespace follows its folder under {SRC}/
+(`{SRC}/Logic/Board.cs` -> `namespace Logic`). A file that already exists keeps
+the namespace it has.
+
+Tests use NUnit 3: `using NUnit.Framework;`, a public class with `[Test]`
+methods, and `Assert.AreEqual(expected, actual)` or `Assert.That(actual,
+Is.EqualTo(expected))`. Every test class is inside a namespace, and its name
+is the file's name (`{TESTS}/BoardTests.cs` holds `BoardTests`): the runner
+selects a step's tests by that class name.
+
+C# 9 is the ceiling: no `record struct`, no file-scoped `namespace X;`, no
+`global using`, no `required` members. They do not compile here or in Unity.
+
+A contract line names the file and then the declaration. A type:
+    {SRC}/Logic/Board.cs: class Board { public int Width; public int Height; }
+A member, written with its type in front of its name:
+    {SRC}/Logic/Board.cs: static int Board.Score(Board board)
+The name of the first is `Board` and of the second `Board.Score`; requires and
+provides match on those names.
+
+Say all of this in CONTEXT.md; the solver has no other way to learn it.""",
+    },
 }
 
 # tasks.json の最上位の "language" で選ぶ。既定は Python。これができる前に
@@ -825,6 +903,8 @@ def failure_kind(failure: ET.Element) -> str:
 
     これがちょうど、R5 が見分けるための区別だ。
     """
+    if LANGUAGE["name"] == "csharp":
+        return csharp_failure_kind(failure)
     declared = (failure.get("type") or "").strip()
     if declared:
         return declared
@@ -839,12 +919,211 @@ def failure_kind(failure: ET.Element) -> str:
     return message.splitlines()[0] if message else "<no type>"
 
 
+# NUnit を junit に書くロガーは、例外の型を type に書かない（常に "failure"）。
+# 型は message の先頭にある: "System.NullReferenceException : Object reference ..."
+CSHARP_EXCEPTION = re.compile(r"^\s*([A-Za-z_][\w.]*(?:Exception|Error))\s*:")
+
+
+def csharp_failure_kind(failure: ET.Element) -> str:
+    """NUnit の失敗の種類。smoke-dotnet と probe-unity の実測に合わせてある。
+
+        "  Expected: 6\\n  But was:  5\\n"                  -> AssertionException
+        "System.Security.SecurityException : ECall ..."   -> System.Security.SecurityException
+
+    例外の接頭辞を先に見る。例外の本文が "Expected:" を含むことはあっても、
+    アサーションの message が例外の型で始まることは無い。どちらでもなければ
+    （Assert.Fail の文など）1行目を返し、R5 は推測せずに拒む。
+    """
+    message = (failure.get("message") or "").strip()
+    first = message.splitlines()[0] if message else ""
+    match = CSHARP_EXCEPTION.match(first)
+    if match:
+        return match.group(1)
+    if "Expected:" in message and "But was:" in message:
+        return "AssertionException"
+    return first or "<no type>"
+
+
+DOTNET_TOOLS = LOOP / "dotnet"
+DOTNET_BUILD = DOTNET_TOOLS / "build"
+UNITY_REFS = LOOP / "unity-refs"
+# dotnet の出力を英語に固定する。ビルドエラーは行の形で読むからだ。HOME に頼らず、
+# NuGet のキャッシュと CLI の状態は runner だけが入れる build の下に置く。
+# ノードとコンパイラのサーバを残さない。走行の後に runner のプロセスが残ると、
+# loop-project.sh の busy() が切り替えを拒む。
+DOTNET_ENV = {
+    "DOTNET_CLI_TELEMETRY_OPTOUT": "1", "DOTNET_NOLOGO": "1",
+    "DOTNET_SKIP_FIRST_TIME_EXPERIENCE": "1", "DOTNET_CLI_UI_LANGUAGE": "en",
+    "DOTNET_CLI_HOME": str(DOTNET_BUILD / "home"),
+    "NUGET_PACKAGES": str(DOTNET_BUILD / "packages"),
+    "MSBUILDDISABLENODEREUSE": "1",
+}
+
+
+def dotnet_projects() -> dict[Path, str]:
+    """ランナーが書く2つの csproj。柵の場所、凍結したフィードの版、Unity の参照から作る。
+
+    プロジェクトの根には置かない（36-dotnet.sh の冒頭を参照）。コードは
+    netstandard2.1（Unity が読める形）、テストは net8.0 の NUnit 3。Unity の参照が
+    あれば、コードはそれでコンパイルし、テストは実行のためにそれを出力に写す。
+    """
+    versions = dict(item.split("=", 1) for item in
+                    (DOTNET_TOOLS / "feed" / ".versions").read_text(encoding="utf-8").split())
+    refs = sorted((UNITY_REFS / "refs").glob("*.dll")) if (UNITY_REFS / "refs").is_dir() else []
+    if refs:
+        langversion = (UNITY_REFS / "langversion.txt").read_text(encoding="utf-8").strip()
+        defines = ";".join(line.strip() for line in
+                           (UNITY_REFS / "defines.txt").read_text(encoding="utf-8").splitlines()
+                           if line.strip())
+    else:
+        langversion, defines = "9.0", ""
+
+    def references(private: bool) -> str:
+        return "".join(
+            f'\n    <Reference Include="{dll.stem}"><HintPath>{dll}</HintPath>'
+            f'<Private>{str(private).lower()}</Private></Reference>' for dll in refs)
+
+    common = f"""    <LangVersion>{langversion}</LangVersion>
+    <DefineConstants>$(DefineConstants);{defines}</DefineConstants>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <NoWarn>$(NoWarn);CS0414;CS0649;CS0169;CS0436;MSB3277</NoWarn>"""
+    code = f"""<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>netstandard2.1</TargetFramework>
+    <AssemblyName>LoopCode</AssemblyName>
+{common}
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="{SRC}/**/*.cs" />
+  </ItemGroup>
+  <ItemGroup>{references(False)}
+  </ItemGroup>
+</Project>
+"""
+    tests = f"""<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <AssemblyName>LoopTests</AssemblyName>
+    <IsPackable>false</IsPackable>
+{common}
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="{TESTS}/**/*.cs" />
+    <ProjectReference Include="../code/Code.csproj" />
+    <PackageReference Include="NUnit" Version="{versions['NUnit']}" />
+    <PackageReference Include="NUnit3TestAdapter" Version="{versions['NUnit3TestAdapter']}" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="{versions['Microsoft.NET.Test.Sdk']}" />
+    <PackageReference Include="JunitXml.TestLogger" Version="{versions['JunitXml.TestLogger']}" />
+  </ItemGroup>
+  <ItemGroup>{references(True)}
+  </ItemGroup>
+</Project>
+"""
+    return {DOTNET_BUILD / "code" / "Code.csproj": code,
+            DOTNET_BUILD / "tests" / "Tests.csproj": tests}
+
+
+def prepare_dotnet() -> str | None:
+    """csproj を書き、中身が変わったときだけ restore する。できなければ理由を返す。
+
+    restore はフィードだけから行う（nuget.config がほかのソースを消す）。csproj が
+    変わるのは、柵の場所か Unity の参照かフィードの版が変わったときだけだ。
+    """
+    try:
+        projects = dotnet_projects()
+    except (OSError, KeyError, ValueError) as e:
+        return f"cannot write the C# projects: {e}"
+    changed = False
+    for path, text in projects.items():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if not path.exists() or path.read_text(encoding="utf-8") != text:
+            path.write_text(text, encoding="utf-8")
+            changed = True
+    tests = DOTNET_BUILD / "tests" / "Tests.csproj"
+    if changed or not (tests.parent / "obj" / "project.assets.json").exists():
+        try:
+            proc = run([str(LANGUAGE["test_runner"]), "restore", str(tests),
+                        "--configfile", str(DOTNET_TOOLS / "nuget.config")],
+                       env=DOTNET_ENV, timeout=TIMEOUTS["test"])
+        except subprocess.TimeoutExpired:
+            return f"dotnet restore did not finish within {TIMEOUTS['test']}s"
+        if proc.returncode != 0:
+            return (proc.stdout + proc.stderr)[-3000:]
+    return None
+
+
+# ビルドエラーの1行。MSBuild は末尾に csproj のパスを [] で付ける。
+DOTNET_ERROR = re.compile(r"^\s*(/[^(\n]+\.cs)\(\d+,\d+\): error (CS\d+): (.*?)(?: \[[^\]\n]*\])?\s*$",
+                          re.MULTILINE)
+
+
+def dotnet_build_failure(output: str) -> TestRun | None:
+    """ビルドが通らず、レポートが書かれなかった走行を読む。エラーの行が無ければ None。
+
+    テストファイルのエラーは、vitest の変換エラーと同じ「コンパイルできなかった」に
+    する。TEST_WRITE はそれを見てソルバーに書き直しを頼む。C# は1つのファイルが
+    壊れるとテストのアセンブリ全体がビルドできないので、どのテストも走らない。
+    コードの側のエラーは別の名前にする。R2 がそのまま拒む。
+    """
+    errors = DOTNET_ERROR.findall(output)
+    if not errors:
+        return None
+    kinds: list[str] = []
+    lines: list[str] = []
+    files: list[str] = []
+    for path, code, text in errors:
+        try:
+            rel = Path(path).relative_to(PROJECT).as_posix()
+        except ValueError:
+            rel = path
+        kind = (f"<did not compile: {rel}>" if in_layout(rel, "tests")
+                else f"<build failed: {rel}>")
+        if kind not in kinds:
+            kinds.append(kind)
+            files.append(rel)
+        line = f"{rel}: error {code}: {text}"
+        if line not in lines:
+            lines.append(line)
+    return TestRun(0, 0, len(kinds), 0, kinds, [], chr(10).join(lines),
+                   failed_files=files)
+
+
+def csharp_test_classes(files_test: list[str]) -> list[str]:
+    """テストファイルが持つクラスの名前。ファイル名と同じにする決まり（layout_note）。"""
+    return [Path(f).stem for f in files_test if f.endswith(".cs")]
+
+
+def test_owner(name: str) -> str:
+    """junit の classname を、ステップのテストファイルと突き合わせる形にする。
+
+    NUnit の classname は "名前空間.クラス" で、クラスはファイル名と同じだ。
+    ほかの言語は classname をそのまま使う。
+    """
+    return name.rsplit(".", 1)[-1] if LANGUAGE["name"] == "csharp" else name
+
+
 def test_argv(files_test: list[str], xml_path: Path) -> tuple[list[str], dict[str, str]]:
     """判定を出すコマンドと、それに要る環境変数。
 
     走らせる部分と分けてあるので、テストは実行せずに何が実行されるかを確かめ
     られる。agent_command があるのと同じ理由だ。
     """
+    if LANGUAGE["name"] == "csharp":
+        # テストのアセンブリは柵のテストの場所を全部コンパイルする。ステップの
+        # テストだけを走らせるのは、クラスの名前での絞り込みだ。前後の "." は、
+        # BoardTests が BoardTestsExtra に当たらないようにするため。
+        argv = [str(LANGUAGE["test_runner"]), "test",
+                str(DOTNET_BUILD / "tests" / "Tests.csproj"),
+                "--no-restore", "-nologo", "-p:UseSharedCompilation=false",
+                # 既定の TestResults/ は作業ツリーに書かれ、assert_touched に引っかかる。
+                "--results-directory", str(xml_path.with_suffix("")),
+                "--logger", f"junit;LogFilePath={xml_path}"]
+        classes = csharp_test_classes(files_test)
+        if classes:
+            argv += ["--filter", "|".join(f"FullyQualifiedName~.{c}." for c in classes)]
+        return argv, dict(DOTNET_ENV)
     if LANGUAGE["name"] == "typescript":
         # `watch` ではなく `run`。vitest の既定は対話的で、永遠に止まったランナーは
         # 終わらないステップとまったく同じに見える。
@@ -875,16 +1154,26 @@ def pytest_run(tag: str, files_test: list[str]) -> TestRun:
     # vitest は既にあるレポートに追記するので、前の試行の古いレポートが今回の
     # 分と一緒に数えられてしまう。
     xml_path.unlink(missing_ok=True)
+    csharp = LANGUAGE["name"] == "csharp"
+    if csharp:
+        problem = prepare_dotnet()
+        if problem:
+            return TestRun(0, 0, 1, 0, ["<dotnet restore failed>"], [], problem)
+    # C# は走らせる前にビルドする。Unity のプロジェクトでは数十秒かかる。
+    seconds = max(TIMEOUTS["test"], LANGUAGE.get("min_test_timeout", 0))
     try:
-        proc = run(argv, env=env, timeout=TIMEOUTS["test"])
+        proc = run(argv, env=env, timeout=seconds)
     except subprocess.TimeoutExpired:
         # 失敗ではなくエラーとして報告する。実際そうで、スイートは判定をまったく
         # 出していない。RED_GATE では R2 がそのまま拒み、VERIFY は失敗した試行と
         # 数えて、その理由をソルバーに伝える。
-        seconds = TIMEOUTS["test"]
         return TestRun(0, 0, 1, 0, [f"<timeout: no verdict after {seconds}s>"], [],
                        f"The test run did not terminate within {seconds}s. The most "
                        f"likely cause is a loop in the implementation that never exits.")
+    if csharp and not xml_path.exists():
+        failed = dotnet_build_failure(proc.stdout + proc.stderr)
+        if failed:
+            return failed
     return parse_junit(xml_path, proc.stdout + proc.stderr)
 
 
@@ -1909,7 +2198,10 @@ def declared_name(line: str) -> str:
     厳しくなるのではなく、答えようのないものになる。
     """
     match = LANGUAGE["provides_pattern"].search(line)
-    return match.group(1) if match else line.strip()
+    if not match:
+        return line.strip()
+    # C# の型とメンバーのように、組が2つある言語もある。当たった方を取る。
+    return next(group for group in match.groups() if group)
 # L8 の「具体的」: 数、引用符で囲んだリテラル、例外の型。形容詞だけでできた
 # 受け入れ条件は、2人が同じように書けるテストにならない。
 #
@@ -2103,7 +2395,12 @@ def validate_plan(tasks: dict) -> list[str]:
         for provided in s["contracts"]["provides"]:
             shapeless = LANGUAGE["shapeless"]
             opener = LANGUAGE["shape_bracket"]
-            bare = sorted({name for name, bracket in ANNOTATION.findall(provided)
+            # 行頭のファイルのパスは型ではない（`List/Board.cs:` のような
+            # フォルダ名を、裸の List と読まない）。
+            signature_part = re.sub(r"^[\w./-]+\.\w+\s*:\s*", "", provided) \
+                if "shape_pattern" in LANGUAGE else provided
+            pattern = LANGUAGE.get("shape_pattern", ANNOTATION)
+            bare = sorted({name for name, bracket in pattern.findall(signature_part)
                            if name in shapeless and bracket != opener})
             if bare:
                 signature = provided.split(chr(8212))[0].strip()
@@ -3061,7 +3358,7 @@ def existing_contracts() -> list[str]:
             continue
         if LANGUAGE["name"] == "typescript":
             lines += ts_declarations(shown.stdout, path)
-        else:
+        elif LANGUAGE["name"] == "python":
             modules = modules_of([path])
             if modules:
                 lines += python_declarations(shown.stdout, modules[0])
@@ -3197,6 +3494,54 @@ def stub_kept_the_rest(step: dict, originals: dict[str, str]) -> list[str]:
     return problems
 
 
+def csharp_facts() -> tuple[str, str]:
+    """C# の計画に伝える、UI とエンジンについての事実。(1行の要約, 段落)。
+
+    Unity の参照があるとき（loop-unity-refs）の中身は、thm で probe-unity が測った
+    結果だ。エンジン本体の無い .NET 8 では、C# だけで書かれた計算は動き、エンジンの
+    ネイティブに降りるものは SecurityException で落ちる。MonoBehaviour を new する
+    ことすらできない。そのテストは赤ではなく壊れた呼び出しになり、R5 が拒む。
+    それを計画を書く前に知らせる。
+    """
+    if not (UNITY_REFS / "refs").is_dir():
+        return ("User interface: none. There is no display and no UI toolkit.",
+                """There is no screen here. Every criterion has to be checkable by calling code
+and comparing what it returns. If the requirements ask for a user interface,
+keep it in a thin step whose criteria are about the values it passes on, not
+what is drawn. A human checks the screen afterwards.
+""")
+    try:
+        version = (UNITY_REFS / "version.txt").read_text(encoding="utf-8").strip()
+    except OSError:
+        version = "(unknown version)"
+    return (f"Unity: compiled against the reference assemblies of Unity {version} and "
+            f"this project's packages. The engine itself is not here.",
+            """The code is compiled against Unity's assemblies with the symbols Unity defines
+for the player, so it may use UnityEngine types. The tests, however, run on
+plain .NET 8 with no engine behind them. Measured on this machine, inside a
+test:
+
+    works:   plain C# classes and structs, static methods, collections;
+             Vector2 / Vector3 arithmetic; Mathf; Color
+    throws:  creating a GameObject, a MonoBehaviour (even with `new`) or a
+             ScriptableObject; Debug.Log; Random; Time; Quaternion.Euler;
+             JsonUtility -- anything that calls into the engine
+             (SecurityException: ECall methods must be packaged into a
+             system module)
+
+So every criterion must be checkable by calling code that is none of those
+things. Put the behaviour a criterion checks in a plain class or a static
+method that takes and returns plain values, and let a MonoBehaviour call it.
+The code that runs under a test must not call Debug.Log, Random, Time or any
+other engine function either; pass such values in as parameters.
+
+Do not write criteria about a MonoBehaviour, a scene, a prefab or what appears
+on screen. The test cannot create them: it fails with an exception rather than
+an assertion, and RED_GATE rejects the step (R5). A human checks those in
+Unity afterwards.
+""")
+
+
 def environment_facts() -> str:
     """プロジェクトが実際にどうなっているかを、機械から読み取る。
 
@@ -3226,12 +3571,22 @@ def environment_facts() -> str:
     for other in LANGUAGES.values():
         if other["name"] != LANGUAGE["name"]:
             skip |= other["environment_files"]
-    listing = []
-    for child in sorted(PROJECT.rglob("*")):
-        if any(part in skip for part in child.relative_to(PROJECT).parts):
-            continue
-        rel = child.relative_to(PROJECT)
-        listing.append(f"  {rel}/" if child.is_dir() else f"  {rel}")
+    # 根の直下と、ステップが書く2つのディレクトリの中だけを並べる。取り込んだ
+    # リポジトリの残り（Unity なら Assets/ の下の画像や音や .meta）は、どのステップも
+    # 書かず、並べるとブリーフが数万トークンになる。
+    def shown(child: Path) -> bool:
+        parts = child.relative_to(PROJECT).parts
+        return not any(part in skip for part in parts) and child.suffix != ".meta"
+
+    def entry(child: Path) -> str:
+        rel = child.relative_to(PROJECT).as_posix()
+        return f"  {rel}/" if child.is_dir() else f"  {rel}"
+
+    listing = [entry(child) for child in sorted(PROJECT.iterdir())
+               if shown(child)] if PROJECT.is_dir() else []
+    for base in (SRC, TESTS):
+        if base.is_dir():
+            listing += [entry(child) for child in sorted(base.rglob("*")) if shown(child)]
     tree = "\n".join(listing) or "  (empty apart from the directories above)"
 
     # 根に置かれたファイルは環境の持ち物で、どのステップも書かない。最初の
@@ -3297,8 +3652,24 @@ green. That is how unchanged behaviour is kept.
 
     # テストが何に届くかを決めるファイル。言語ごとに名前は違うが仕事は同じで、
     # どちらでもプランナーに見せる必要がある。import のパスに逆らう計画は負ける。
-    wiring = PROJECT / LANGUAGE["wiring"]
-    wiring_text = wiring.read_text(encoding="utf-8") if wiring.exists() else "(none)"
+    #
+    # C# にはそのファイルが根に無い。ランナーが書くテストの csproj がその仕事を
+    # するので、それを見せる。Unity の参照の一覧は長いので、見せる前に数にまとめる。
+    if LANGUAGE["wiring"]:
+        wiring = PROJECT / LANGUAGE["wiring"]
+        wiring_heading = f"{wiring.name} at the root, which the test runner loads automatically:"
+        wiring_text = wiring.read_text(encoding="utf-8") if wiring.exists() else "(none)"
+    else:
+        wiring_heading = ("The test project the runner writes and builds (outside the "
+                          "repository; no step writes it):")
+        try:
+            wiring_text = dotnet_projects()[DOTNET_BUILD / "tests" / "Tests.csproj"]
+            refs = wiring_text.count("<Reference ")
+            wiring_text = re.sub(r"(\s*<Reference [^\n]*)+",
+                                 f"\n    <!-- {refs} Unity reference assemblies -->"
+                                 if refs else "", wiring_text)
+        except (OSError, KeyError, ValueError):
+            wiring_text = "(not available: the .NET toolchain is not installed)"
 
     # 起動のつなぎを、説明ではなく全文で見せる。文章の説明は、それに向けて書く
     # プランナーには足りたが、出来上がった計画を読むクリティックには足りなかった。
@@ -3367,7 +3738,10 @@ tests, to check its work by running something, or to install anything: it will
 try, be refused, and spend part of its attempt on it.
 """
 
-    if typescript:
+    if LANGUAGE["name"] == "csharp":
+        runtime = "Runtime: .NET 8 for the tests; the code is built as netstandard2.1"
+        toolkit, screen = csharp_facts()
+    elif typescript:
         runtime = f"Runtime: {version(Path('node'))}"
         toolkit = ("User interface: the DOM, via happy-dom. Every test file is "
                    "given a `document` with no display behind it.")
@@ -3413,12 +3787,13 @@ Graphical display: {f"DISPLAY={display}" if display else "NONE. DISPLAY is not s
 The runner executes the tests itself, as:
     {command}
 {solver_tools}
-Everything under the project root, except plan/, .git/ and the frozen
-toolchain -- this is the whole of what exists today:
+The project root, and everything under the two directories steps write to
+({LAYOUT["src"]}/ and {LAYOUT["tests"]}/), except plan/, .git/ and the frozen
+toolchain:
 
 {tree}
 {provided_text}{existing_text}
-{wiring.name} at the root, which the test runner loads automatically:
+{wiring_heading}
 
 {wiring_text}
 {page_text}
@@ -4665,8 +5040,13 @@ def run_step(step_id: str, unvalidated: bool = False) -> int:
         # ステップ「自身の」落ちたテストが一致せず、すべてソルバーに回帰として
         # 伝わる。「このステップの前に通っていたテストがいま落ちている」と、
         # 何も通っていなかった最初のステップで言われる。
+        #
+        # C# の classname は「名前空間.クラス」で、ファイルのパスを持たない。
+        # クラスの名前はファイル名と同じ決まりなので、ファイル名で突き合わせる
+        # （test_owner）。
         own_tests = {Path(p).with_suffix("").as_posix().replace("/", ".")
-                     for p in step["files_test"]} | set(step["files_test"])
+                     for p in step["files_test"]} | set(step["files_test"]) \
+            | set(csharp_test_classes(step["files_test"]))
 
         timeouts = 0
         while attempt < len(schedule):
@@ -4721,7 +5101,7 @@ def run_step(step_id: str, unvalidated: bool = False) -> int:
             # この設計で関門が訊いてよいのは、その種類の問いだけだ。
             green = pytest_run(f"verify-{attempt}", [TESTS.relative_to(PROJECT).as_posix()])
             last_run = green
-            regressions = [f for f in green.failed_files if f not in own_tests]
+            regressions = [f for f in green.failed_files if test_owner(f) not in own_tests]
             # skipped を記録に入れる。緑は後から台帳だけで証明できなければ
             # ならず、「失敗なし」はテストが走ったことを証明しないからだ。
             ledger("VERIFY", step=step_id, attempt=attempt, backend=backend,
@@ -4759,7 +5139,8 @@ def run_step(step_id: str, unvalidated: bool = False) -> int:
                       "implementation has to stop breaking them, while still "
                       "satisfying this step.\n\n" + last_failure)
         else:
-            broke = [f for f in last_run.failed_files if f not in own_tests] if last_run else []
+            broke = [f for f in last_run.failed_files
+                     if test_owner(f) not in own_tests] if last_run else []
             tried = ", ".join(dict.fromkeys(schedule))
             reason = (f"still failing after {attempt} attempts"
                       + (f" across {tried}" if len(SOLVER_TIERS) > 1 else ""))

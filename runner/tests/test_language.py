@@ -55,8 +55,8 @@ class WhichLanguage(Language):
         with self.assertRaises(SystemExit):
             self.speak("js")
 
-    def test_the_two_are_the_whole_list(self):
-        self.assertEqual(sorted(LANGUAGES), ["python", "typescript"])
+    def test_the_three_are_the_whole_list(self):
+        self.assertEqual(sorted(LANGUAGES), ["csharp", "python", "typescript"])
 
 
 class TheCommandThatProducesAVerdict(Language):
@@ -79,7 +79,7 @@ class TheCommandThatProducesAVerdict(Language):
     def test_neither_reaches_the_test_runner_through_a_fetcher(self):
         # npx は取ってくることも厭わない。どちらも、プロビジョニングが凍結した
         # 木への絶対パスだ。
-        for name in ("python", "typescript"):
+        for name in ("python", "typescript", "csharp"):
             self.speak(name)
             argv, _ = test_argv([], Path("/tmp/r.xml"))
             # pathlib ではなく POSIX の形で確かめる。ランナーはサンドボックスで
