@@ -247,7 +247,7 @@ cd /tmp && sudo ADMIN_USER=<保守ユーザー> bash /opt/loop-engine/provision/
 pull したあとも同じ行を流す。
 
 `05-isolation.sh` が WSL 隔離（Windows パス非マウント、WSLg、systemd、NAT）を、
-`35-node.sh` が Node 側の凍結を、`40-perms.sh` が solver 視点の権限モデルを、
+`35-node.sh` が Node 側の凍結を、`36-dotnet.sh` が .NET 側の凍結を、`40-perms.sh` が solver 視点の権限モデルを、
 `45-agent-invoke.sh` が資格情報の柵を assert する。1つでも落ちたら異常終了する。
 `05-` を最初に走らせるのは、隔離が効いていないディストロには
 **プロビジョニングする意味が無い**（以降の全ステップが成功しつつ何も意味しなくなる）ため。
@@ -275,6 +275,28 @@ sudo -u runner /srv/loop/bin/smoke-page
 Vite はインラインのモジュールスクリプトを `/index.html?html-proxy&index=0.js` に切り出し、
 変換後の HTML には `/src/main.ts` が現れない。だから見るのは HTML ではなく、切り出された
 モジュールの中身だ。キャッシュは作業場所に書き、凍結したツールチェーンには書かない。
+
+`36-dotnet.sh` は C# の計画のための .NET を用意する。
+
+| もの | 場所 | 持ち主 |
+|---|---|---|
+| .NET 8 SDK | Ubuntu の archive の `dotnet-sdk-8.0` | apt |
+| NUnit 3、NUnit3TestAdapter、Microsoft.NET.Test.Sdk、JunitXml.TestLogger と推移的な依存 | `/srv/loop/dotnet/feed`（`.nupkg` を並べたフォルダ） | root。誰も書けない |
+| ソースをフィードだけにする設定 | `/srv/loop/dotnet/nuget.config`（`<clear/>` のあとにフィードだけ） | root |
+| ランナーが書く csproj とビルドの出力 | `/srv/loop/dotnet/build` | runner、700 |
+
+- 版はスクリプトの冒頭で固定する。フィードに出るのは版を変えたときだけなので、egress を閉じた後に流し直してもネットワークは要らない
+- NUnit は 3 系にする。Unity の Test Framework の NUnit は 3 系で、4 系は `Assert.AreEqual` を `ClassicAssert` に移した
+- csproj はプロジェクトの根に置かない。取り込んだ Unity のプロジェクトでは、IDE が Unity の生成した csproj と一緒に拾ってしまう
+- `build` はコンパイルしたコードとテストを持つので、planner と critic から見えてはならない（BOOTSTRAP 1-1）
+
+最後に `smoke-dotnet` を流す。フィードだけで restore し、netstandard2.1 のコードを net8.0 の
+NUnit のテストで走らせ、junit のレポートから2件走って1件落ちたことを読む。落ちたテストの
+`type` と `message` も出す。ランナーは例外の型をそこから読むので、ロガーの版を変えたら形を見る。
+
+```bash
+sudo -u runner -H /srv/loop/bin/smoke-dotnet
+```
 
 ### 2-9. 資格情報を入れる（箱）
 
@@ -874,6 +896,7 @@ VirtualBox 構成の手順は `c4374f4` から拾える。
 
 ## 更新履歴
 
+- 2026/09/27: .NET を凍結する `36-dotnet.sh` と `smoke-dotnet` を §2-8 に追加
 - 2026/09/26: §2-10 を `loop` コマンドで走らせる手順に置き換え
 - 2026/09/26: §2-11 を、`loop-project.sh` でプロジェクトを切り替える手順に置き換え
 - 2026/09/26: 2回目以降のプロビジョニングで runner の公開鍵の流し込みを不要にした
