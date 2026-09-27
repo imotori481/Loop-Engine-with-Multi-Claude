@@ -11,6 +11,7 @@ WSL2 では起動と生存管理がホスト側の責務になった（`RUNNER_S
 | `loop-dev.cmd` | `C:\Users\<you>\bin\loop-dev.cmd`（PATH の通った場所） | ディストロ起動 → sshd 待機 → VS Code Remote-SSH 起動 |
 | `loop.cmd` | このリポジトリのまま（`host` を PATH に足す） | ディストロ起動 → sshd 待機 → 箱の `loop` コマンドを実行 |
 | `loop-import.cmd` | このリポジトリのまま（`host` を PATH に足す） | 既存リポジトリのブランチを箱のプロジェクトとして取り込む |
+| `loop-unity-refs.cmd` / `.ps1` | このリポジトリのまま（`host` を PATH に足す） | Unity のプロジェクトがコンパイルに使う参照アセンブリを箱へ送る |
 | `wsl-keepalive.vbs` | このリポジトリのまま（タスクが絶対パスで参照する） | VM を**窓を出さずに**生かし続ける。下の keepalive タスクの実体 |
 | `loop-pull.cmd` | このリポジトリのまま | **すべての** `repo*.git` と `projects/*/repo.git` をホストのミラーに引く。**VHDX を失っても残る唯一の複製** |
 | `loop-dashboard.cmd` | このリポジトリのまま | 進捗、エスカレーション、予定レビューを扱うGUIを起動（`127.0.0.1:8443`） |
@@ -53,6 +54,27 @@ loop-import <project> <repo-url> <branch> [<base-branch>]
 
 クローンの置き場は、冒頭の `set "WORKROOT=..."` で決まる。GitHub とやり取りするのはこのクローンだけだ。
 箱には GitHub の資格情報を置かない。
+
+## Unity の参照アセンブリを送る
+
+```cmd
+loop-unity-refs <project> <unity-project-dir>
+```
+
+箱には Unity が無い。Unity のプロジェクトの C# をコンパイルするには、Unity がコンパイルに使う
+DLL が要る。`<unity-project-dir>` の `Assembly-CSharp.csproj` から集めて送る。
+
+- `Assembly-CSharp.csproj` は Unity が外部のコードエディタのために書く。無ければ、Unity で
+  プロジェクトを開き、Preferences > External Tools で Visual Studio か Rider を選び、
+  Assets > Open C# Project を1回流す
+- 集めるのは、csproj の `HintPath` の DLL と、プロジェクト参照（パッケージ）の
+  `Library\ScriptAssemblies\<名前>.dll`。ネイティブの DLL、`NetStandard` の DLL、
+  `Assembly-CSharp*` は外す
+- 定義シンボルは `UNITY_EDITOR` の系統を外して送る。C# の版と Unity の版も送る
+- 箱では `loop project unity-refs` が root の所有で `/srv/loop/projects/<project>/unity-refs/` に置く
+- `-DryRun` を付けると、tar を作ったところで止まり、何も送らない
+
+Unity の版やパッケージを変えたら、もう一度送る。
 
 ## オペレーターGUI
 
@@ -242,6 +264,7 @@ git clone loop-runner:/srv/loop/repo.git <置き場所>
 
 ## 更新履歴
 
+- 2026/09/27: Unity の参照アセンブリを箱へ送る `loop-unity-refs` を追加
 - 2026/09/27: `loop-pull.cmd` がプロジェクトごとの写しを引くように変更
 - 2026/09/27: 既存リポジトリを取り込む `loop-import.cmd` を追加
 - 2026/09/26: 箱の `loop` コマンドを呼ぶ `loop.cmd` を追加

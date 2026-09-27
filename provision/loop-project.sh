@@ -60,17 +60,23 @@ link_repo() {
   mv -T "$LOOP/.repo.git.new" "$LOOP/repo.git"
 }
 
-# 書き込みの柵の場所。ランナーとプロビジョニングは /srv/loop/layout.json を読む。
-# プロジェクトが layout.json を持っていればそこへのリンクにし、持っていなければ
-# 消す（既定の src と tests）。リンクもファイルも root の所有なので、ランナーは
-# 自分の柵を動かせない。
-link_layout() {
-  if [ -f "$PROJECTS/$1/layout.json" ]; then
-    ln -sfn "$PROJECTS/$1/layout.json" "$LOOP/.layout.json.new"
-    mv -T "$LOOP/.layout.json.new" "$LOOP/layout.json"
-  else
-    rm -f "$LOOP/layout.json"
-  fi
+# プロジェクトごとに持つものを、/srv/loop の直下からリンクする。持っていなければ
+# リンクを消す。ランナーとプロビジョニングは直下のパスだけを読む。
+#
+#   layout.json  書き込みの柵の場所。無ければ既定の src と tests
+#   unity-refs/  Unity の参照アセンブリ（loop-unity-refs）。無ければ Unity 無し
+#
+# リンクも中身も root の所有なので、ランナーは自分の柵も参照も動かせない。
+link_project_files() {
+  local entry
+  for entry in layout.json unity-refs; do
+    if [ -e "$PROJECTS/$1/$entry" ]; then
+      ln -sfn "$PROJECTS/$1/$entry" "$LOOP/.$entry.new"
+      mv -T "$LOOP/.$entry.new" "$LOOP/$entry"
+    else
+      rm -f "$LOOP/$entry"
+    fi
+  done
 }
 
 # 柵の場所を検査する。規則は loop.py の layout_problems にしか書かない。何かを
@@ -138,7 +144,7 @@ cmd_adopt() {
   install -d -o root -g root -m 755 "$PROJECTS/$name"
   mv "$LOOP/repo.git" "$PROJECTS/$name/repo.git"
   link_repo "$name"
-  link_layout "$name"
+  link_project_files "$name"
   echo "$name" > "$CURRENT"
   echo "今の箱に '$name' という名前を付けた"
 }
@@ -221,7 +227,7 @@ cmd_use() {
 
   [ -z "$cur" ] || park "$cur"
   link_repo "$name"
-  link_layout "$name"
+  link_project_files "$name"
   echo "$name" > "$CURRENT"
 
   if [ -d "$PROJECTS/$name/parked" ]; then
@@ -252,11 +258,63 @@ cmd_layout() {
   write_layout "$name" "$src" "$tests"
   echo "'$name' の柵の場所: $src/ と $tests/"
   [ "$(current)" = "$name" ] || return 0
-  link_layout "$name"
+  link_project_files "$name"
   echo "今のプロジェクトなので、ディレクトリと権限を作り直す"
   ADMIN_USER="${ADMIN_USER:-maint}" bash "$HERE/provision.sh" \
     || die "プロビジョニングが途中で止まった。原因を直してから次で流し直す:
     cd /tmp && sudo ADMIN_USER=${ADMIN_USER:-maint} bash $HERE/provision.sh"
+}
+
+# Unity の参照アセンブリを受け取って凍結する。ホストの loop-unity-refs が、Unity の
+# 生成した Assembly-CSharp.csproj から集めて tar で送ってくる。中身は次だけ:
+#
+#   refs/*.dll       参照アセンブリ（コンパイルに使うだけで、配らない）
+#   version.txt      Unity の版（ProjectSettings/ProjectVersion.txt）
+#   defines.txt      定義シンボル。UNITY_EDITOR の系統は外してある
+#   langversion.txt  C# の版
+#   sources.txt      それぞれの DLL をどこから取ったか。人が読むためのもの
+#
+# ホストから来たものなので、展開の前後で形を確かめる。リンクや、ほかの名前の
+# ファイルが1つでもあれば、何も置き換えずに止まる。
+cmd_unity_refs() {
+  local name="$1" tar="$2" work target="$PROJECTS/$1/unity-refs" f bad
+  valid_name "$name"
+  [ -d "$PROJECTS/$name/repo.git" ] || die "プロジェクト '$name' は無い。先に 'loop project init $name'"
+  [ -f "$tar" ] || die "ファイルが無い: $tar"
+  busy && die "ループかエージェントが走っている。終わるのを待つ"
+
+  work="$(mktemp -d)"
+  trap 'rm -rf "$work"' EXIT
+  tar -xf "$tar" -C "$work" --no-same-owner --no-same-permissions \
+    || die "tar を展開できない: $tar"
+  bad="$(find "$work" -mindepth 1 ! -type f ! -type d)"
+  [ -z "$bad" ] || die "ファイルでもディレクトリでもないものが入っている:
+$bad"
+  bad="$(cd "$work" && find . -type f | grep -vE '^\./(refs/[A-Za-z0-9._+-]+\.dll|(version|defines|langversion|sources)\.txt)$' || true)"
+  [ -z "$bad" ] || die "知らないファイルが入っている:
+$bad"
+  for f in version.txt defines.txt langversion.txt; do
+    [ -s "$work/$f" ] || die "$f が無いか空だ"
+  done
+  for f in "$work"/refs/*.dll; do
+    [ -e "$f" ] || die "refs/ に DLL が1つも無い"
+    [ "$(head -c2 "$f")" = "MZ" ] || die "DLL ではない: ${f#"$work"/}"
+  done
+
+  # 置き換えは rename で行う。途中で止まっても、前の参照が半分だけ残ることは無い。
+  rm -rf "$target.new"
+  cp -r "$work" "$target.new"
+  chown -R root:root "$target.new"
+  find "$target.new" -type d -exec chmod 755 {} +
+  find "$target.new" -type f -exec chmod 644 {} +
+  rm -rf "$target.old"
+  [ ! -e "$target" ] || mv "$target" "$target.old"
+  mv "$target.new" "$target"
+  rm -rf "$target.old"
+  rm -f "$tar"
+
+  echo "'$name' に Unity $(cat "$target/version.txt") の参照を置いた（DLL $(find "$target/refs" -name '*.dll' | wc -l) 個）"
+  [ "$(current)" != "$name" ] || link_project_files "$name"
 }
 
 usage() {
@@ -274,6 +332,8 @@ usage() {
   use <名前>                      切り替える。初めてなら作る
   layout <名前> --src <ディレクトリ> --tests <ディレクトリ>
                                   作ってあるプロジェクトの柵の場所を変える
+  unity-refs <名前> <tar>         Unity の参照アセンブリを置く。tar はホストの
+                                  loop-unity-refs が作って送ったもの
   adopt <名前>                    loop-project.sh より前に作った箱に名前を付ける
 EOF
   exit 2
@@ -306,5 +366,6 @@ case "${1:-}" in
       cmd_layout "$name" "$src" "$tests"
     fi ;;
   use)     [ $# -eq 2 ] || usage; cmd_use "$2" ;;
+  unity-refs) [ $# -eq 3 ] || usage; cmd_unity_refs "$2" "$3" ;;
   *)       usage ;;
 esac

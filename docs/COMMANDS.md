@@ -40,6 +40,7 @@ PowerShell なら `.\host\loop.cmd <args>`、Git Bash なら `./host/loop.cmd <a
 | `<pr-branch>` | PR に出すブランチの名前 |
 | `<admin-user>` | 箱の保守ユーザーの名前 |
 | `<src-dir>` | ソルバーがコードを書くディレクトリ。作業ツリーの根からの相対パス（`Assets/Source` など） |
+| `<unity-project-dir>` | Unity で開いたことのあるプロジェクトのディレクトリ。`Assembly-CSharp.csproj` があるところ |
 | `<tests-dir>` | ソルバーがテストを書くディレクトリ。`<src-dir>` を含まず、`<src-dir>` に含まれない場所 |
 | `<you>` | Windows のユーザー名 |
 
@@ -83,6 +84,7 @@ PowerShell なら `.\host\loop.cmd <args>`、Git Bash なら `./host/loop.cmd <a
 | 既存リポジトリのブランチを受け入れる用意をする | `loop project init <project> --branch <branch>` |
 | 書き込みの柵の場所を決めて用意する | `loop project init <project> --src <src-dir> --tests <tests-dir>` |
 | 作ってあるプロジェクトの柵の場所を変える | `loop project layout <project> --src <src-dir> --tests <tests-dir>` |
+| Unity の参照アセンブリを送る（ホストだけ） | `loop-unity-refs <project> <unity-project-dir>` |
 | 切り替える | `loop project use <project>` |
 | `loop-project.sh` より前に作った箱に名前を付ける | `loop project adopt <project>` |
 

@@ -298,6 +298,18 @@ NUnit のテストで走らせ、junit のレポートから2件走って1件落
 sudo -u runner -H /srv/loop/bin/smoke-dotnet
 ```
 
+Unity の参照アセンブリを置いたプロジェクト（ホストの `loop-unity-refs`）では、`probe-unity` で
+箱に何ができるかを測る。関門ではなく測定なので、結果が悪くても落ちない。
+
+```bash
+sudo -u runner -H /srv/loop/bin/probe-unity
+```
+
+1. 柵の中のコードが、送った参照と定義シンボルでそのままコンパイルできるか。できなければエラーの種類と件数
+2. エンジン本体の無い .NET 8 の上で、`Vector3` や `Mathf` の計算、`Debug.Log` のようなネイティブ呼び出し、`GameObject` と MonoBehaviour と ScriptableObject の生成が動くか
+
+全文は `/srv/loop/logs/probe-unity-<日時>.log` に残る。
+
 ### 2-9. 資格情報を入れる（箱）
 
 3役はそれぞれ別のファイルから資格情報を読む。各ファイルは、その役の uid だけが読める
@@ -403,6 +415,7 @@ loop project init <名前> --src <ディレクトリ> --tests <ディレクト�
 loop project layout <名前> --src <ディレクトリ> --tests <ディレクトリ>
                                                 # 作ってあるプロジェクトの柵の場所を変える
 loop project use <名前>                         # 切り替える
+loop project unity-refs <名前> <tar>            # Unity の参照アセンブリを置く（ホストの loop-unity-refs が流す）
 ```
 
 書き込みの柵は、ソルバーが書ける2つのディレクトリだ。コードの場所（`--src`）とテストの場所
@@ -432,6 +445,8 @@ cd /tmp && sudo ADMIN_USER=<保守ユーザー> bash /opt/loop-engine/provision/
 | `/srv/loop/projects/CURRENT` | 今のプロジェクトの名前 |
 | `/srv/loop/repo.git` | 今のプロジェクトの bare を指すリンク |
 | `/srv/loop/layout.json` | 今のプロジェクトの `layout.json` を指すリンク。無ければ既定の場所。ランナーとプロビジョニングが読む |
+| `/srv/loop/projects/<名前>/unity-refs/` | Unity の参照アセンブリ（`refs/*.dll`）、版、定義シンボル、C# の版。root 所有 |
+| `/srv/loop/unity-refs` | 今のプロジェクトの `unity-refs/` を指すリンク。無ければ Unity を使わないプロジェクト |
 | `/srv/loop/project` | 今のプロジェクトの作業ツリー（実体） |
 
 `use` は次の順で動く。
@@ -896,6 +911,7 @@ VirtualBox 構成の手順は `c4374f4` から拾える。
 
 ## 更新履歴
 
+- 2026/09/27: Unity の参照アセンブリの置き場（§2-11）と、それで測る `probe-unity`（§2-8）を追加
 - 2026/09/27: .NET を凍結する `36-dotnet.sh` と `smoke-dotnet` を §2-8 に追加
 - 2026/09/26: §2-10 を `loop` コマンドで走らせる手順に置き換え
 - 2026/09/26: §2-11 を、`loop-project.sh` でプロジェクトを切り替える手順に置き換え

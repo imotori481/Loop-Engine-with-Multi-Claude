@@ -32,6 +32,7 @@ export DOTNET_CLI_TELEMETRY_OPTOUT=1 DOTNET_NOLOGO=1 DOTNET_SKIP_FIRST_TIME_EXPE
 
 install -d -o root -g root -m 755 /srv/loop/bin
 install -o root -g root -m 755 bin/smoke-dotnet /srv/loop/bin/smoke-dotnet
+install -o root -g root -m 755 bin/probe-unity /srv/loop/bin/probe-unity
 
 # ---- SDK -------------------------------------------------------------------
 # Ubuntu の archive にある .NET 8 を使う。Microsoft の apt リポジトリを足すと、
