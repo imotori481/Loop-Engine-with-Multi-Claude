@@ -53,6 +53,18 @@ class WhatTheCriticIsTold(unittest.TestCase):
         self.assertNotIn("セーブを消去", brief)
         self.assertIn('"id": "S1"', brief)
 
+    def test_both_modes_open_with_the_same_plan_and_environment(self):
+        # モードは続けて呼ぶ。先頭がそろっていれば、2つ目の呼び出しは計画と
+        # 既存の宣言をプロンプトキャッシュから読む。要件は coverage だけが持つ
+        # ので、共通の部分の後ろに置く。
+        shared = loop.critic_material(TASKS)
+        coverage = brief_critique_coverage(REQUIREMENTS, TASKS)
+        trace = brief_critique_trace(TASKS)
+        self.assertTrue(coverage.startswith(shared))
+        self.assertTrue(trace.startswith(shared))
+        self.assertIn('"id": "S1"', shared)
+        self.assertGreater(coverage.index("開始直後から遊べること"), len(shared))
+
     def test_every_brief_names_the_one_file_and_forbids_approval(self):
         for brief in (brief_critique_coverage(REQUIREMENTS, TASKS),
                       brief_critique_trace(TASKS)):

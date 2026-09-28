@@ -5200,16 +5200,38 @@ def critic_environment(tasks: str) -> str:
     return environment_facts(plan if isinstance(plan, dict) else None)
 
 
+def critic_material(tasks: str) -> str:
+    """どのモードのブリーフも、この同じ本文で始める。
+
+    ブリーフの大半は計画と既存の宣言で、モードが変わっても同じだ。モードは
+    続けて呼ぶので、先頭がそろっていれば、2つ目の呼び出しはこの部分を
+    プロンプトキャッシュから読む。役の説明と問いは、この後に置く。
+    """
+    return f"""Below are a plan for something that has not been built yet and
+facts about the project it will be built in. Your role and your task follow
+after them.
+
+# The plan
+
+{tasks}
+
+{critic_environment(tasks)}"""
+
+
 def brief_critique_coverage(requirements: str, tasks: str) -> str:
     """この計画を完全に満たしたとき、人間が求めたものが手に入るか。"""
-    return f"""You are the critic. Your only job is to answer one question about
-a piece of work that has not been built yet.
+    return f"""{critic_material(tasks)}
+
+# Your role
+
+You are the critic. Your only job is to answer one question about the work
+above.
 
 # The question
 
 A human wrote requirements for something they want. A planner turned those
-requirements into a plan: a sequence of steps, each with acceptance criteria
-that a machine will check.
+requirements into the plan above: a sequence of steps, each with acceptance
+criteria that a machine will check.
 
 **If every acceptance criterion in this plan passed, would the human's
 requirements be satisfied?**
@@ -5217,12 +5239,6 @@ requirements be satisfied?**
 # The requirements, written by the human
 
 {requirements}
-
-# The plan
-
-{tasks}
-
-{critic_environment(tasks)}
 
 # How to read the plan
 
@@ -5261,15 +5277,12 @@ def brief_critique_trace(tasks: str) -> str:
     導いた。つまり、欠けているものについて要件が何も言っていなくても、動かない
     製品を捕まえられる。run 7 の要件は、初期状態に一言も触れていなかった。
     """
-    return f"""You are the tracer. You read a plan for something that has not
-been built yet, and you work out what a user of the finished thing would
-actually be able to do.
+    return f"""{critic_material(tasks)}
 
-# The plan
+# Your role
 
-{tasks}
-
-{critic_environment(tasks)}
+You are the tracer. You read the plan above and work out what a user of the
+finished thing would actually be able to do.
 
 # How to read it
 
