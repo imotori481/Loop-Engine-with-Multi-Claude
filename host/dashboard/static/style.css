@@ -20,12 +20,17 @@ table { width: 100%; border-collapse: collapse; } th, td { text-align: left; pad
 .live.idle strong { color: #9bb7a8; } .live.error strong { color: #f0b37e; }
 #pull-request a { color: #86c9a7; word-break: break-all; } #pull-request button { justify-self: start; }
 tr.active td { background: #173d30; } td.goal { font-family: inherit; }
-.chart { position: relative; } #token-chart svg { display: block; width: 100%; height: auto; overflow: visible; }
-#token-chart .grid { stroke: #263c34; } #token-chart .axis { fill: #9bb7a8; font-size: 12px; }
-#token-chart .series { fill: none; stroke-width: 2; stroke-linejoin: round; } #token-chart .dot { stroke: #101b18; stroke-width: 2; }
-#token-chart .label { font-size: 12px; font-weight: 700; fill: #edf5ef; } #token-chart .cross { stroke: #9bb7a8; stroke-dasharray: 3 3; }
+.chart { position: relative; } .plot svg { display: block; width: 100%; height: auto; overflow: visible; }
+.plot .grid { stroke: #263c34; } .plot .axis { fill: #9bb7a8; font-size: 12px; }
+.plot .series { fill: none; stroke-width: 2; stroke-linejoin: round; } .plot .dot { stroke: #101b18; stroke-width: 2; }
+.plot .label { font-size: 12px; font-weight: 700; fill: #edf5ef; } .plot .cross { stroke: #9bb7a8; stroke-dasharray: 3 3; }
+.plot .bar { transition: opacity .15s; } .plot .bar.dim { opacity: .35; }
+.controls { display: flex; gap: 16px; align-items: center; flex-wrap: wrap; justify-content: flex-end; }
+.toggle { display: inline-flex; border: 1px solid #3d5d51; border-radius: 8px; overflow: hidden; }
+.toggle button { border: 0; border-radius: 0; background: transparent; color: #9bb7a8; padding: 5px 10px; font-weight: 600; font-size: .82rem; }
+.toggle button + button { border-left: 1px solid #3d5d51; } .toggle button[aria-pressed="true"] { background: #176746; color: #effff4; }
 .legend { display: flex; gap: 14px; flex-wrap: wrap; } .legend span { display: inline-flex; align-items: center; gap: 6px; color: #edf5ef; letter-spacing: 0; text-transform: none; }
-.legend i, .tip i { display: inline-block; width: 12px; height: 3px; border-radius: 2px; }
+.legend i, .tip i { display: inline-block; width: 12px; height: 3px; border-radius: 2px; } .legend.blocks i { height: 12px; }
 .tip { position: absolute; pointer-events: none; background: #09110f; border: 1px solid #3d5d51; border-radius: 8px; padding: 8px 10px; font-size: .82rem; white-space: nowrap; }
 .tip span { color: #edf5ef; letter-spacing: 0; font-size: inherit; } .tip div { display: flex; gap: 8px; align-items: center; } .tip b { margin-left: auto; padding-left: 12px; font-family: Consolas, monospace; }
 details { margin-top: 14px; } summary { cursor: pointer; color: #9bb7a8; font-size: .88rem; } details .table-wrap { margin-top: 10px; padding: 0; border: 0; }

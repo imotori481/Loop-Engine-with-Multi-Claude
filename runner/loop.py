@@ -1350,16 +1350,20 @@ def record_usage(who: str, phase: str, data: dict) -> None:
     台帳には usage を丸ごと書く。画面には1行に要るものだけを出す。usage の
     中身は、キャッシュの内訳や iterations まで入っていて、1回の呼び出しで
     画面を数行占めていた。入力は、キャッシュから読んだ分と書いた分を足す。
+    read と write はそのうちのキャッシュの読み取りと書き込みで、`loop now` が
+    種類別の消費を数えるのに使う。
     """
     usage = data.get("usage") or {}
     models = sorted(data.get("modelUsage") or {})
-    tokens_in = sum(int(usage.get(k) or 0) for k in (
-        "input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"))
+    cache_read = int(usage.get("cache_read_input_tokens") or 0)
+    cache_write = int(usage.get("cache_creation_input_tokens") or 0)
+    tokens_in = int(usage.get("input_tokens") or 0) + cache_read + cache_write
     tokens_out = int(usage.get("output_tokens") or 0)
     seconds = (data.get("duration_ms") or 0) / 1000
     cost = data.get("total_cost_usd")
     echo = (f"who={who} phase={phase} model={','.join(models) or '-'} "
-            f"in={tokens_in} out={tokens_out} sec={seconds:.0f}"
+            f"in={tokens_in} out={tokens_out} read={cache_read} write={cache_write} "
+            f"sec={seconds:.0f}"
             + (f" usd={cost:.2f}" if isinstance(cost, (int, float)) else "")
             + (" ERROR" if data.get("is_error") else ""))
     ledger("USAGE", echo=echo, who=who, phase=phase,

@@ -43,6 +43,24 @@ class CurrentLoop(unittest.TestCase):
         self.assertTrue(loop["started"].startswith("2026-01-02T00:00:00"))
         self.assertEqual(loop["tokens"], {"planner": 12, "critic": 6, "solver": 10})
         self.assertEqual(loop["calls"], 3)
+        self.assertEqual(loop["usd"], {"planner": 0.10, "critic": 0.0, "solver": 0.0})
+        # read と write の無い行では、入力のうちキャッシュの分が分からない。
+        self.assertIsNone(loop["kinds"])
+
+    def test_cache_reads_and_writes_are_split_out_of_the_input(self):
+        self.log("game-20260102-000000.log",
+                 "=== loop go 開始 (2026-01-02 00:00:00) プロジェクト=game",
+                 "[USAGE] who=critic phase=CRITIQUE model=m in=110 out=20 read=100 write=6 "
+                 "sec=4 usd=0.01",
+                 "[USAGE] who=critic phase=CRITIQUE model=m in=50 out=5 read=40 write=8 "
+                 "sec=2 usd=0.02")
+        loop = self.loop()
+        self.assertEqual(loop["kinds"]["critic"],
+                         {"input": 6, "cache_write": 14, "cache_read": 140, "output": 25})
+        self.assertEqual(loop["kinds"]["solver"],
+                         {"input": 0, "cache_write": 0, "cache_read": 0, "output": 0})
+        self.assertEqual(loop["tokens"]["critic"], 185)
+        self.assertAlmostEqual(loop["usd"]["critic"], 0.03)
 
     def test_the_last_critique_is_kept_with_the_time_of_its_command(self):
         self.log("game-20260102-000000.log",

@@ -96,10 +96,25 @@ const ROLES = [
   {key: "critic", label: "クリティック", color: "#d95926"},
   {key: "solver", label: "ソルバー", color: "#199e70"},
 ];
+// 種類は積み上げの下から並べる。色は役とは別の並びで、隣り合う色どうしを見分けられる。
+const KINDS = [
+  {key: "cache_read", label: "キャッシュ読み取り", color: "#9085e9"},
+  {key: "cache_write", label: "キャッシュ書き込み", color: "#c98500"},
+  {key: "input", label: "入力", color: "#d55181"},
+  {key: "output", label: "出力", color: "#008300"},
+];
 const OUTCOME = {green: "完了", stopped: "停止", running: "未完了", abandoned: "中断", active: "走行中"};
 const SVG = "http://www.w3.org/2000/svg";
 const compact = new Intl.NumberFormat("ja-JP", {notation: "compact", maximumFractionDigits: 1});
 const exact = new Intl.NumberFormat("ja-JP");
+const METRIC = {
+  tokens: {label: "トークン", value: (run, role) => run.tokens[role],
+           axis: value => compact.format(value), exact: value => exact.format(value)},
+  usd: {label: "USD", value: (run, role) => run.usd?.[role] ?? 0,
+        axis: value => `$${Number(value.toFixed(2))}`, exact: value => `$${value.toFixed(2)}`},
+};
+// 役割のグラフに出す量と、種類のグラフに出す役。all は3役の和。
+let roleMetric = "tokens", kindRole = "all", shownRuns = [];
 
 function svg(tag, attributes) {
   const element = document.createElementNS(SVG, tag);
@@ -126,9 +141,13 @@ function mergeRuns(mirror, live) {
     const at = parseStamp(live.loop.started);
     const entry = {source: `箱: ${live.project}`, started: live.loop.started, tokens: live.loop.tokens,
                    outcome: live.loop.outcome === "running" ? "active" : live.loop.outcome};
+    // 箱のログに read と write が無い（それを出す前のランナーの）回は、種類別を
+    // 数えられない。USD を返さない古い `loop now` もある。そのときは写しの値を残す。
+    if (live.loop.kinds) entry.kinds = live.loop.kinds;
+    if (live.loop.usd) entry.usd = live.loop.usd;
     const same = runs.findIndex(run => [`projects/${live.project}`, "project"].includes(run.source)
                                        && Math.abs(parseStamp(run.started) - at) < 5 * 60000);
-    if (same >= 0) runs[same] = entry; else runs.push(entry);
+    if (same >= 0) runs[same] = {...runs[same], ...entry}; else runs.push(entry);
   }
   runs.sort((a, b) => parseStamp(a.started) - parseStamp(b.started));
   runs.forEach((run, index) => { run.run = index + 1; });
@@ -140,7 +159,20 @@ function drawTokens() {
   const runs = mergeRuns(mirrorRuns, liveLoop), key = JSON.stringify(runs);
   if (key === drawnTokens) return;
   drawnTokens = key;
-  renderTokens(runs);
+  shownRuns = runs;
+  renderRoles(runs);
+  renderKinds(runs);
+}
+
+// ボタンの組の1つを押された状態にし、その値を渡す。
+function toggle(selector, onChange) {
+  const group = document.querySelector(selector);
+  for (const element of group.querySelectorAll("button")) {
+    element.onclick = () => {
+      for (const other of group.querySelectorAll("button")) other.setAttribute("aria-pressed", other === element);
+      onChange(element.dataset.value);
+    };
+  }
 }
 
 function renderCritique(critique) {
@@ -150,58 +182,92 @@ function renderCritique(critique) {
   box.append(text("pre", critique.text));
 }
 
-function renderTokens(runs) {
-  const legend = document.querySelector("#token-legend"); legend.replaceChildren();
-  for (const role of ROLES) {
-    const item = text("span", role.label); const swatch = document.createElement("i");
-    swatch.style.background = role.color; item.prepend(swatch); legend.append(item);
+const CHART = {width: 800, height: 280, top: 12, bottom: 30, left: 56};
+
+function renderLegend(selector, items) {
+  const legend = document.querySelector(selector); legend.replaceChildren();
+  for (const item of items) {
+    const entry = text("span", item.label); const swatch = document.createElement("i");
+    swatch.style.background = item.color; entry.prepend(swatch); legend.append(entry);
   }
+}
+
+function tipLine(color, label, value) {
+  const line = document.createElement("div"), swatch = document.createElement("i");
+  if (color) swatch.style.background = color; else swatch.style.visibility = "hidden";
+  line.append(swatch, text("span", label), text("b", value));
+  return line;
+}
+
+function tipHeading(tip, run) {
+  tip.replaceChildren(text("strong", `${run.run}回目（${OUTCOME[run.outcome] || run.outcome}）`),
+                      text("p", `${run.source} / ${run.started}`, "why"));
+}
+
+// 横軸の at（viewBox の座標）の脇にツールチップを出す。右半分なら左に出す。
+function placeTip(chart, root, tip, at) {
+  const box = root.getBoundingClientRect(), scale = box.width / CHART.width;
+  const offset = chart.getBoundingClientRect();
+  const px = at * scale + box.left - offset.left;
+  tip.hidden = false;
+  tip.style.top = `${CHART.top * scale}px`;
+  tip.style.left = px > offset.width / 2 ? "" : `${px + 20}px`;
+  tip.style.right = px > offset.width / 2 ? `${offset.width - px + 20}px` : "";
+}
+
+// 目盛りと横軸の回の名前。y は値を縦の座標にする関数、x は回の番号を横の座標にする関数。
+function drawAxes(root, runs, max, format, x, y, right) {
+  for (let tick = 0; tick <= 4; tick++) {
+    const value = max * tick / 4;
+    root.append(svg("line", {x1: CHART.left, x2: CHART.width - right, y1: y(value), y2: y(value), class: "grid"}));
+    const label = svg("text", {x: CHART.left - 8, y: y(value) + 4, "text-anchor": "end", class: "axis"});
+    label.textContent = format(value); root.append(label);
+  }
+  const every = Math.ceil(runs.length / 12);
+  runs.forEach((run, index) => {
+    if (index % every && index !== runs.length - 1) return;
+    const label = svg("text", {x: x(index), y: CHART.height - 8, "text-anchor": "middle", class: "axis"});
+    label.textContent = `${run.run}回目`; root.append(label);
+  });
+}
+
+function renderRoles(runs) {
+  const metric = METRIC[roleMetric];
+  renderLegend("#token-legend", ROLES);
 
   const table = document.querySelector("#token-table"); table.replaceChildren();
   for (const run of [...runs].reverse()) {
     const row = document.createElement("tr");
     row.append(text("td", run.run), text("td", run.source), text("td", run.started),
                text("td", OUTCOME[run.outcome] || run.outcome),
-               ...ROLES.map(role => text("td", exact.format(run.tokens[role.key]))));
+               ...ROLES.map(role => text("td", metric.exact(metric.value(run, role.key)))));
     table.append(row);
   }
 
   const chart = document.querySelector("#token-chart"); chart.replaceChildren();
   if (!runs.length) { chart.append(text("p", "写しの台帳に消費の記録がまだありません。", "why")); return; }
 
-  const width = 800, height = 280, left = 56, right = 96, top = 12, bottom = 30;
+  const {width, height, left, top, bottom} = CHART, right = 96;
   const plotWidth = width - left - right, plotHeight = height - top - bottom;
-  const max = niceMax(Math.max(...runs.flatMap(run => ROLES.map(role => run.tokens[role.key]))));
+  const max = niceMax(Math.max(...runs.flatMap(run => ROLES.map(role => metric.value(run, role.key)))));
   const x = index => left + (runs.length === 1 ? plotWidth / 2 : index * plotWidth / (runs.length - 1));
   const y = value => top + plotHeight - value / max * plotHeight;
   const root = svg("svg", {viewBox: `0 0 ${width} ${height}`, role: "img",
-                           "aria-label": "run --all の回ごとの、役割別トークン消費"});
-
-  for (let tick = 0; tick <= 4; tick++) {
-    const value = max * tick / 4;
-    root.append(svg("line", {x1: left, x2: left + plotWidth, y1: y(value), y2: y(value), class: "grid"}));
-    const label = svg("text", {x: left - 8, y: y(value) + 4, "text-anchor": "end", class: "axis"});
-    label.textContent = compact.format(value); root.append(label);
-  }
-  const every = Math.ceil(runs.length / 12);
-  runs.forEach((run, index) => {
-    if (index % every && index !== runs.length - 1) return;
-    const label = svg("text", {x: x(index), y: height - 8, "text-anchor": "middle", class: "axis"});
-    label.textContent = `${run.run}回目`; root.append(label);
-  });
+                           "aria-label": `run --all の回ごとの、役割別の消費（${metric.label}）`});
+  drawAxes(root, runs, max, metric.axis, x, y, right);
 
   const cross = svg("line", {y1: top, y2: top + plotHeight, class: "cross", visibility: "hidden"});
   root.append(cross);
   for (const role of ROLES) {
-    const points = runs.map((run, index) => `${x(index)},${y(run.tokens[role.key])}`).join(" ");
+    const points = runs.map((run, index) => `${x(index)},${y(metric.value(run, role.key))}`).join(" ");
     root.append(svg("polyline", {points, class: "series", stroke: role.color}));
     runs.forEach((run, index) => root.append(
-      svg("circle", {cx: x(index), cy: y(run.tokens[role.key]), r: 4, fill: role.color, class: "dot"})));
+      svg("circle", {cx: x(index), cy: y(metric.value(run, role.key)), r: 4, fill: role.color, class: "dot"})));
   }
 
   // 右端の値に役の名前を添える。重なる分は上下に押し広げる。
   const last = runs.length - 1;
-  const labels = ROLES.map(role => ({role, at: y(runs[last].tokens[role.key])})).sort((a, b) => a.at - b.at);
+  const labels = ROLES.map(role => ({role, at: y(metric.value(runs[last], role.key))})).sort((a, b) => a.at - b.at);
   labels.forEach((item, index) => { if (index) item.at = Math.max(item.at, labels[index - 1].at + 15); });
   for (const item of labels) {
     const label = svg("text", {x: x(last) + 10, y: item.at + 4, class: "label"});
@@ -216,23 +282,92 @@ function renderTokens(runs) {
     const index = runs.length === 1 ? 0 : Math.max(0, Math.min(last, Math.round((at - left) / plotWidth * last)));
     const run = runs[index];
     cross.setAttribute("x1", x(index)); cross.setAttribute("x2", x(index)); cross.setAttribute("visibility", "visible");
-    tip.replaceChildren(text("strong", `${run.run}回目（${OUTCOME[run.outcome] || run.outcome}）`),
-                        text("p", `${run.source} / ${run.started}`, "why"));
-    for (const role of ROLES) {
-      const line = document.createElement("div"), swatch = document.createElement("i");
-      swatch.style.background = role.color;
-      line.append(swatch, text("span", role.label), text("b", exact.format(run.tokens[role.key])));
-      tip.append(line);
-    }
-    tip.hidden = false;
-    const offset = chart.getBoundingClientRect();
-    const px = x(index) * scale + box.left - offset.left;
-    tip.style.top = `${top * scale}px`;
-    tip.style.left = px > offset.width / 2 ? "" : `${px + 20}px`;
-    tip.style.right = px > offset.width / 2 ? `${offset.width - px + 20}px` : "";
+    tipHeading(tip, run);
+    for (const role of ROLES) tip.append(tipLine(role.color, role.label, metric.exact(metric.value(run, role.key))));
+    placeTip(chart, root, tip, x(index));
   };
   hit.onmouseleave = () => { tip.hidden = true; cross.setAttribute("visibility", "hidden"); };
   root.append(hit);
+  chart.style.position = "relative";
+  chart.append(root, tip);
+}
+
+// 選んだ役の、種類別のトークン数。内訳の無い回は null。
+function kindValues(run) {
+  if (!run.kinds) return null;
+  const roles = kindRole === "all" ? ROLES.map(role => role.key) : [kindRole];
+  return Object.fromEntries(KINDS.map(kind => [
+    kind.key, roles.reduce((sum, role) => sum + (run.kinds[role]?.[kind.key] || 0), 0)]));
+}
+
+function kindTotal(values) {
+  return values ? KINDS.reduce((sum, kind) => sum + values[kind.key], 0) : 0;
+}
+
+function renderKinds(runs) {
+  renderLegend("#kind-legend", KINDS);
+  const values = runs.map(kindValues);
+
+  const table = document.querySelector("#kind-table"); table.replaceChildren();
+  runs.map((run, index) => [run, values[index]]).reverse().forEach(([run, value]) => {
+    const row = document.createElement("tr");
+    row.append(text("td", run.run), text("td", run.source), text("td", run.started),
+               ...KINDS.map(kind => text("td", value ? exact.format(value[kind.key]) : "—")));
+    table.append(row);
+  });
+
+  const chart = document.querySelector("#kind-chart"); chart.replaceChildren();
+  if (!values.some(Boolean)) { chart.append(text("p", "種類別の記録がまだありません。", "why")); return; }
+
+  const {width, height, left, top, bottom} = CHART, right = 16, gap = 2;
+  const plotWidth = width - left - right, plotHeight = height - top - bottom;
+  const max = niceMax(Math.max(...values.map(kindTotal)));
+  const band = plotWidth / runs.length, barWidth = Math.min(36, band * 0.6);
+  const x = index => left + band * (index + 0.5);
+  const y = value => top + plotHeight - value / max * plotHeight;
+  const root = svg("svg", {viewBox: `0 0 ${width} ${height}`, role: "img",
+                           "aria-label": "run --all の回ごとの、トークンの種類別の消費"});
+  drawAxes(root, runs, max, value => compact.format(value), x, y, right);
+
+  const tip = document.createElement("div"); tip.className = "tip"; tip.hidden = true;
+  const bars = runs.map((run, index) => {
+    const group = svg("g", {class: "bar"});
+    let base = 0;
+    for (const kind of KINDS) {
+      const value = values[index]?.[kind.key] || 0;
+      if (!value) continue;
+      // 下の段との間に、面の色の隙間を2px空ける。
+      const segment = y(base) - y(base + value) - (base ? gap : 0);
+      if (segment > 0) {
+        group.append(svg("rect", {x: x(index) - barWidth / 2, y: y(base + value), width: barWidth,
+                                  height: segment, fill: kind.color}));
+      }
+      base += value;
+    }
+    root.append(group);
+    return group;
+  });
+
+  runs.forEach((run, index) => {
+    const hit = svg("rect", {x: left + band * index, y: top, width: band, height: plotHeight, fill: "transparent"});
+    hit.onmouseenter = () => {
+      bars.forEach((bar, other) => bar.classList.toggle("dim", other !== index));
+      tipHeading(tip, run);
+      const value = values[index];
+      if (!value) {
+        tip.append(text("p", "種類別の内訳がありません", "why"));
+      } else {
+        const total = kindTotal(value);
+        for (const kind of [...KINDS].reverse()) tip.append(tipLine(kind.color, kind.label, exact.format(value[kind.key])));
+        tip.append(tipLine("", "合計", exact.format(total)),
+                   tipLine("", "キャッシュ読み取りの割合",
+                           `${total ? Math.round(value.cache_read / total * 100) : 0}%`));
+      }
+      placeTip(chart, root, tip, x(index));
+    };
+    hit.onmouseleave = () => { tip.hidden = true; bars.forEach(bar => bar.classList.remove("dim")); };
+    root.append(hit);
+  });
   chart.style.position = "relative";
   chart.append(root, tip);
 }
@@ -317,4 +452,6 @@ async function start() {
 }
 
 document.querySelector("#refresh").onclick = refresh;
+toggle("#role-metric", value => { roleMetric = value; renderRoles(shownRuns); });
+toggle("#kind-role", value => { kindRole = value; renderKinds(shownRuns); });
 start().catch(error => { document.querySelector("#phase").textContent = error.message; });

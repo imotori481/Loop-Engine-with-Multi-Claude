@@ -68,25 +68,40 @@ ESCALATION_FILES = {
 ROLES = ("planner", "critic", "solver")
 
 
+# トークンの種類と、USAGE の usage の中での名前。
+KINDS = {"input": "input_tokens", "cache_write": "cache_creation_input_tokens",
+         "cache_read": "cache_read_input_tokens", "output": "output_tokens"}
+
+
+def usage_kinds(record: dict[str, Any]) -> dict[str, int]:
+    """USAGE 1件の、種類別のトークン数。"""
+    usage = record.get("usage")
+    if not isinstance(usage, dict):
+        usage = {}
+    kinds = {}
+    for kind, key in KINDS.items():
+        value = usage.get(key)
+        kinds[kind] = int(value) if isinstance(value, (int, float)) else 0
+    return kinds
+
+
 def usage_tokens(record: dict[str, Any]) -> int:
     """USAGE 1件のトークン数。数え方はランナーの画面の in と out に合わせる。
 
     入力は、キャッシュから読んだ分と書いた分を足す。
     """
-    usage = record.get("usage")
-    if not isinstance(usage, dict):
-        return 0
-    total = 0
-    for key in ("input_tokens", "cache_creation_input_tokens",
-                "cache_read_input_tokens", "output_tokens"):
-        value = usage.get(key)
-        if isinstance(value, (int, float)):
-            total += int(value)
-    return total
+    return sum(usage_kinds(record).values())
+
+
+def usage_usd(record: dict[str, Any]) -> float:
+    value = record.get("cost_usd")
+    return float(value) if isinstance(value, (int, float)) else 0.0
 
 
 def token_runs(ledger: list[dict[str, Any]], source: str = "") -> list[dict[str, Any]]:
     """1つの台帳を、loop go から完了までの回に分け、回ごと役ごとのトークン数を足す。
+
+    tokens は役ごとの合計、kinds は役ごとの種類別、usd は役ごとの cost_usd の和。
 
     1回は PLAN_BOOTSTRAP から始まり、次の PLAN_BOOTSTRAP の手前で終わる。
     計画づくりと批評は run --all より前に流れるので、RUN_ALL_START では区切らない。
@@ -105,10 +120,16 @@ def token_runs(ledger: list[dict[str, Any]], source: str = "") -> list[dict[str,
                 current["outcome"] = "abandoned"
             current = {"source": source, "started": record.get("ts", ""),
                        "outcome": "running", "calls": 0,
-                       "tokens": dict.fromkeys(ROLES, 0)}
+                       "tokens": dict.fromkeys(ROLES, 0),
+                       "kinds": {role: dict.fromkeys(KINDS, 0) for role in ROLES},
+                       "usd": dict.fromkeys(ROLES, 0.0)}
             runs.append(current)
         if event == "USAGE" and record.get("who") in ROLES:
-            current["tokens"][record["who"]] += usage_tokens(record)
+            who = record["who"]
+            for kind, value in usage_kinds(record).items():
+                current["kinds"][who][kind] += value
+            current["tokens"][who] += usage_tokens(record)
+            current["usd"][who] += usage_usd(record)
             current["calls"] += 1
         elif event == "ALL_GREEN":
             current["outcome"] = "green"

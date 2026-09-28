@@ -79,6 +79,21 @@ class TokenRuns(DashboardFixture):
             (1, "green", {"planner": 17, "critic": 7, "solver": 7}),
         ])
 
+    def test_each_role_keeps_its_tokens_by_kind_and_its_cost(self):
+        # 合計だけでは、ブリーフが大きいのか、ターンが多いのかが分からない。
+        self.ledger(
+            {"ts": "1", "event": "PLAN_BOOTSTRAP"},
+            {**usage("critic", input_tokens=4, cache_creation_input_tokens=100,
+                     cache_read_input_tokens=120, output_tokens=15), "cost_usd": 0.5},
+            {**usage("critic", cache_read_input_tokens=30, output_tokens=5), "cost_usd": 0.25},
+            usage("solver", input_tokens=1),
+        )
+        run = self.state.snapshot()["token_runs"][0]
+        self.assertEqual(run["kinds"]["critic"],
+                         {"input": 4, "cache_write": 100, "cache_read": 150, "output": 20})
+        self.assertEqual(run["tokens"]["critic"], 274)
+        self.assertEqual(run["usd"], {"planner": 0.0, "critic": 0.75, "solver": 0.0})
+
     def test_a_second_bootstrap_starts_the_next_loop(self):
         self.ledger(
             {"ts": "1", "event": "PLAN_BOOTSTRAP"}, usage("planner", output_tokens=1),
