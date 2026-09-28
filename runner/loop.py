@@ -1547,7 +1547,28 @@ after it.
 """
 
 
-def brief_test_write(step: dict, context: str, broken: str = "") -> str:
+def replaced_tests_section(replaced: list[str], expected: int) -> str:
+    """TEST_WRITE のブリーフの、差し替える既存のテストファイルについての節。"""
+    if not replaced:
+        return ""
+    return f"""
+# These test files already exist, and you replace them
+{chr(10).join(replaced)}
+
+Their tests check behaviour this step changes, so they are removed. Write each
+of these files from scratch with this step's tests only. Do not keep, adapt or
+copy the old tests. Together with the other files above, the step has exactly
+{expected} tests.
+
+You may read one of these files to see how it is set up (imports, namespace,
+fixtures), but its tests describe the old behaviour. If your editing tool
+refuses to overwrite a file you have not read, read its first line (offset 1,
+limit 1) and then write the whole file.
+"""
+
+
+def brief_test_write(step: dict, context: str, broken: str = "",
+                     replaced: list[str] | None = None) -> str:
     # goal は渡さない。テストは受け入れ条件から作るもので、これからソルバーに
     # 頼む実装の説明から作るものではない。
     acceptance = render_acceptance(step)
@@ -1566,7 +1587,7 @@ Write nothing outside those paths. The implementation does not exist yet, so
 every test you write must fail when run against a stub that returns a wrong
 value of the right type. Do not weaken a test to make it pass, and do not
 create the module under test.
-{naming_note()}{compile_failure_section(broken)}"""
+{replaced_tests_section(replaced or [], step["expected_tests"])}{naming_note()}{compile_failure_section(broken)}"""
 
 
 def compile_failure_section(broken: str) -> str:
@@ -2784,6 +2805,18 @@ def validate_plan(tasks: dict) -> list[str]:
                 problems.append(f"L4: {f} is written by both {owners[f]} and {s['id']}")
             owners[f] = s["id"]
 
+    # L17 -- テストのファイルを挙げるステップも1つ
+    #
+    # files_test に既存のテストファイルを挙げたステップは、それを丸ごと書き直す。
+    # 2つのステップが同じファイルを挙げると、後のステップが、前のステップが緑に
+    # なったときに凍結したテストを消す。
+    testers: dict[str, str] = {}
+    for s in steps:
+        for f in s["files_test"]:
+            if f in testers:
+                problems.append(f"L17: {f} is in files_test of both {testers[f]} and {s['id']}")
+            testers[f] = s["id"]
+
     # L9 / L10 -- 早いうちにつながったものがあり、最後につなぐ
     # L9 は、最初の3つのうちに integration か skeleton のステップを求めていた。
     # L13 は「最初の」ステップを skeleton にすることを求め、それは作りの上で L9 を
@@ -3098,6 +3131,40 @@ def check_proposal(old: dict, new: dict) -> list[str]:
     return problems
 
 
+def preplan_tests_section(tasks: str, done: list[str]) -> str:
+    """改訂のブリーフの、計画より前からあるテストについての節。無ければ空。
+
+    HEAD には緑になったステップのテストも入っている。それは L17 で差し替えられない
+    ので、見せない。止まった理由が「前からあるテストを壊した」なら、そのテストが
+    確かめる振る舞いを要件が変えているのかもしれず、差し替えがプランナーの手になる。
+    """
+    try:
+        plan = json.loads(tasks)
+    except ValueError:
+        return ""
+    steps = plan.get("steps", []) if isinstance(plan, dict) else []
+    green = {f for s in steps if isinstance(s, dict) and s.get("id") in done
+             for f in s.get("files_test", []) or []}
+    preplan = {f: names for f, names in existing_tests().items() if f not in green}
+    if not preplan:
+        return ""
+    listing = "\n".join(f"    {f}\n" + "\n".join(f"        {n}" for n in names[:TEST_NAMES_SHOWN])
+                        for f, names in preplan.items())
+    return f"""
+# Tests that were in the repository before this plan
+
+{listing}
+
+If the step stopped because it breaks one of these, and the requirements change
+the behaviour that test checks, list its file in that step's `files_test`. The
+step then replaces the whole file: every test now in it is removed, and the file
+holds only that step's tests, counted in the same `expected_tests`. A test in
+that file for behaviour that does not change is removed with it. If the broken
+test checks behaviour the requirements keep, the implementation is what is wrong;
+do not replace the file.
+"""
+
+
 def brief_plan_revise(step: dict | None, escalation: str, feedback: str = "") -> str:
     spec = SYSTEM_SPEC.read_text(encoding="utf-8") if SYSTEM_SPEC.exists() \
         else "(not written yet)"
@@ -3132,7 +3199,7 @@ stub cannot satisfy it, or escalate.
 
 You do not write code and you cannot reach the repository. You write files into
 the current directory and the runner decides whether to apply them.
-
+{preplan_tests_section(tasks, done)}
 # SYSTEM_SPEC.md
 {spec}
 
@@ -3300,6 +3367,7 @@ yourself first.
          rejected
     L15  every line of contracts.provides names the module it lives in, and that
          module is one of this step's own files_write
+    L17  no file appears in files_test of two different steps
 
 # Four things that are not obvious
 
@@ -3678,6 +3746,115 @@ def existing_declarations() -> dict[str, list[str]]:
         if lines:
             by_file[path] = lines
     return by_file
+
+
+# テストの名前の拾い方。プランナーはテストの本体を読めないので、どのファイルが
+# 何を確かめているかを名前で伝える。
+TEST_NAMES = {
+    "python": re.compile(r"^[ \t]*(?:async[ \t]+)?def[ \t]+(test\w*)[ \t]*\(", re.M),
+    "typescript": re.compile(
+        r"\b(?:it|test)(?:\.\w+)?(?:\([^()]*\))?\(\s*(['\"`])((?:\\.|(?!\1).)*)\1"),
+    "csharp": re.compile(
+        r"\[\s*(?:NUnit\.Framework\.)?(?:Test|TestCase|TestCaseSource|UnityTest)\b[^\]]*\]"
+        r"(?:\s*\[[^\]]*\])*\s*(?:(?:public|private|internal|protected|static|async)\s+)*"
+        r"[\w<>\[\],.]+\s+(\w+)\s*\("),
+}
+
+
+def test_names(text: str) -> list[str]:
+    """テストのファイルが持つテストの名前。出てきた順で、重複は1つにする。"""
+    names = []
+    for match in TEST_NAMES[LANGUAGE["name"]].finditer(text):
+        names.append(match.group(match.lastindex))
+    return list(dict.fromkeys(names))
+
+
+def existing_tests() -> dict[str, list[str]]:
+    """HEAD にあるテストのファイルと、それぞれのテストの名前。
+
+    テストを1つも見つけられないファイル（`__init__.py` や共通の道具）は入れない。
+    計画の途中で呼べば、緑になったステップのテストも入る。
+    """
+    try:
+        listing = run(["git", "ls-tree", "-r", "-z", "--name-only", "HEAD", "--",
+                       LAYOUT["tests"]])
+    except OSError:
+        return {}
+    if listing.returncode != 0:
+        return {}
+    by_file: dict[str, list[str]] = {}
+    for path in listing.stdout.split("\0"):
+        if not in_layout(path, "tests") or Path(path).suffix not in LANGUAGE["test_suffixes"]:
+            continue
+        shown = run(["git", "show", f"HEAD:{path}"])
+        if shown.returncode != 0:
+            continue
+        names = test_names(shown.stdout)
+        if names:
+            by_file[path] = names
+    return by_file
+
+
+# 1つのファイルについて見せるテストの名前の数。
+TEST_NAMES_SHOWN = 30
+
+
+def existing_tests_text(plan: dict | None) -> str:
+    """既存のテストと、それを差し替える決まり。無ければ空。
+
+    既存のテストは毎ステップ走り、落ちればステップは緑にならない。要件が
+    振る舞いを変えるなら、それを確かめる既存のテストは、どんな実装でも落ちる。
+    そのファイルは、振る舞いを変えるステップが files_test に挙げて丸ごと
+    書き直す。
+
+    計画を渡すと（クリティック）、計画が差し替えるファイルだけを見せる。
+    """
+    by_file = existing_tests()
+    if plan is not None:
+        listed = {f for s in plan.get("steps", []) if isinstance(s, dict)
+                  for f in s.get("files_test", []) or []}
+        by_file = {f: names for f, names in by_file.items() if f in listed}
+    if not by_file:
+        return ""
+
+    def names(found: list[str]) -> str:
+        shown = [f"        {n}" for n in found[:TEST_NAMES_SHOWN]]
+        if len(found) > TEST_NAMES_SHOWN:
+            shown.append(f"        ... and {len(found) - TEST_NAMES_SHOWN} more")
+        return "\n".join(shown)
+
+    listing = "\n".join(f"    {f}\n{names(found)}" for f, found in by_file.items())
+    if plan is not None:
+        return f"""
+# Test files this plan replaces
+
+These test files are in the repository already, with the tests named below. The
+step that lists one in `files_test` replaces the whole file: the tests now in it
+are removed, and the file holds only that step's tests.
+
+{listing}
+"""
+    return f"""
+# Tests already in the repository
+
+These test files are in the last commit, written before this plan. The runner
+runs every one of them on every step, and a step that makes one of them fail is
+not green. Only the test names are shown, not the bodies.
+
+{listing}
+
+When the requirements change behaviour that one of these tests checks, that test
+fails however well the step is implemented. The step that makes the change lists
+the test file in its `files_test`, and the step REPLACES the whole file:
+
+- every test now in the file is removed, and the file then holds only this
+  step's tests, counted in `expected_tests` together with its other test files
+- replace a file only when the requirements change what its tests check
+- a test in that file for behaviour that does not change is removed with it.
+  Its behaviour stays checked only if this step writes a criterion for it that
+  calls a name this step provides (R4)
+- only one step may list a given file (L17)
+"""
 
 
 def declarations_for_plan(by_file: dict[str, list[str]],
@@ -4862,6 +5039,8 @@ a file some step writes, are shown above. These files under {SRC}/ declare
 more, not shown line by line. They also exist before the first step runs:
 
 """) + "\n".join(f"    {path}" for path in others) + "\n"
+
+    existing_text += existing_tests_text(plan)
 
     # テストが何に届くかを決めるファイル。言語ごとに名前は違うが仕事は同じで、
     # どちらでもプランナーに見せる必要がある。import のパスに逆らう計画は負ける。
@@ -6166,7 +6345,12 @@ def run_step(step_id: str, unvalidated: bool = False) -> int:
         broken = ""
         for write_attempt in range(1, LIMITS["test_writes"] + 1):
             set_writable(tests=True, src=False)
-            call_solver("TEST_WRITE", brief_test_write(step, context, broken))
+            # files_test のうち HEAD にあるものは、計画より前からあるテストで、この
+            # ステップが丸ごと書き直す。L17 があるので、ほかのステップのテストではない。
+            replaced = sorted(head_sources(step["files_test"]))
+            if replaced and write_attempt == 1:
+                ledger("TESTS_REPLACED", step=step_id, files=replaced)
+            call_solver("TEST_WRITE", brief_test_write(step, context, broken, replaced))
             assert_touched("TEST_WRITE", step["files_test"])
             assert_written("TEST_WRITE", step["files_test"])
             ledger("TEST_WRITE", step=step_id, ok=True, attempt=write_attempt)

@@ -41,7 +41,7 @@ flowchart LR
 |---|---|---|
 | bootstrap | `brief_plan_bootstrap` | 要件、`environment_facts()`、`BOOTSTRAP_RULES`、`BOOTSTRAP_ESCALATE` |
 | refine | `brief_plan_refine` | 要件、tasks.json の全文、critic の指摘の全文 |
-| 詰まった後の改訂 | `brief_plan_revise` | SYSTEM_SPEC.md、CONTEXT.md、tasks.json の全文、止まった理由、緑のステップ |
+| 詰まった後の改訂 | `brief_plan_revise` | 計画より前からあるテストの名前（`preplan_tests_section`）、SYSTEM_SPEC.md、CONTEXT.md、tasks.json の全文、止まった理由、緑のステップ |
 
 出力は `tasks.json`、`CONTEXT.md`、`SYSTEM_SPEC.md` の3つか、`ESCALATE.md` の1つ。ほかの名前のファイルは、ランナーが読まずに消す。
 
@@ -71,6 +71,7 @@ planner の bootstrap と critic の両方に入る。中身は次のとおり�
 - 根の直下と、柵の2つのディレクトリの中のファイル一覧
 - 根にある環境のファイルの名前
 - 既存のコードの公開宣言の署名（`existing_contracts`）。本体は渡さない
+- 既存のテストのファイルとテストの名前（`existing_tests_text`）。planner には全部と差し替えの決まり、critic には計画が差し替えるファイルだけ
 - テストが何に届くかを決めるファイル。C# はランナーが書く Tests.csproj の全文
 - TypeScript なら `index.html` の全文
 
@@ -80,7 +81,7 @@ planner の bootstrap と critic の両方に入る。中身は次のとおり�
 
 `run_step` が、1ステップにつき次の順で呼ぶ。
 
-1. TEST_WRITE（`brief_test_write`）: 共通の部分、受け入れ条件、書いてよいファイル。goal は渡さない。テストがコンパイルできなければ、コンパイラの出力を足して最大 `LIMITS["test_writes"]` 回まで呼び直す
+1. TEST_WRITE（`brief_test_write`）: 共通の部分、受け入れ条件、書いてよいファイル、差し替える既存のテストファイル。goal は渡さない。テストがコンパイルできなければ、コンパイラの出力を足して最大 `LIMITS["test_writes"]` 回まで呼び直す
 2. STUB: ランナーが契約からスタブを書く。書けないときだけ `brief_stub` で solver に頼む。渡すのは署名と書いてよいファイルだけ
 3. IMPL（`brief_impl`）: 共通の部分、goal、凍結したテストの全文、書いてよいファイルの今の中身、直前の失敗、書いてよいファイル。緑になるか試行を使い切るまで、ステップの試行の数だけ呼ぶ
 
@@ -160,3 +161,4 @@ C# で10ステップを全部緑にした回の、台帳とブリーフの実測
 - 2026/09/28: 役どうしの受け渡しと、2026/09/27 の回の計測を追加
 - 2026/09/28: IMPL のブリーフに載せるファイルの今の中身を追加
 - 2026/09/28: critic と solver のブリーフの共通の先頭を追加
+- 2026/09/28: 既存のテストの名前と差し替えを追加

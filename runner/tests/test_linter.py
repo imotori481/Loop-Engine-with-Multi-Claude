@@ -278,5 +278,21 @@ class RulesThatAreGone(unittest.TestCase):
         self.assertNotIn('problems.append("L9', source)
 
 
+class OneStepPerTestFile(unittest.TestCase):
+    """L17。files_test に既存のファイルを挙げたステップは、それを丸ごと書き直す。
+    2つのステップが同じファイルを挙げると、後のステップが前のステップの凍結した
+    テストを消す。
+    """
+
+    def test_two_steps_listing_one_test_file_are_rejected(self) -> None:
+        tasks = plan(["def new_game() -> GameState"],
+                     ["def save(state: GameState) -> dict[str, float]"])
+        tasks["steps"][1]["files_test"] = ["tests/test_s1.py"]
+        problems = validate_plan(tasks)
+        self.assertEqual(len(problems), 1)
+        self.assertIn("L17", problems[0])
+        self.assertIn("tests/test_s1.py", problems[0])
+
+
 if __name__ == "__main__":
     unittest.main()

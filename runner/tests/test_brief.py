@@ -415,6 +415,18 @@ class TheSolverBriefsShareTheirOpening(unittest.TestCase):
         for part in ("CONTEXT", "DEPS", "f is pure", "def f(x: int) -> int"):
             self.assertIn(part, shared)
 
+    def test_a_replaced_test_file_is_rewritten_from_scratch(self):
+        with tempfile.TemporaryDirectory() as temp, \
+             patch.object(loop, "PROJECT", Path(temp)), \
+             patch("loop.dep_contracts", return_value="DEPS"):
+            plain = loop.brief_test_write(self.STEP, "CONTEXT")
+            replacing = loop.brief_test_write(self.STEP, "CONTEXT",
+                                              replaced=["tests/test_a.py"])
+        self.assertNotIn("you replace them", plain)
+        self.assertIn("you replace them\ntests/test_a.py", replacing)
+        self.assertIn("Do not keep, adapt or\ncopy the old tests", replacing)
+        self.assertIn("(offset 1,\nlimit 1)", replacing)
+
     def test_the_goal_stays_out_of_the_tests_brief(self):
         # テストは受け入れ条件から作る。goal を共通の部分に入れると、TEST_WRITE
         # にも届く。
@@ -422,6 +434,77 @@ class TheSolverBriefsShareTheirOpening(unittest.TestCase):
         self.assertNotIn("GOAL-TEXT", shared)
         self.assertNotIn("GOAL-TEXT", test_write)
         self.assertIn("GOAL-TEXT", impl)
+
+
+class TestsAlreadyInTheRepository(unittest.TestCase):
+    """要件が振る舞いを変えると、それを確かめる既存のテストはどんな実装でも落ちる。
+    そのファイルは、振る舞いを変えるステップが files_test に挙げて差し替える。
+    """
+
+    FILES = {
+        "tests/test_board.py": "import pytest\n\ndef test_score_counts_rows():\n"
+                               "    pass\n\nasync def test_async_load():\n    pass\n",
+        "tests/__init__.py": "",
+    }
+
+    def run_git(self, argv, **_):
+        if argv[:2] == ["git", "ls-tree"]:
+            return SimpleNamespace(returncode=0, stdout="\0".join(self.FILES), stderr="")
+        if argv[:2] == ["git", "show"]:
+            path = argv[2].split(":", 1)[1]
+            return SimpleNamespace(returncode=0, stdout=self.FILES[path], stderr="")
+        raise AssertionError(argv)
+
+    def text(self, plan):
+        with patch("loop.run", side_effect=self.run_git), \
+             patch.dict(loop.LANGUAGE, loop.LANGUAGES["python"], clear=True):
+            return loop.existing_tests_text(plan)
+
+    def test_the_planner_sees_each_file_with_its_test_names(self):
+        text = self.text(None)
+        self.assertIn("    tests/test_board.py\n        test_score_counts_rows\n"
+                      "        test_async_load", text)
+        self.assertNotIn("__init__", text)
+        self.assertIn("REPLACES the whole file", text)
+        self.assertIn("(L17)", text)
+
+    def test_the_critic_sees_only_the_files_the_plan_replaces(self):
+        keeps = {"steps": [{"files_test": ["tests/test_new.py"]}]}
+        replaces = {"steps": [{"files_test": ["tests/test_board.py"]}]}
+        self.assertEqual(self.text(keeps), "")
+        self.assertIn("Test files this plan replaces", self.text(replaces))
+
+    def test_the_revision_is_not_offered_the_tests_of_a_green_step(self):
+        tasks = ('{"steps": [{"id": "S1", "files_test": ["tests/test_board.py"]}]}')
+        with patch("loop.run", side_effect=self.run_git), \
+             patch.dict(loop.LANGUAGE, loop.LANGUAGES["python"], clear=True):
+            self.assertEqual(loop.preplan_tests_section(tasks, ["S1"]), "")
+            offered = loop.preplan_tests_section(tasks, [])
+        self.assertIn("tests/test_board.py", offered)
+        self.assertIn("do not replace the file", offered)
+
+
+class TestNamesByLanguage(unittest.TestCase):
+    def names(self, language, text):
+        with patch.dict(loop.LANGUAGE, loop.LANGUAGES[language], clear=True):
+            return loop.test_names(text)
+
+    def test_typescript_names_come_from_it_and_test(self):
+        self.assertEqual(self.names("typescript", (
+            "describe('board', () => {\n"
+            "  it('counts rows', () => {});\n"
+            "  test.each([1])(\"doubles %i\", () => {});\n"
+            "  it(`keeps the player's score`, () => {});\n"
+            "});\n")), ["counts rows", "doubles %i", "keeps the player's score"])
+
+    def test_csharp_names_come_from_test_attributes_once_each(self):
+        self.assertEqual(self.names("csharp", (
+            "public class BoardTests {\n"
+            "    [Test]\n    public void CountsRows() {}\n"
+            "    [TestCase(1)]\n    [TestCase(2)]\n    public void Doubles(int n) {}\n"
+            "    [UnityTest]\n    public IEnumerator Loads() { yield break; }\n"
+            "    public void Helper() {}\n"
+            "}\n")), ["CountsRows", "Doubles", "Loads"])
 
 
 if __name__ == "__main__":
