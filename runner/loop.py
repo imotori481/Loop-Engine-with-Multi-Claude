@@ -2257,6 +2257,48 @@ must fail on an assertion, not on an exception.
 """
 
 
+# IMPL のブリーフに載せるファイルの中身の上限（字数の合計）。取り込んだ Unity の
+# プロジェクトの回で、既存のファイルを書き換える IMPL は10〜23ターン回り、ソルバーの
+# 消費の63%を占めた。ファイルを Read するたびに、それまでの文脈を送り直す。
+# 載せきれないファイルは、名前だけを挙げてソルバーに読ませる。
+IMPL_FILE_CHARS = 60_000
+
+
+def current_files_section(step: dict) -> str:
+    """files_write のうち、作業ツリーにあるファイルの今の中身。無ければ空。
+
+    試行のたびに読み直す。修理の試行では、前の試行が書いたものが今の中身だ。
+
+    Claude Code の Edit と Write は、同じ呼び出しの中で Read していないファイルを
+    拒む。1行だけの Read でも通るので、全文を読み直させずに1行だけ読ませる。
+    """
+    shown, skipped, total = [], [], 0
+    for rel in step["files_write"]:
+        path = PROJECT / rel
+        if not path.is_file():
+            continue
+        text = path.read_text(encoding="utf-8")
+        if total + len(text) > IMPL_FILE_CHARS:
+            skipped.append(rel)
+            continue
+        total += len(text)
+        shown.append(f"--- {rel} ---\n{text}")
+    if not shown and not skipped:
+        return ""
+    parts = ["\n# The files you may modify, as they are now\n"]
+    if shown:
+        parts.append("\n\n".join(shown))
+        parts.append("""
+These are the current contents; you do not need to read them again. If your
+editing tool refuses a file you have not read, read only its first line
+(offset 1, limit 1) and then edit it.
+""")
+    if skipped:
+        parts.append("Too large to show here; read these yourself:\n"
+                     + chr(10).join(skipped) + "\n")
+    return "\n".join(parts)
+
+
 def brief_impl(step: dict, context: str, tests_text: str, last_failure: str) -> str:
     return f"""Make the tests pass.
 
@@ -2277,7 +2319,7 @@ def brief_impl(step: dict, context: str, tests_text: str, last_failure: str) -> 
 
 # The tests (frozen -- read-only, and they will not be accepted if modified)
 {tests_text}
-
+{current_files_section(step)}
 # How the tests are failing right now
 {last_failure or "(nothing recorded)"}
 

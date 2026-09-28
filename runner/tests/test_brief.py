@@ -333,5 +333,61 @@ class WhatTheCodeAlreadyDeclares(unittest.TestCase):
         self.assertNotIn("What the code already declares", self.facts([]))
 
 
+class TheSolverIsShownTheFilesItWillEdit(unittest.TestCase):
+    """既存のファイルを書き換える IMPL は、ファイルを Read するたびにそれまでの
+    文脈を送り直す。取り込んだ Unity のプロジェクトの回で、ソルバーの消費の63%が
+    そのターンだった。今の中身をブリーフに載せる。
+    """
+
+    STEP = {"id": "S1", "goal": "g", "files_write": ["src/a.py", "src/b.py", "src/new.py"],
+            "contracts": {"provides": [], "requires": [], "invariants": []}}
+
+    def section(self, files: dict[str, str], cap: int = 60_000) -> str:
+        with tempfile.TemporaryDirectory() as temp:
+            project = Path(temp)
+            for rel, text in files.items():
+                (project / rel).parent.mkdir(parents=True, exist_ok=True)
+                (project / rel).write_text(text, encoding="utf-8")
+            with patch.object(loop, "PROJECT", project), \
+                 patch.object(loop, "IMPL_FILE_CHARS", cap):
+                return loop.current_files_section(self.STEP)
+
+    def test_existing_files_are_shown_and_new_ones_are_not(self):
+        section = self.section({"src/a.py": "def a(): pass\n",
+                                "src/b.py": "def b(): pass\n"})
+        self.assertIn("--- src/a.py ---\ndef a(): pass", section)
+        self.assertIn("--- src/b.py ---\ndef b(): pass", section)
+        self.assertNotIn("src/new.py", section)
+
+    def test_the_solver_reads_one_line_instead_of_the_whole_file(self):
+        # Claude Code の Edit は、同じ呼び出しで Read していないファイルを拒む。
+        # 1行だけの Read でも通る。
+        section = self.section({"src/a.py": "x = 1\n"})
+        self.assertIn("you do not need to read them again", section)
+        self.assertIn("(offset 1, limit 1)", section)
+
+    def test_files_over_the_cap_are_named_but_not_shown(self):
+        section = self.section({"src/a.py": "a" * 30, "src/b.py": "b" * 30}, cap=40)
+        self.assertIn("a" * 30, section)
+        self.assertNotIn("b" * 30, section)
+        self.assertIn("read these yourself:\nsrc/b.py", section)
+
+    def test_a_step_that_only_creates_files_gets_no_section(self):
+        self.assertEqual(self.section({}), "")
+
+    def test_the_files_come_after_the_tests_and_before_the_failure(self):
+        # 失敗の文と今の中身は試行ごとに変わる。変わらない部分を先に置けば、
+        # 次の試行はそこをプロンプトキャッシュから読む。
+        with tempfile.TemporaryDirectory() as temp:
+            project = Path(temp)
+            (project / "src").mkdir()
+            (project / "src/a.py").write_text("CURRENT\n", encoding="utf-8")
+            with patch.object(loop, "PROJECT", project), \
+                 patch("loop.dep_contracts", return_value=""):
+                brief = loop.brief_impl(self.STEP, "CONTEXT", "TESTS", "FAILURE")
+        self.assertLess(brief.index("TESTS"), brief.index("CURRENT"))
+        self.assertLess(brief.index("CURRENT"), brief.index("FAILURE"))
+
+
 if __name__ == "__main__":
     unittest.main()
