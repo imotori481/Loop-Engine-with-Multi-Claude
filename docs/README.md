@@ -12,4 +12,6 @@ Loop Engine の設計・運用ドキュメントをまとめています。
 
 普段の操作で使うコマンドは [COMMANDS.md](COMMANDS.md) にまとめてあります。
 
+役どうしの受け渡しとトークン消費の読み方は [AGENT_IO.md](AGENT_IO.md) にまとめてあります。
+
 環境別の手順は、それぞれ [provision/README.md](../provision/README.md) と [host/README.md](../host/README.md) を参照してください。
