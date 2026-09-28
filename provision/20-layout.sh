@@ -8,12 +8,16 @@
 #
 #   /srv/loop/repo.git   bare リポジトリ。ランナーが GREEN と plan apply の
 #                        あとに push し、ホストが `runner` として SSH で引く。
-#   /srv/loop/project    ループが実際に回る作業ツリー
+#                        loop-project.sh で管理する箱では、今のプロジェクトの
+#                        /srv/loop/projects/<名前>/repo.git を指すリンク。
+#   /srv/loop/project    ループが実際に回る作業ツリー。bare の HEAD が指す
+#                        ブランチをチェックアウトする
 #   /srv/loop/brief      runner がステップごとのブリーフを書き、solver が読む。
 #                        runner から solver への唯一の経路で、これが
 #                        RUNNER_SPEC 5 を守っている。solver は plan/ を読まず、
 #                        したがって tasks.json を見ることがない。
 set -euo pipefail
+. "$(dirname "$0")/layout.sh"
 
 # /srv/loop そのものは root 所有。runner の所有にすると、runner は直下の
 # エントリを改名できる。中身が root 所有でも関係なく、bin/ を退けて自分の
@@ -25,7 +29,11 @@ install -d -o root -g root -m 755 /srv/loop
 # ならない。そうでないと、solver は自分の唯一の経路を読めない。
 install -d -o runner -g solverw -m 2750 /srv/loop/brief
 # 走行ログの置き場。runner は /srv/loop の直下に書けないので、ここに書く。
-install -d -o runner -g runner -m 755 /srv/loop/logs
+# 走行ログには失敗したテストの中身が載り、now.json にはステップの goal が載る。
+# 読めるのは runner と、humanw にいる保守ユーザーだけにする。setgid で、runner が
+# 作ったファイルもグループ humanw を継ぐ。
+install -d -o runner -g humanw -m 2750 /srv/loop/logs
+chmod -R o-rwx /srv/loop/logs
 
 # repo.git と project は runner が中身を作る。直下に作る権限は runner に無いので、
 # 空のディレクトリを root が runner 所有で先に用意する。git init --bare も
@@ -44,15 +52,26 @@ sudo -u runner git config --global user.email "runner@$(hostname)"
 sudo -u runner git config --global init.defaultBranch main
 # 作業ツリーは runner の所有だが、グループで書けるディレクトリを含む。
 # git がそれを所有者の疑わしいリポジトリとして扱わないようにする。
-sudo -u runner git config --global --add safe.directory /srv/loop/project
+#
+# /srv/loop/repo.git も登録する。loop-project.sh で管理する箱では、これは root 所有の
+# シンボリックリンクだ。git はリンクの先ではなくリンクそのものの持ち主を見るので、
+# 登録が無いと clone も push も、ホストからの fetch も "dubious ownership" で拒まれる。
+#
+# 既にある行は足さない。--add は流すたびに同じ行を積む。
+for d in /srv/loop/project /srv/loop/repo.git; do
+  sudo -u runner git config --global --get-all safe.directory 2>/dev/null | grep -qxF "$d" \
+    || sudo -u runner git config --global --add safe.directory "$d"
+done
 
 if [ ! -d /srv/loop/project/.git ]; then
   sudo -u runner git clone /srv/loop/repo.git /srv/loop/project
 fi
 
+# 柵の2つのディレクトリ。場所はプロジェクトごとに決まる（layout.sh）。途中の
+# ディレクトリも runner が作る。
 sudo -u runner install -d -m 755 \
-  /srv/loop/project/src \
-  /srv/loop/project/tests
+  "/srv/loop/project/$LAYOUT_SRC" \
+  "/srv/loop/project/$LAYOUT_TESTS"
 
 # 開いた状態で作って 40-perms.sh が後から締めるのではなく、できた瞬間から
 # 非公開にする。柵を閉じるのを別のスクリプトに任せると、開いたまま残る。
@@ -78,26 +97,51 @@ sudo -u runner install -d -m 700 \
 #
 # 無いときだけでなく毎回書く。空のファイルだと、2つ目の仕事が黙って
 # 抜け落ちるからだ。
-sudo -u runner tee /srv/loop/project/conftest.py >/dev/null <<'PYEOF'
+#
+# 取り込んだリポジトリが自分の conftest.py を持っていれば、上書きせずに止まる。
+# 上書きすると、そのリポジトリのテストの前提を黙って壊す。runner 以外がコミット
+# したことのあるファイルは、そのリポジトリの持ち物だ。中身では比べない。比べると、
+# ここの雛形を直しただけで止まる。
+cd /srv/loop/project
+if sudo -u runner git log --format=%an -- conftest.py 2>/dev/null | grep -qvx 'loop runner'; then
+  echo "20-layout: リポジトリが自分の conftest.py を持っている。上書きしない" >&2
+  exit 1
+fi
+sudo -u runner tee conftest.py >/dev/null <<PYEOF
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent / "src"))
+sys.path.insert(0, str(Path(__file__).parent / "$LAYOUT_SRC"))
 PYEOF
 
-# ホストがクローンできるよう、最初のコミットを置く。
-cd /srv/loop/project
+# 作業ツリーに置くが、コミットしないもの。無いと `git status` がこれらを紛れ込んだ
+# ファイルとして報告し、最初の走行が dirty で止まる。
+IGNORED=(.venv/ .runner/ __pycache__/ '*.pyc')
+
 if ! sudo -u runner git rev-parse HEAD >/dev/null 2>&1; then
-  sudo -u runner touch src/.gitkeep tests/.gitkeep plan/.gitkeep
-  sudo -u runner tee .gitignore >/dev/null <<'EOF'
-.venv/
-.runner/
-__pycache__/
-*.pyc
-EOF
+  # 空のリポジトリ。ホストがクローンできるよう、最初のコミットを置く。
+  sudo -u runner touch "$LAYOUT_SRC/.gitkeep" "$LAYOUT_TESTS/.gitkeep" plan/.gitkeep
+  printf '%s\n' "${IGNORED[@]}" | sudo -u runner tee .gitignore >/dev/null
   sudo -u runner git add -A
   sudo -u runner git commit -q -m "chore: initial skeleton"
-  sudo -u runner git push -q origin main
+  sudo -u runner git push -q origin HEAD
+else
+  # 取り込んだブランチ。既存の .gitignore には足りない行だけを足す。コミットは
+  # 環境が置いた2つに絞り、ほかの変更は巻き込まない。変更が無ければ何もしない。
+  # 末尾に改行の無い .gitignore では、足した行が最後の行につながってしまう。
+  if [ -s .gitignore ] && [ -n "$(tail -c1 .gitignore)" ]; then
+    echo | sudo -u runner tee -a .gitignore >/dev/null
+  fi
+  for line in "${IGNORED[@]}"; do
+    grep -qxF "$line" .gitignore 2>/dev/null \
+      || printf '%s\n' "$line" | sudo -u runner tee -a .gitignore >/dev/null
+  done
+  sudo -u runner git add -- .gitignore conftest.py
+  if ! sudo -u runner git diff --cached --quiet -- .gitignore conftest.py; then
+    sudo -u runner git commit -q -m "chore: environment files from 20-layout.sh" \
+      -- .gitignore conftest.py
+    sudo -u runner git push -q origin HEAD
+  fi
 fi
 
 # ---- 検査。runner の視点で確かめる ------------------------------------

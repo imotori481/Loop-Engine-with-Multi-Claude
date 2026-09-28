@@ -10,6 +10,9 @@
       "cwd": "C:\\dev\\roop-engin\\project\\src"
     }
   },
+  "live": {
+    "ssh_host": "loop-dev"
+  },
   "remote": {
     "host": "<machine>.<tailnet>.ts.net:8443",
     "users": [

@@ -33,10 +33,10 @@ fi
 if [ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
   if [ -n "${ANTHROPIC_API_KEY_CONSOLE:-}" ]; then
     export ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY_CONSOLE"
-    echo "planner-run: no subscription token; falling back to Console credit" >&2
+    echo "planner-run: サブスクリプションのトークンが無いので、Console のクレジットを使う" >&2
   else
-    echo "planner-run: no credentials in /etc/loop/planner.env" >&2
-    echo "    subscription (preferred): sudo -u planner -H claude setup-token" >&2
+    echo "planner-run: /etc/loop/planner.env に資格情報が無い" >&2
+    echo "    サブスクリプション（推奨）: sudo -u planner -H claude setup-token で発行して書く" >&2
     exit 3
   fi
 fi

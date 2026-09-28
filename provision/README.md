@@ -231,7 +231,7 @@ Get-Content "$env:USERPROFILE\.ssh\loop-runner.pub" |
 
 **箱の中での名前は `loop-runner_ed25519.pub` で固定。** `15-authkeys.sh` がこの名前を
 決め打ちで読む。Windows 側の鍵の名前とは関係ない。無ければ
-`FATAL: /tmp/loop-provision/loop-runner_ed25519.pub not found` で止まる。
+`FATAL: /tmp/loop-provision/loop-runner_ed25519.pub が無く、runner にもまだ鍵が無い` で止まる。
 
 `/tmp` は VM の再起動で消える。最初のプロビジョニングの直前に流し込む。2回目以降は、
 流し込んだ鍵が無くても、runner にすでに入っている鍵をそのまま使う。鍵を替えるときだけ
@@ -247,7 +247,7 @@ cd /tmp && sudo ADMIN_USER=<保守ユーザー> bash /opt/loop-engine/provision/
 pull したあとも同じ行を流す。
 
 `05-isolation.sh` が WSL 隔離（Windows パス非マウント、WSLg、systemd、NAT）を、
-`35-node.sh` が Node 側の凍結を、`40-perms.sh` が solver 視点の権限モデルを、
+`35-node.sh` が Node 側の凍結を、`36-dotnet.sh` が .NET 側の凍結を、`40-perms.sh` が solver 視点の権限モデルを、
 `45-agent-invoke.sh` が資格情報の柵を assert する。1つでも落ちたら異常終了する。
 `05-` を最初に走らせるのは、隔離が効いていないディストロには
 **プロビジョニングする意味が無い**（以降の全ステップが成功しつつ何も意味しなくなる）ため。
@@ -276,6 +276,40 @@ Vite はインラインのモジュールスクリプトを `/index.html?html-pr
 変換後の HTML には `/src/main.ts` が現れない。だから見るのは HTML ではなく、切り出された
 モジュールの中身だ。キャッシュは作業場所に書き、凍結したツールチェーンには書かない。
 
+`36-dotnet.sh` は C# の計画のための .NET を用意する。
+
+| もの | 場所 | 持ち主 |
+|---|---|---|
+| .NET 8 SDK | Ubuntu の archive の `dotnet-sdk-8.0` | apt |
+| NUnit 3、NUnit3TestAdapter、Microsoft.NET.Test.Sdk、JunitXml.TestLogger と推移的な依存 | `/srv/loop/dotnet/feed`（`.nupkg` を並べたフォルダ） | root。誰も書けない |
+| ソースをフィードだけにする設定 | `/srv/loop/dotnet/nuget.config`（`<clear/>` のあとにフィードだけ） | root |
+| ランナーが書く csproj とビルドの出力 | `/srv/loop/dotnet/build` | runner、700 |
+
+- 版はスクリプトの冒頭で固定する。フィードに出るのは版を変えたときだけなので、egress を閉じた後に流し直してもネットワークは要らない
+- NUnit は 3 系にする。Unity の Test Framework の NUnit は 3 系で、4 系は `Assert.AreEqual` を `ClassicAssert` に移した
+- csproj はプロジェクトの根に置かない。取り込んだ Unity のプロジェクトでは、IDE が Unity の生成した csproj と一緒に拾ってしまう
+- `build` はコンパイルしたコードとテストを持つので、planner と critic から見えてはならない（BOOTSTRAP 1-1）
+
+最後に `smoke-dotnet` を流す。フィードだけで restore し、netstandard2.1 のコードを net8.0 の
+NUnit のテストで走らせ、junit のレポートから2件走って1件落ちたことを読む。落ちたテストの
+`type` と `message` も出す。ランナーは例外の型をそこから読むので、ロガーの版を変えたら形を見る。
+
+```bash
+sudo -u runner -H /srv/loop/bin/smoke-dotnet
+```
+
+Unity の参照アセンブリを置いたプロジェクト（ホストの `loop-unity-refs`）では、`probe-unity` で
+箱に何ができるかを測る。関門ではなく測定なので、結果が悪くても落ちない。
+
+```bash
+sudo -u runner -H /srv/loop/bin/probe-unity
+```
+
+1. 柵の中のコードが、送った参照と定義シンボルでそのままコンパイルできるか。できなければエラーの種類と件数
+2. エンジン本体の無い .NET 8 の上で、`Vector3` や `Mathf` の計算、`Debug.Log` のようなネイティブ呼び出し、`GameObject` と MonoBehaviour と ScriptableObject の生成が動くか
+
+全文は `/srv/loop/logs/probe-unity-<日時>.log` に残る。
+
 ### 2-9. 資格情報を入れる（箱）
 
 3役はそれぞれ別のファイルから資格情報を読む。各ファイルは、その役の uid だけが読める
@@ -303,7 +337,7 @@ sudo nano /etc/loop/solver.env
 | `LOOP_EFFORT=` | `low` / `medium` / `high` / `xhigh` / `max`。空なら既定 |
 
 planner と critic も同じ手順で埋める。3役とも同じサブスクリプションの利用枠を使う。
-トークンが空の役があると、プロビジョニングの最後に `still unauthenticated` として名前が出る。
+トークンが空の役があると、プロビジョニングの最後に `資格情報がまだ無い役` として名前が出る。
 
 配管を確かめる:
 
@@ -318,34 +352,128 @@ sudo -u runner /srv/loop/bin/smoke-critic
 
 ### 2-10. 走らせる（箱）
 
-要件を人間の受け渡し口に置き、計画を起こして回す。
+保守ユーザーが `loop` コマンドで操作する。`25-runner.sh` が `/usr/local/bin/loop` に置く。
+ホストからは `host\loop.cmd` で同じコマンドを呼べる（`host/README.md`）。
 
 ```bash
-sudo install -o root -g humanw -m 644 <要件>.md /srv/loop/human/in/REQUIREMENTS.md
-L="sudo -u runner python3 -u /srv/loop/runner/loop.py"
-$L plan bootstrap                  # TypeScript なら --language typescript
-$L plan refine                     # critic の指摘をプランナーへ戻す
-$L plan apply
-$L run --all 2>&1 | sudo -u runner tee -a /srv/loop/logs/<名前>.log
+loop go <要件>.md                     # TypeScript なら --language typescript
+loop status                          # 走っているか、人への問い、台帳の末尾
+loop now                             # いまの作業を JSON で出す（ダッシュボードが読む）
+loop log                             # 走行ログを追う。Ctrl-C で抜けても走行は続く
+loop continue                        # 止まったところから続ける
+loop stop                            # 走行を止める
 ```
 
-**走行ログは `/srv/loop/logs/` に書く。** `/srv/loop` の直下には runner も保守ユーザーも
-書けない。`tee` も `sudo -u runner` で起こす ── パイプの先は保守ユーザーとして動くので、
-そのままでは `Permission denied` になる。
+`loop go` は要件を `/srv/loop/human/in/REQUIREMENTS.md` に置き、次を順に裏で流す。
 
-### 2-11. run を退避する（箱）
+1. `plan bootstrap`
+2. `plan refine`（critic の指摘をプランナーへ戻す）
+3. `plan apply`
+4. `run --all`
 
-次の題材に移る前に、今の run を別名に移す。`/srv/loop` は root 所有なので、
-改名は保守ユーザーが `sudo` で行う。runner にはできない。
+次の場合は、適用や実行に進まずに止まる。何を読めばよいかはログの最後の行と `loop status` に出る。
+
+| 止まる場面 | 次の手 |
+|---|---|
+| プランナーが計画を書かずにエスカレーションした | 書かれた問いを読み、要件を直して `loop go` |
+| `plan refine` のあとも critic の指摘が残った | 指摘を読む。そのまま適用するなら `loop continue` |
+| `plan apply` が提案を拒んだ | 違反を読み、要件を直して `loop go` |
+| `run --all` が止まった | `loop status` のエスカレーションを読む |
+| 利用枠が尽きた | 枠が戻ってから `loop continue`。途中のステップがあれば先に `loop raw reset <ステップ>` |
+
+`loop continue` は、適用待ちの提案があれば `plan apply` を流してから `run --all` を流す。
+提案が無ければ `run --all` だけを流す。
+
+走行は systemd の一時ユニット `loop-run` として runner で動く。SSH が切れても止まらず、
+二重には起動できない。`loop stop` は3役の呼び出しも含めてまとめて止める。
+
+走行ログは `/srv/loop/logs/<プロジェクト>-<日時>.log` に書く。
+`/srv/loop/logs/<プロジェクト>-latest.log` が最新のログを指す。
+`/srv/loop/logs` は `runner:humanw 2750` で、読めるのは runner と保守ユーザーだけ。
+走行ログには失敗したテストの中身が載るので、3役には読ませない。
+
+`loop.py` の動詞を直接使うときは `loop raw` を使う。runner として前面で動く。
 
 ```bash
-sudo mv /srv/loop/project  /srv/loop/project.<名前>
-sudo mv /srv/loop/repo.git /srv/loop/repo.<名前>.git
-cd /tmp && sudo ADMIN_USER=<保守ユーザー> bash /opt/loop-engine/provision/provision.sh
+loop raw validate
+loop raw plan show
+loop raw reset <ステップ>
 ```
 
-プロビジョニングが空の `project` と `repo.git` を作り直す。ホストの `loop-pull.cmd` は
-`repo.<名前>.git` も含めて全部引く（`host/README.md`）。
+### 2-11. プロジェクトを切り替える（箱）
+
+箱には複数のプロジェクトを置ける。走るのは一度に1つだけで、`loop-project.sh` で切り替える。
+`/srv/loop` は root 所有なので、保守ユーザーが `sudo` で流す。runner にはできない。
+
+```bash
+loop project list                              # プロジェクトの一覧。* が今のもの
+loop project current                           # 今のプロジェクトの名前
+loop project init <名前>                        # 空のプロジェクトを用意する
+loop project init <名前> --branch <ブランチ>     # 既存リポジトリのブランチを受け入れる用意をする
+loop project init <名前> --src <ディレクトリ> --tests <ディレクトリ>
+                                                # 書き込みの柵の場所を決めて用意する
+loop project layout <名前> --src <ディレクトリ> --tests <ディレクトリ>
+                                                # 作ってあるプロジェクトの柵の場所を変える
+loop project use <名前>                         # 切り替える
+loop project unity-refs <名前> <tar>            # Unity の参照アセンブリを置く（ホストの loop-unity-refs が流す）
+```
+
+書き込みの柵は、ソルバーが書ける2つのディレクトリだ。コードの場所（`--src`）とテストの場所
+（`--tests`）で、既定は `src` と `tests`。Unity のプロジェクトのようにコードを別の場所に置く
+リポジトリでは、作業ツリーの根からの相対パスで指定する。
+
+- 使える文字は英数字と `.` `_` `-` `/` だけ。`..` と、`plan` `.git` `.runner` `.venv` `node_modules` の下は使えない
+- 一方がもう一方を含んではならない
+- 規則は `runner/loop.py` の `layout_problems` にしか書かない。`loop-project.sh` とプロビジョニングも、それを import して確かめる
+
+`layout` を今のプロジェクトに流すと、新しい場所のディレクトリと権限を作るために `provision.sh`
+を流す。前の場所は `40-perms.sh` が runner だけのものに戻す。
+
+`loop project` は `loop-project.sh` を root で流す。`loop` がまだ無い箱では、直接流す。
+
+```bash
+cd /tmp && sudo ADMIN_USER=<保守ユーザー> bash /opt/loop-engine/provision/loop-project.sh <引数>
+```
+
+置き場は次のとおり。
+
+| パス | 中身 |
+|---|---|
+| `/srv/loop/projects/<名前>/repo.git` | そのプロジェクトの bare リポジトリ。ホストはここから引き、ここへ push する |
+| `/srv/loop/projects/<名前>/parked/` | 使っていないあいだの作業場所。root だけが入れる |
+| `/srv/loop/projects/<名前>/layout.json` | そのプロジェクトの柵の場所。root 所有。既定の場所なら無い |
+| `/srv/loop/projects/CURRENT` | 今のプロジェクトの名前 |
+| `/srv/loop/repo.git` | 今のプロジェクトの bare を指すリンク |
+| `/srv/loop/layout.json` | 今のプロジェクトの `layout.json` を指すリンク。無ければ既定の場所。ランナーとプロビジョニングが読む |
+| `/srv/loop/projects/<名前>/unity-refs/` | Unity の参照アセンブリ（`refs/*.dll`）、版、定義シンボル、C# の版。root 所有 |
+| `/srv/loop/unity-refs` | 今のプロジェクトの `unity-refs/` を指すリンク。無ければ Unity を使わないプロジェクト |
+| `/srv/loop/project` | 今のプロジェクトの作業ツリー（実体） |
+
+`use` は次の順で動く。
+
+1. runner の `loop.py` と、solver・planner・critic のプロセスが無いことを確かめる。あれば止まる
+2. 今のプロジェクトの作業場所を `parked/` に `mv` で退避する。対象は `project`、`human/in`、`planner/out`、`planner/brief`、`critic/out`、`critic/brief`、`brief`。`plan apply` を待つ提案と要件も一緒に動く
+3. `/srv/loop/repo.git` と `/srv/loop/layout.json` を切り替え先に向け直す
+4. 切り替え先に退避分があれば戻し、`40-perms.sh` で権限を確かめる。無ければ `provision.sh` で作る。作業ツリーは bare の HEAD が指すブランチになる
+
+`init --branch` で用意したプロジェクトは、そのブランチが push されるまで `use` できない。
+取り込みの手順はホスト側で行う（`host/README.md`）。
+
+作業ツリーの実体は常に `/srv/loop/project` に置く。ランナー、provision、sudoers はこのパスを
+名指ししており、venv の実行ファイルも絶対パスで持っているからだ。
+
+`loop-project.sh` を使う前に作った箱は、最初に今の状態へ名前を付ける。
+
+```bash
+loop project adopt <名前>
+```
+
+`/srv/loop/repo.git` の実体が `projects/<名前>/repo.git` に移り、元の場所はリンクになる。
+
+取り込んだブランチに環境のファイルを置くとき、そのリポジトリが自分の `conftest.py`、
+`index.html`、`vitest.config.mjs` を持っていれば、プロビジョニングは上書きせずに止まる。
+runner 以外がコミットしたことのあるファイルを、そのリポジトリの持ち物とみなす。
+`.gitignore` が `node_modules/` を全階層で無視している場合も `35-node.sh` が止まる（§3-20）。
 
 ### 2-12. スナップショット（PowerShell）
 
@@ -783,6 +911,10 @@ VirtualBox 構成の手順は `c4374f4` から拾える。
 
 ## 更新履歴
 
+- 2026/09/27: Unity の参照アセンブリの置き場（§2-11）と、それで測る `probe-unity`（§2-8）を追加
+- 2026/09/27: .NET を凍結する `36-dotnet.sh` と `smoke-dotnet` を §2-8 に追加
+- 2026/09/26: §2-10 を `loop` コマンドで走らせる手順に置き換え
+- 2026/09/26: §2-11 を、`loop-project.sh` でプロジェクトを切り替える手順に置き換え
 - 2026/09/26: 2回目以降のプロビジョニングで runner の公開鍵の流し込みを不要にした
 - 2026/09/26: 開発サーバで開けることを確かめる `smoke-page` を §2-8 に追加
 - 2026/09/26: 手順を、実行する場所の明記、鍵の名前 `loop-dev` / `loop-runner`、公開鍵の流し込み、`/opt/loop-engine` からのプロビジョニング、Claude の資格情報、走行ログと run の退避に合わせて書き換え

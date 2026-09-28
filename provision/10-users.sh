@@ -23,8 +23,8 @@ set -euo pipefail
 ADMIN_USER="${ADMIN_USER:-maint}"
 
 id -u "$ADMIN_USER" >/dev/null 2>&1 || {
-  echo "FATAL: maintenance user '$ADMIN_USER' does not exist." >&2
-  echo "       This is the distro's default user; set ADMIN_USER if it differs." >&2
+  echo "FATAL: 保守ユーザー '$ADMIN_USER' がいない。" >&2
+  echo "       保守ユーザーはディストロの既定ユーザーだ。名前が違うなら ADMIN_USER で渡す。" >&2
   exit 1
 }
 

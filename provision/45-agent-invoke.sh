@@ -13,6 +13,7 @@
 # 禁じているが、ランナーが監督するアカウントに降りることは禁じていない。
 set -euo pipefail
 cd "$(dirname "$0")"
+. ./layout.sh
 
 install -d -o root -g root -m 755 /srv/loop/bin
 install -o root -g root -m 755 bin/solver-run   /srv/loop/bin/solver-run
@@ -163,7 +164,7 @@ for who in solver planner critic; do
     *"($who) NOPASSWD: /srv/loop/bin/$who-run"*)
       : ;;
     *)
-      echo "FATAL: runner did not receive the ($who) Runas grant" >&2
+      echo "FATAL: runner に ($who) として起動する許可が付いていない" >&2
       printf '%s\n' "$granted" >&2
       exit 1 ;;
   esac
@@ -173,7 +174,7 @@ done
 # あれば、`sudo -l` は "(ALL : ALL)" のような行を出す。
 case "$granted" in
   *"(ALL"*|*"(root"*)
-    echo "FATAL: runner has a Runas grant beyond the three agent accounts" >&2
+    echo "FATAL: runner に、3役のアカウント以外として起動する許可が付いている" >&2
     printf '%s\n' "$granted" >&2
     exit 1 ;;
 esac
@@ -193,10 +194,11 @@ c_can    test -w /srv/loop/critic/out
 
 # 判定する対象の作業。
 c_cannot ls /srv/loop/project/plan          # 見れば判定の拠り所にしてしまう基準
-c_cannot ls /srv/loop/project/tests         # すでに通ったテスト
+c_cannot ls "/srv/loop/project/$LAYOUT_TESTS"   # すでに通ったテスト
 c_cannot ls /srv/loop/project/.git          # 両方を含む履歴
 c_cannot ls /srv/loop/planner/out           # 書かれている最中の提案
 c_cannot ls /srv/loop/brief                 # solver に伝えた内容
+c_cannot ls /srv/loop/logs                  # 失敗したテストの中身を含む走行ログ
 # 要件は、runner が組み立てたブリーフを通してだけ届く。受け渡し口を直接読めると、
 # 誰も渡していない入力に対して批評が走りうる。
 c_cannot ls /srv/loop/human/in
@@ -251,7 +253,7 @@ for who in solver planner critic; do
   fi
 done
 if [ -n "$pending" ]; then
-  echo "45-agent-invoke: ok (still unauthenticated:$pending)"
+  echo "45-agent-invoke: ok（資格情報がまだ無い役:$pending。provision/README §2-9）"
 else
   echo "45-agent-invoke: ok"
 fi

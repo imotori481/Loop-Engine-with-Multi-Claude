@@ -50,6 +50,71 @@ class ReadingState(DashboardFixture):
         self.assertEqual(read_jsonl(path)[1], {"event": "UNREADABLE_LEDGER_RECORD", "line": 2})
 
 
+def usage(who, **tokens):
+    return {"event": "USAGE", "who": who, "usage": tokens}
+
+
+class TokenRuns(DashboardFixture):
+    def mirror(self, name, *records):
+        path = Path(self.temp.name) / name / "plan" / "ledger.jsonl"
+        path.parent.mkdir(parents=True)
+        path.write_text("".join(json.dumps(item) + "\n" for item in records), encoding="utf-8")
+
+    def test_a_loop_runs_from_bootstrap_and_counts_the_planning_too(self):
+        # 計画づくりと批評は run --all より前に流れる。そこを落とすと、
+        # クリティックは常に 0 になる。
+        self.ledger(
+            {"ts": "1", "event": "PLAN_BOOTSTRAP"},
+            usage("planner", input_tokens=10, cache_read_input_tokens=5, output_tokens=2),
+            usage("critic", cache_creation_input_tokens=7),
+            {"event": "RUN_ALL_START"},
+            usage("solver", input_tokens=3),
+            {"event": "RUN_ALL_STOP", "reason": "cap reached"},
+            {"event": "RUN_ALL_START"},
+            usage("solver", input_tokens=4),
+            {"event": "ALL_GREEN", "steps": ["S1", "S2"]},
+        )
+        runs = self.state.snapshot()["token_runs"]
+        self.assertEqual([(r["run"], r["outcome"], r["tokens"]) for r in runs], [
+            (1, "green", {"planner": 17, "critic": 7, "solver": 7}),
+        ])
+
+    def test_a_second_bootstrap_starts_the_next_loop(self):
+        self.ledger(
+            {"ts": "1", "event": "PLAN_BOOTSTRAP"}, usage("planner", output_tokens=1),
+            {"ts": "2", "event": "PLAN_BOOTSTRAP"}, usage("planner", output_tokens=2),
+        )
+        runs = self.state.snapshot()["token_runs"]
+        self.assertEqual([(r["outcome"], r["tokens"]["planner"]) for r in runs],
+                         [("abandoned", 1), ("running", 2)])
+
+    def test_records_before_any_bootstrap_form_the_first_loop(self):
+        self.ledger({"ts": "1", "event": "PLAN_APPLY"}, usage("solver", input_tokens=5))
+        self.assertEqual(self.state.snapshot()["token_runs"][0]["tokens"]["solver"], 5)
+
+    def test_a_loop_without_usage_is_left_out(self):
+        self.ledger({"ts": "1", "event": "PLAN_BOOTSTRAP"}, {"event": "ALL_GREEN"})
+        self.assertEqual(self.state.snapshot()["token_runs"], [])
+
+    def test_the_history_spans_every_mirror_in_start_order(self):
+        # 1つの台帳には、ふつう1回分しか入らない。点が1つでは線にならない。
+        self.mirror("runs/run-001", {"ts": "1", "event": "PLAN_BOOTSTRAP"},
+                    usage("planner", output_tokens=1))
+        self.mirror("projects/game", {"ts": "3", "event": "PLAN_BOOTSTRAP"},
+                    usage("planner", output_tokens=3))
+        self.ledger({"ts": "2", "event": "PLAN_BOOTSTRAP"}, usage("planner", output_tokens=2))
+        runs = self.state.snapshot()["token_runs"]
+        self.assertEqual([(r["run"], r["source"]) for r in runs],
+                         [(1, "runs/run-001"), (2, "project"), (3, "projects/game")])
+
+    def test_the_live_mirror_does_not_repeat_its_project(self):
+        records = ({"ts": "1", "event": "PLAN_BOOTSTRAP"}, usage("planner", output_tokens=1))
+        self.mirror("projects/game", *records)
+        self.ledger(*records)
+        runs = self.state.snapshot()["token_runs"]
+        self.assertEqual([r["source"] for r in runs], ["projects/game"])
+
+
 class Decisions(DashboardFixture):
     def test_a_decision_answers_only_the_exact_pending_review(self):
         self.ledger({"event": "ALL_GREEN", "steps": ["S1", "S2"]})
@@ -113,6 +178,40 @@ class Decisions(DashboardFixture):
         request = self.state.snapshot()["pending"][0]
         with self.assertRaisesRegex(ValueError, "requires a note"):
             self.state.decide("review", request["id"], "revise", "  ")
+
+
+class PullRequestRecord(DashboardFixture):
+    def approve(self):
+        self.ledger({"event": "ALL_GREEN", "steps": ["S1", "S2"]})
+        request = self.state.snapshot()["pending"][0]
+        self.state.decide("review", request["id"], "approve", "played it")
+        return request["id"]
+
+    def test_nothing_to_send_until_the_review_is_approved(self):
+        self.ledger({"event": "ALL_GREEN", "steps": ["S1", "S2"]})
+        self.assertIsNone(self.state.approved())
+        self.assertIsNone(self.state.snapshot()["pull_request"])
+
+    def test_the_approval_carries_the_steps_and_the_note(self):
+        request = self.approve()
+        approval = self.state.approved()
+        self.assertEqual((approval["request_id"], approval["steps"], approval["note"]),
+                         (request, ["S1", "S2"], "played it"))
+        self.assertEqual(self.state.snapshot()["pull_request"],
+                         {"request_id": request, "result": None})
+
+    def test_the_latest_result_for_the_approved_review_is_shown(self):
+        request = self.approve()
+        self.state.record_pull_request(request, {"error": "gh is not logged in"})
+        self.state.record_pull_request(request, {"url": "https://github.com/o/r/pull/1"})
+        result = self.state.snapshot()["pull_request"]["result"]
+        self.assertEqual(result["url"], "https://github.com/o/r/pull/1")
+
+    def test_a_later_all_green_is_not_covered_by_the_earlier_approval(self):
+        self.approve()
+        self.ledger({"event": "ALL_GREEN", "steps": ["S1", "S2"]},
+                    {"event": "ALL_GREEN", "steps": ["S1", "S2", "S3"]})
+        self.assertIsNone(self.state.approved())
 
 
 class TwoKindsOfStuck(DashboardFixture):

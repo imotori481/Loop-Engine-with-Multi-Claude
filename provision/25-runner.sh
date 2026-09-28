@@ -18,6 +18,9 @@ DEST=/srv/loop/runner
 install -d -o root -g root -m 755 "$DEST"
 install -o root -g root -m 644 "$SRC" "$DEST/loop.py"
 
+# 保守ユーザーが打つ `loop` コマンド。PATH の通った場所に置く。
+install -o root -g root -m 755 bin/loop /usr/local/bin/loop
+
 # ---- 検査。runner の視点で確かめる ------------------------------------
 fail=0
 if ! sudo -u runner test -r "$DEST/loop.py"; then
@@ -28,6 +31,14 @@ if sudo -u runner test -w "$DEST/loop.py"; then
 fi
 if sudo -u runner test -w "$DEST"; then
   echo "FAIL: runner should NOT be able to: test -w $DEST"; fail=1
+fi
+# 走行は runner として /usr/local/bin/loop を実行する。runner が書き換えられれば、
+# 関門の外で好きなコマンドを走らせられる。
+if sudo -u runner test -w /usr/local/bin/loop; then
+  echo "FAIL: runner should NOT be able to: test -w /usr/local/bin/loop"; fail=1
+fi
+if ! bash -n /usr/local/bin/loop; then
+  echo "FAIL: /usr/local/bin/loop does not parse"; fail=1
 fi
 # 構文が壊れたファイルを置いたまま ok と言わない。py_compile ではなく ast で
 # 確かめる。py_compile は __pycache__ を書こうとし、$DEST は runner から書けない。

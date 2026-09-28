@@ -18,17 +18,40 @@ from urllib.parse import urlparse
 try:
     from .access import LOCAL, Reach
     from .actions import Launchers
+    from .live import Live
+    from .pullrequest import PullRequestError, PullRequests
     from .state import DashboardState
 except ImportError:  # 直接実行したとき: python host/dashboard/server.py
     from access import LOCAL, Reach
     from actions import Launchers
+    from live import Live
+    from pullrequest import PullRequestError, PullRequests
     from state import DashboardState
 
 
 STATIC = Path(__file__).with_name("static")
 
 
-def handler_for(state: DashboardState, launchers: Launchers, reach: Reach, token: str):
+def send_pull_request(state: DashboardState, pulls: PullRequests | None) -> dict | None:
+    """写しの最後の ALL_GREEN への承認を、親ブランチへの PR にする。結果を記録して返す。
+
+    失敗しても承認は取り消さない。承認は人が遊んで決めたことで、PR が出せたかどうかは
+    ホストの git と gh の事情だ。失敗は記録に残り、画面から出し直せる。
+    """
+    approval = state.approved()
+    if approval is None:
+        raise ValueError("there is no approved review to send")
+    if pulls is None:
+        return None
+    try:
+        outcome = pulls.open(approval["steps"], approval.get("note", ""))
+    except PullRequestError as error:
+        outcome = {"error": str(error)}
+    return state.record_pull_request(approval["request_id"], outcome)
+
+
+def handler_for(state: DashboardState, launchers: Launchers, reach: Reach, token: str,
+                live: Live | None = None, pulls: PullRequests | None = None):
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, format: str, *args) -> None:
             print("dashboard: " + format % args)
@@ -83,6 +106,10 @@ def handler_for(state: DashboardState, launchers: Launchers, reach: Reach, token
             if path == "/api/state":
                 self._json(state.snapshot())
                 return
+            if path == "/api/live":
+                self._json(live.fetch() if live is not None
+                           else {"error": "live view is not configured"})
+                return
             files = {"/": "index.html", "/app.js": "app.js", "/style.css": "style.css"}
             name = files.get(path)
             if name is None:
@@ -114,7 +141,18 @@ def handler_for(state: DashboardState, launchers: Launchers, reach: Reach, token
                         str(body.get("decision", "")), str(body.get("note", "")),
                         scope=scope, user=user,
                     )
+                    # 承認はこの機械の前でしかできない（decide が断る）ので、ここに
+                    # 来た承認はローカルのものだけだ。
+                    if result["kind"] == "review" and result["decision"] == "approve":
+                        result = {**result, "pull_request": send_pull_request(state, pulls)}
                     self._json(result, HTTPStatus.CREATED)
+                    return
+                if path == "/api/pull-request":
+                    # GitHub に書き込む。承認と同じく、この機械の前でだけ。
+                    if scope != LOCAL:
+                        raise ValueError(
+                            "a pull request can only be sent from the machine itself")
+                    self._json(send_pull_request(state, pulls), HTTPStatus.CREATED)
                     return
                 if path == "/api/launch":
                     # プログラムの起動だけは、画面のある場所でしか意味が無い。
@@ -136,15 +174,19 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Loop Engine operator dashboard")
     parser.add_argument("--project", type=Path, required=True,
                         help="host-side project mirror containing plan/ledger.jsonl")
+    parser.add_argument("--mirrors", type=Path, default=None,
+                        help="directory holding every mirror for the token history "
+                             "(default: the parent of --project)")
     parser.add_argument("--data", type=Path, default=Path(__file__).with_name(".state"))
     parser.add_argument("--config", type=Path, default=Path(__file__).with_name("config.json"))
     parser.add_argument("--port", type=int, default=8443)
     args = parser.parse_args()
     token = secrets.token_urlsafe(32)
+    state = DashboardState(args.project, args.data, args.mirrors)
     server = ThreadingHTTPServer(
         ("127.0.0.1", args.port),
-        handler_for(DashboardState(args.project, args.data), Launchers(args.config),
-                    Reach(args.config), token),
+        handler_for(state, Launchers(args.config), Reach(args.config), token, Live(args.config),
+                    PullRequests(state.project, state.mirrors / "projects")),
     )
     print(f"Loop dashboard: http://127.0.0.1:{args.port}")
     try:

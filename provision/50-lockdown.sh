@@ -10,8 +10,8 @@ ADMIN_USER="${ADMIN_USER:-maint}"
 # 15-authkeys.sh が失敗したとき、ログインは許されているのに認証する手段が無い
 # アカウントができる。
 if [ ! -s /home/runner/.ssh/authorized_keys ]; then
-  echo "FATAL: /home/runner/.ssh/authorized_keys is missing or empty." >&2
-  echo "       Refusing to change the SSH configuration." >&2
+  echo "FATAL: /home/runner/.ssh/authorized_keys が無いか、空だ。" >&2
+  echo "       SSH の設定は変えない。先に 15-authkeys.sh を通す。" >&2
   exit 1
 fi
 

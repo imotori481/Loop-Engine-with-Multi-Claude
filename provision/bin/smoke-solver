@@ -17,14 +17,16 @@ set -euo pipefail
 
 [ "$(id -un)" = "runner" ] || { echo "run as runner: sudo -u runner $0" >&2; exit 1; }
 
+# 柵の場所。規則は loop.py の LAYOUT にしか書かないので、そこから読む。
+read -r LAYOUT_SRC LAYOUT_TESTS <<<"$(python3 -B -c "import sys; sys.path.insert(0, '/srv/loop/runner'); import loop; print(loop.LAYOUT['src'], loop.LAYOUT['tests'])")"
 BRIEF=/srv/loop/brief/smoke.md
-TARGET=/srv/loop/project/src/smoke.txt
+TARGET="/srv/loop/project/$LAYOUT_SRC/smoke.txt"
 MARKER="loop-smoke-ok"
 
 rm -f "$TARGET"
 
 cat > "$BRIEF" <<EOF
-Create the file src/smoke.txt with exactly this single line of content:
+Create the file $LAYOUT_SRC/smoke.txt with exactly this single line of content:
 
 $MARKER
 
@@ -41,13 +43,13 @@ note() { echo "  $1"; }
 bad()  { echo "  FAIL: $1"; fail=1; }
 
 if [ ! -f "$TARGET" ]; then
-  bad "src/smoke.txt was not created"
+  bad "$LAYOUT_SRC/smoke.txt was not created"
 else
   owner="$(stat -c '%U' "$TARGET")"
   if [ "$owner" = "solver" ]; then
-    note "ok: src/smoke.txt owned by solver"
+    note "ok: $LAYOUT_SRC/smoke.txt owned by solver"
   else
-    bad "src/smoke.txt owned by $owner, expected solver"
+    bad "$LAYOUT_SRC/smoke.txt owned by $owner, expected solver"
   fi
   if grep -Fqx "$MARKER" "$TARGET"; then
     note "ok: content matches"

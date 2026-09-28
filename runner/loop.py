@@ -22,6 +22,8 @@ REVIEW_GATE は v1 では実装していない。人間の手順で、最初の�
 from __future__ import annotations
 
 import argparse
+import ast
+import atexit
 import hashlib
 import json
 import os
@@ -37,8 +39,79 @@ from pathlib import Path
 LOOP = Path("/srv/loop")
 PROJECT = LOOP / "project"
 PLAN = PROJECT / "plan"
-TESTS = PROJECT / "tests"
-SRC = PROJECT / "src"
+
+# 書き込みの柵の場所。プロジェクトごとに決まる（Unity はコードを Assets/ の下に
+# 置く）。loop-project.sh が /srv/loop/layout.json を今のプロジェクトのものへの
+# リンクにする。root の所有なので、ランナーもソルバーも書き換えられない。無ければ
+# src/ と tests/。
+LAYOUT_FILE = LOOP / "layout.json"
+LAYOUT_DEFAULT = {"src": "src", "tests": "tests"}
+# 柵にしてはならない場所。ランナーの持ち物か、凍結したツールチェーンだ。
+LAYOUT_RESERVED = {".git", "plan", ".runner", ".venv", "node_modules"}
+
+
+def layout_problems(layout: object) -> list[str]:
+    """柵の場所として使えない理由。使えるなら空。loop-project.sh と同じ規則。"""
+    if not isinstance(layout, dict) or set(layout) != {"src", "tests"}:
+        return ['layout must be {"src": <dir>, "tests": <dir>}']
+    problems = []
+    parts = {}
+    for key, value in layout.items():
+        if not isinstance(value, str) or not value:
+            problems.append(f"{key} must be a non-empty string")
+            continue
+        parts[key] = tuple(value.split("/"))
+        # 空白や記号は、プロビジョニングの bash が引用し損ねたときに別のパスになる。
+        if not re.fullmatch(r"[A-Za-z0-9._/-]+", value):
+            problems.append(f"{key} may use only letters, digits, '.', '_', '-' "
+                            f"and '/': {value!r}")
+        elif value.startswith("/") or value.endswith("/") \
+                or any(p in ("", ".", "..") for p in parts[key]):
+            problems.append(f"{key} must be a relative path without '.', '..' or "
+                            f"empty parts: {value!r}")
+        elif parts[key][0] in LAYOUT_RESERVED:
+            problems.append(f"{key} may not be under {parts[key][0]}/: {value!r}")
+    if len(parts) == 2:
+        short, long_ = sorted(parts.values(), key=len)
+        if long_[:len(short)] == short:
+            problems.append("src and tests may not contain one another")
+    return problems
+
+
+def read_layout() -> dict[str, str]:
+    try:
+        layout = json.loads(LAYOUT_FILE.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return dict(LAYOUT_DEFAULT)
+    except (OSError, json.JSONDecodeError) as e:
+        sys.exit(f"cannot read {LAYOUT_FILE}: {e}")
+    problems = layout_problems(layout)
+    if problems:
+        sys.exit(f"{LAYOUT_FILE} is not a usable layout: " + "; ".join(problems))
+    return layout
+
+
+def layout_text(text: str) -> str:
+    """ブリーフの文の {SRC} {TESTS} {SRC_FROM_TESTS} を、今の柵の場所に置き換える。
+
+    プランナーに渡す場所は、書き写さずに、ランナーが実際に強制するものから取る。
+    """
+    from_tests = os.path.relpath(LAYOUT["src"], LAYOUT["tests"]).replace(os.sep, "/")
+    return (text.replace("{SRC_FROM_TESTS}", from_tests)
+            .replace("{SRC}", LAYOUT["src"]).replace("{TESTS}", LAYOUT["tests"]))
+
+
+def in_layout(path: str, key: str) -> bool:
+    """`path` が柵の `key`（"src" か "tests"）の下にあるか。`..` で抜けるものは外。"""
+    parts = path.split("/")
+    base = LAYOUT[key].split("/")
+    return (len(parts) > len(base) and parts[:len(base)] == base
+            and not any(p in ("", ".", "..") for p in parts))
+
+
+LAYOUT = read_layout()
+TESTS = PROJECT / LAYOUT["tests"]
+SRC = PROJECT / LAYOUT["src"]
 STATE = PROJECT / ".runner"
 BRIEF_DIR = LOOP / "brief"
 PYTEST = PROJECT / ".venv" / "bin" / "pytest"
@@ -292,6 +365,100 @@ def ledger(event: str, *, echo: str | None = None, **fields) -> None:
     print(f"[{event}] {shown}")
 
 
+# --------------------------------------------------------------------------
+# いまの作業
+# --------------------------------------------------------------------------
+#
+# 台帳は起きたことの記録で、ホストに届くのは GREEN と plan apply のときだけだ。
+# 人が知りたい「いま誰がどのステップの何をしているか」は、そこからは読めない。
+# だから、変わるたびに1つのファイルを丸ごと書き直す。箱の `loop now` がこれを
+# 読み、ホストのダッシュボードが SSH で引く。
+#
+# /srv/loop/logs は runner と保守ユーザー（humanw）だけが読める。ステップの goal を
+# 載せても、それを読むべきでない役には届かない。
+
+NOW_FILE = LOOP / "logs" / "now.json"
+# 誰が何をしているかの文脈。コマンドとステップは呼び出し元が設定する。
+NOW: dict = {"command": None, "step": None, "attempt": None, "key": None, "since": None}
+
+ROLE_JA = {"planner": "プランナー", "critic": "クリティック",
+           "solver": "ソルバー", "runner": "ランナー"}
+
+CRITIQUE_JA = {
+    "coverage": "計画をやり遂げたとき、要件が満たされるかを批評している",
+    "trace": "計画に、使う人の操作では届かない部分が無いかを批評している",
+}
+
+
+def describe_now(who: str, phase: str, detail: str = "") -> str:
+    """いまの作業を日本語の1文にする。"""
+    step = NOW["step"]
+    if who == "planner":
+        if NOW["command"] == "plan bootstrap":
+            return "要件から計画を書いている"
+        if NOW["command"] == "plan refine":
+            return "クリティックの指摘を受けて計画を直している"
+        if step:
+            return f"{step} のエスカレーションに答えて計画を直している"
+        return "計画の改訂案を書いている"
+    if who == "critic":
+        return CRITIQUE_JA.get(detail, "計画を批評している")
+    if who == "solver":
+        text = {"TEST_WRITE": f"{step} の受け入れ条件からテストを書いている",
+                "STUB": f"{step} のスタブを書いている",
+                "IMPL": f"{step} を実装している"}.get(phase, f"{step} の {phase} をしている")
+        if phase == "IMPL" and NOW["attempt"]:
+            text += f"（試行 {NOW['attempt']}）"
+        return text
+    return {"red": f"{step} のテストが、実装の無いうちは落ちることを確かめている",
+            "verify": f"{step} の実装をテストで確かめている",
+            "check": "エージェントの出力を確かめている",
+            "quota": "利用枠が戻るのを待っている"}.get(phase, phase)
+
+
+def steps_now() -> list[dict]:
+    """各ステップの goal と状態。計画がまだ無ければ空。"""
+    try:
+        tasks = json.loads((PLAN / "tasks.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    done = green_steps()
+    rows = []
+    for step in tasks.get("steps", []) if isinstance(tasks, dict) else []:
+        if not isinstance(step, dict):
+            continue
+        sid = step.get("id")
+        state = "green" if sid in done else "active" if sid == NOW["step"] else "pending"
+        rows.append({"id": sid, "goal": step.get("goal", ""), "state": state})
+    return rows
+
+
+def report_now(who: str | None, phase: str = "", detail: str = "") -> None:
+    """いまの作業を NOW_FILE に書く。who が None なら、何もしていない。
+
+    書けなくても走行は止めない。これは人が見るための写しで、関門ではない。
+    """
+    if who is None:
+        activity = None
+        NOW["key"] = NOW["since"] = None
+    else:
+        key = (who, phase, NOW["step"], NOW["attempt"], detail)
+        if key != NOW["key"]:
+            NOW["key"], NOW["since"] = key, time.strftime("%Y-%m-%dT%H:%M:%S%z")
+        activity = {"who": who, "who_ja": ROLE_JA.get(who, who), "phase": phase,
+                    "step": NOW["step"], "attempt": NOW["attempt"],
+                    "text_ja": describe_now(who, phase, detail), "since": NOW["since"]}
+    record = {"updated": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "pid": os.getpid(),
+              "command": NOW["command"], "activity": activity, "steps": steps_now()}
+    try:
+        temporary = NOW_FILE.with_name(NOW_FILE.name + ".tmp")
+        temporary.write_text(json.dumps(record, ensure_ascii=False), encoding="utf-8")
+        temporary.chmod(0o640)
+        os.replace(temporary, NOW_FILE)
+    except OSError:
+        pass
+
+
 def sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
@@ -517,9 +684,21 @@ ANNOTATION = re.compile(r"(?:->|:)\s*([A-Za-z_][\w.]*)\s*([\[<]?)")
 # ステップに渡すものの形を述べなければならず、型の構文を持たない言語では
 # できない。vitest は .ts を esbuild で変換し、別のビルド手順も tsc も無い。
 # 型は「読まれる」ためにある。契約を書くプランナーと、それを読むソルバーが読む。
+#
+# 振る舞いの分岐は拡張子ではなく `name` で見る。データで済む差は項目にする。
+# `environment_files` は、その言語のために箱が根に置くファイルだ。箱は計画の
+# 言語を知らずに全部を置くので、ほかの言語の計画には見せない（environment_facts）。
 LANGUAGES = {
     "python": {
+        "name": "python",
         "label": "Python",
+        "test_runner": PYTEST,
+        "wiring": "conftest.py",
+        # 20-layout.sh はどの言語の箱にも置く。ほかの言語の計画には見せない。
+        "environment_files": frozenset({"conftest.py"}),
+        "naming_note": "",
+        "provides_pattern": re.compile(r"(?:def|class)\s+([A-Za-z_]\w*)"),
+        "red_kinds": RED_KINDS,
         "source_suffix": ".py",
         "test_suffixes": (".py",),
         # パッケージのディレクトリは __init__ で自分を名乗る。ほかのものは名乗らない。
@@ -536,13 +715,26 @@ LANGUAGES = {
         # 文字。ドットを含めるのは Python の区切り文字だからだ。
         # `incgame.engine.sub` の中に現れる `incgame.engine` は、別のモジュールを指す。
         "name_boundary": r"[\w.]",
-        "layout_note": """Put the package inside src/, e.g. `src/yourpkg/models.py`, and import it as
-`from yourpkg.models import Thing` -- `src` is on sys.path, so the `src.`
-prefix does not appear in imports. Say this in CONTEXT.md; the solver has no
-other way to learn it.""",
+        "layout_note": """Put the package inside {SRC}/, e.g. `{SRC}/yourpkg/models.py`, and import it as
+`from yourpkg.models import Thing` -- `{SRC}` is on sys.path, so it does not
+appear in imports. Say this in CONTEXT.md; the solver has no other way to
+learn it.""",
     },
     "typescript": {
+        "name": "typescript",
         "label": "TypeScript",
+        "test_runner": VITEST,
+        "wiring": "vitest.config.mjs",
+        "environment_files": frozenset({"index.html", "vitest.config.mjs"}),
+        "naming_note": """
+Name your tests with DOUBLE quotes or backticks, never single quotes. The
+criteria above are prose and contain apostrophes ("the result's resource"),
+and one of those inside a single-quoted name ends the string: the file stops
+compiling and not one of your tests runs.
+""",
+        "provides_pattern": re.compile(
+            r"(?:function|class|interface|type|enum|const|let)\s+([A-Za-z_]\w*)"),
+        "red_kinds": RED_KINDS,
         "source_suffix": ".ts",
         "test_suffixes": (".ts",),
         "index_name": "index",
@@ -564,28 +756,108 @@ other way to learn it.""",
         # bootstrap の1回目で見つかった。B3 の欠陥と同じ形で、誤っていたのは
         # 計画ではなく規則で、そのために試行を1回使った。
         "name_boundary": r"[\w]",
-        "layout_note": """Every source file is `.ts` under src/, e.g. `src/idlegame/models.ts`, and
-every test file is `.ts` under tests/. Import with a RELATIVE path and no
+        "layout_note": """Every source file is `.ts` under {SRC}/, e.g. `{SRC}/idlegame/models.ts`, and
+every test file is `.ts` under {TESTS}/. Import with a RELATIVE path and no
 extension in the specifier is wrong here -- write the extension:
-`import { Thing } from "../src/idlegame/models.ts"`. vitest resolves it and
-esbuild strips the types; there is no build step and no tsc, so a type is
-something the next step READS, not something a compiler checks.
+`import { Thing } from "{SRC_FROM_TESTS}/idlegame/models.ts"` from a test file
+directly in {TESTS}/. vitest resolves it and esbuild strips the types; there is
+no build step and no tsc, so a type is something the next step READS, not
+something a compiler checks.
 
 THE PAGE ALREADY EXISTS AND YOU DO NOT WRITE IT. `index.html` sits at the
 repository root, which is outside the write fence, so it belongs to the
 environment rather than to any step. It is four lines and it does exactly one
 thing:
 
-    import { start } from "/src/main.ts";
+    import { start } from "/{SRC}/main.ts";
     start(document.getElementById("app"));
 
-So the plan MUST end with a step whose files_write includes `src/main.ts`, and
+So the plan MUST end with a step whose files_write includes `{SRC}/main.ts`, and
 that module MUST export `start(root: HTMLElement): void`. Nothing else about
 the page is yours to decide. Everything `start` does is ordinary code under
-src/: it is under the fence, the tests can reach it, and its criteria are
+{SRC}/: it is under the fence, the tests can reach it, and its criteria are
 written against what it puts in the document -- what the element contains,
 which buttons exist, which of them are disabled, and what changes when one is
 clicked.
+
+Say all of this in CONTEXT.md; the solver has no other way to learn it.""",
+    },
+    # C# は Unity に持ち込むコードのためにある。コードは netstandard2.1、テストは
+    # net8.0 の NUnit 3（Unity の Test Framework と同じ系統）で、36-dotnet.sh が凍結した
+    # フィードだけから restore する。csproj はランナーが /srv/loop/dotnet/build に
+    # 書く（dotnet_projects）。取り込んだ Unity のプロジェクトの根に置くと、IDE が
+    # Unity の csproj と一緒に拾ってしまう。
+    #
+    # C# の宣言は型の中にあるので、契約の名前は型（`Board`）とメンバー
+    # （`Board.Score`）の2つの単位を持つ。provides_pattern の2つの組がそれだ。
+    "csharp": {
+        "name": "csharp",
+        "label": "C#",
+        "test_runner": Path("/usr/bin/dotnet"),
+        "wiring": None,
+        "environment_files": frozenset(),
+        "naming_note": """
+A test is a C# method, and its name is an identifier: letters, digits and
+underscores only. Name it after the criterion in PascalCase with underscores
+(`Score_counts_every_row`); do not copy the criterion's prose into it.
+""",
+        "provides_pattern": re.compile(
+            r"\b(?:class|struct|enum|interface)\s+([A-Za-z_]\w*)"
+            r"|([A-Za-z_]\w*\.[A-Za-z_]\w*)\s*(?:\(|\{|;|=|$|--|<)"),
+        # 型の後ろ、名前の前に型を書くので、":" や "->" の後ろを見る ANNOTATION は
+        # 使えない。語の境目で、裸のコンテナ型を探す。
+        "shape_pattern": re.compile(
+            r"(?<![\w.])(List|IList|IReadOnlyList|Dictionary|IDictionary|"
+            r"IReadOnlyDictionary|HashSet|ISet|IEnumerable|ICollection|"
+            r"IReadOnlyCollection|Queue|Stack|Tuple|ArrayList|Hashtable|object|dynamic)"
+            r"\b\s*(<?)"),
+        # junit の type は常に "failure" で、例外の型を持たない（smoke-dotnet の
+        # 実測）。failure_kind が message から読み、アサーションをこの名前にする。
+        # スタブは値を返さず、印の付いた例外を投げる（CSHARP_STUB_BODY）。
+        "red_kinds": re.compile(r"^(?:AssertionException|StubNotImplemented)$"),
+        "source_suffix": ".cs",
+        "test_suffixes": (".cs",),
+        # テストの前にビルドする。Unity の参照を写すので、初回は1分を超えうる。
+        "min_test_timeout": 600,
+        # C# には「ディレクトリそのもの」を表すファイルが無い。
+        "index_name": "",
+        "module_separator": "/",
+        "shapeless": frozenset({
+            "List", "IList", "IReadOnlyList", "Dictionary", "IDictionary",
+            "IReadOnlyDictionary", "HashSet", "ISet", "IEnumerable", "ICollection",
+            "IReadOnlyCollection", "Queue", "Stack", "Tuple", "ArrayList", "Hashtable",
+            "object", "dynamic",
+        }),
+        "shape_bracket": "<",
+        "shape_example": "List<Cell>, Dictionary<string, int>, (Board board, int score)",
+        "name_boundary": r"[\w]",
+        "layout_note": """Every source file is `.cs` under {SRC}/, e.g. `{SRC}/Logic/Board.cs`, and
+every test file is `.cs` under {TESTS}/. The code compiles as one assembly
+(netstandard2.1, C# 9) and the tests as another that references it, so a test
+uses the code through `using <its namespace>;` -- there are no file imports.
+
+One public type per file, and the file is named after the type
+(`Board.cs` holds `Board`). Unity requires this of every MonoBehaviour and it
+costs nothing elsewhere. A new file's namespace follows its folder under {SRC}/
+(`{SRC}/Logic/Board.cs` -> `namespace Logic`). A file that already exists keeps
+the namespace it has: a declaration read from it ends in `-- namespace <name>`,
+and code that uses it writes `using <name>;`.
+
+Tests use NUnit 3: `using NUnit.Framework;`, a public class with `[Test]`
+methods, and `Assert.AreEqual(expected, actual)` or `Assert.That(actual,
+Is.EqualTo(expected))`. Every test class is inside a namespace, and its name
+is the file's name (`{TESTS}/BoardTests.cs` holds `BoardTests`): the runner
+selects a step's tests by that class name.
+
+C# 9 is the ceiling: no `record struct`, no file-scoped `namespace X;`, no
+`global using`, no `required` members. They do not compile here or in Unity.
+
+A contract line names the file and then the declaration. A type:
+    {SRC}/Logic/Board.cs: class Board { public int Width; public int Height; }
+A member, written with its type in front of its name:
+    {SRC}/Logic/Board.cs: static int Board.Score(Board board)
+The name of the first is `Board` and of the second `Board.Score`; requires and
+provides match on those names.
 
 Say all of this in CONTEXT.md; the solver has no other way to learn it.""",
     },
@@ -633,6 +905,8 @@ def failure_kind(failure: ET.Element) -> str:
 
     これがちょうど、R5 が見分けるための区別だ。
     """
+    if LANGUAGE["name"] == "csharp":
+        return csharp_failure_kind(failure)
     declared = (failure.get("type") or "").strip()
     if declared:
         return declared
@@ -647,23 +921,228 @@ def failure_kind(failure: ET.Element) -> str:
     return message.splitlines()[0] if message else "<no type>"
 
 
+# NUnit を junit に書くロガーは、例外の型を type に書かない（常に "failure"）。
+# 型は message の先頭にある: "System.NullReferenceException : Object reference ..."
+CSHARP_EXCEPTION = re.compile(r"^\s*([A-Za-z_][\w.]*(?:Exception|Error))\s*:")
+
+
+def csharp_failure_kind(failure: ET.Element) -> str:
+    """NUnit の失敗の種類。smoke-dotnet と probe-unity の実測に合わせてある。
+
+        "  Expected: 6\\n  But was:  5\\n"                  -> AssertionException
+        "System.Security.SecurityException : ECall ..."   -> System.Security.SecurityException
+
+    例外の接頭辞を先に見る。例外の本文が "Expected:" を含むことはあっても、
+    アサーションの message が例外の型で始まることは無い。どちらでもなければ
+    （Assert.Fail の文など）1行目を返し、R5 は推測せずに拒む。
+    """
+    message = (failure.get("message") or "").strip()
+    first = message.splitlines()[0] if message else ""
+    # スタブが投げる印の付いた例外（CSHARP_STUB_BODY）。スタブに対して落ちた
+    # ことを示すので、アサーションと同じく赤と認める。印の無い
+    # NotImplementedException は、ほかの例外と同じく拒む。
+    if CSHARP_STUB_MARK.match(first):
+        return "StubNotImplemented"
+    match = CSHARP_EXCEPTION.match(first)
+    if match:
+        return match.group(1)
+    if "Expected:" in message and "But was:" in message:
+        return "AssertionException"
+    return first or "<no type>"
+
+
+DOTNET_TOOLS = LOOP / "dotnet"
+DOTNET_BUILD = DOTNET_TOOLS / "build"
+UNITY_REFS = LOOP / "unity-refs"
+# dotnet の出力を英語に固定する。ビルドエラーは行の形で読むからだ。HOME に頼らず、
+# NuGet のキャッシュと CLI の状態は runner だけが入れる build の下に置く。
+# ノードとコンパイラのサーバを残さない。走行の後に runner のプロセスが残ると、
+# loop-project.sh の busy() が切り替えを拒む。
+DOTNET_ENV = {
+    "DOTNET_CLI_TELEMETRY_OPTOUT": "1", "DOTNET_NOLOGO": "1",
+    "DOTNET_SKIP_FIRST_TIME_EXPERIENCE": "1", "DOTNET_CLI_UI_LANGUAGE": "en",
+    "DOTNET_CLI_HOME": str(DOTNET_BUILD / "home"),
+    "NUGET_PACKAGES": str(DOTNET_BUILD / "packages"),
+    "MSBUILDDISABLENODEREUSE": "1",
+}
+
+
+def dotnet_projects() -> dict[Path, str]:
+    """ランナーが書く2つの csproj。柵の場所、凍結したフィードの版、Unity の参照から作る。
+
+    プロジェクトの根には置かない（36-dotnet.sh の冒頭を参照）。コードは
+    netstandard2.1（Unity が読める形）、テストは net8.0 の NUnit 3。Unity の参照が
+    あれば、コードはそれでコンパイルし、テストは実行のためにそれを出力に写す。
+    """
+    versions = dict(item.split("=", 1) for item in
+                    (DOTNET_TOOLS / "feed" / ".versions").read_text(encoding="utf-8").split())
+    refs = sorted((UNITY_REFS / "refs").glob("*.dll")) if (UNITY_REFS / "refs").is_dir() else []
+    if refs:
+        langversion = (UNITY_REFS / "langversion.txt").read_text(encoding="utf-8").strip()
+        defines = ";".join(line.strip() for line in
+                           (UNITY_REFS / "defines.txt").read_text(encoding="utf-8").splitlines()
+                           if line.strip())
+    else:
+        langversion, defines = "9.0", ""
+
+    def references(private: bool) -> str:
+        return "".join(
+            f'\n    <Reference Include="{dll.stem}"><HintPath>{dll}</HintPath>'
+            f'<Private>{str(private).lower()}</Private></Reference>' for dll in refs)
+
+    common = f"""    <LangVersion>{langversion}</LangVersion>
+    <DefineConstants>$(DefineConstants);{defines}</DefineConstants>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <NoWarn>$(NoWarn);CS0414;CS0649;CS0169;CS0436;MSB3277</NoWarn>"""
+    code = f"""<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>netstandard2.1</TargetFramework>
+    <AssemblyName>LoopCode</AssemblyName>
+{common}
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="{SRC}/**/*.cs" />
+  </ItemGroup>
+  <ItemGroup>{references(False)}
+  </ItemGroup>
+</Project>
+"""
+    tests = f"""<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <AssemblyName>LoopTests</AssemblyName>
+    <IsPackable>false</IsPackable>
+{common}
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="{TESTS}/**/*.cs" />
+    <ProjectReference Include="../code/Code.csproj" />
+    <PackageReference Include="NUnit" Version="{versions['NUnit']}" />
+    <PackageReference Include="NUnit3TestAdapter" Version="{versions['NUnit3TestAdapter']}" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="{versions['Microsoft.NET.Test.Sdk']}" />
+    <PackageReference Include="JunitXml.TestLogger" Version="{versions['JunitXml.TestLogger']}" />
+  </ItemGroup>
+  <ItemGroup>{references(True)}
+  </ItemGroup>
+</Project>
+"""
+    return {DOTNET_BUILD / "code" / "Code.csproj": code,
+            DOTNET_BUILD / "tests" / "Tests.csproj": tests}
+
+
+def prepare_dotnet() -> str | None:
+    """csproj を書き、中身が変わったときだけ restore する。できなければ理由を返す。
+
+    restore はフィードだけから行う（nuget.config がほかのソースを消す）。csproj が
+    変わるのは、柵の場所か Unity の参照かフィードの版が変わったときだけだ。
+    """
+    try:
+        projects = dotnet_projects()
+    except (OSError, KeyError, ValueError) as e:
+        return f"cannot write the C# projects: {e}"
+    changed = False
+    for path, text in projects.items():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if not path.exists() or path.read_text(encoding="utf-8") != text:
+            path.write_text(text, encoding="utf-8")
+            changed = True
+    tests = DOTNET_BUILD / "tests" / "Tests.csproj"
+    if changed or not (tests.parent / "obj" / "project.assets.json").exists():
+        try:
+            proc = run([str(LANGUAGE["test_runner"]), "restore", str(tests),
+                        "--configfile", str(DOTNET_TOOLS / "nuget.config")],
+                       env=DOTNET_ENV, timeout=TIMEOUTS["test"])
+        except subprocess.TimeoutExpired:
+            return f"dotnet restore did not finish within {TIMEOUTS['test']}s"
+        if proc.returncode != 0:
+            return (proc.stdout + proc.stderr)[-3000:]
+    return None
+
+
+# ビルドエラーの1行。MSBuild は末尾に csproj のパスを [] で付ける。
+DOTNET_ERROR = re.compile(r"^\s*(/[^(\n]+\.cs)\(\d+,\d+\): error (CS\d+): (.*?)(?: \[[^\]\n]*\])?\s*$",
+                          re.MULTILINE)
+
+
+def dotnet_build_failure(output: str) -> TestRun | None:
+    """ビルドが通らず、レポートが書かれなかった走行を読む。エラーの行が無ければ None。
+
+    テストファイルのエラーは、vitest の変換エラーと同じ「コンパイルできなかった」に
+    する。TEST_WRITE はそれを見てソルバーに書き直しを頼む。C# は1つのファイルが
+    壊れるとテストのアセンブリ全体がビルドできないので、どのテストも走らない。
+    コードの側のエラーは別の名前にする。R2 がそのまま拒む。
+    """
+    errors = DOTNET_ERROR.findall(output)
+    if not errors:
+        return None
+    kinds: list[str] = []
+    lines: list[str] = []
+    files: list[str] = []
+    for path, code, text in errors:
+        try:
+            rel = Path(path).relative_to(PROJECT).as_posix()
+        except ValueError:
+            rel = path
+        kind = (f"<did not compile: {rel}>" if in_layout(rel, "tests")
+                else f"<build failed: {rel}>")
+        if kind not in kinds:
+            kinds.append(kind)
+            files.append(rel)
+        line = f"{rel}: error {code}: {text}"
+        if line not in lines:
+            lines.append(line)
+    return TestRun(0, 0, len(kinds), 0, kinds, [], chr(10).join(lines),
+                   failed_files=files)
+
+
+def csharp_test_classes(files_test: list[str]) -> list[str]:
+    """テストファイルが持つクラスの名前。ファイル名と同じにする決まり（layout_note）。"""
+    return [Path(f).stem for f in files_test if f.endswith(".cs")]
+
+
+def test_owner(name: str) -> str:
+    """junit の classname を、ステップのテストファイルと突き合わせる形にする。
+
+    NUnit の classname は "名前空間.クラス" で、クラスはファイル名と同じだ。
+    ほかの言語は classname をそのまま使う。
+    """
+    return name.rsplit(".", 1)[-1] if LANGUAGE["name"] == "csharp" else name
+
+
 def test_argv(files_test: list[str], xml_path: Path) -> tuple[list[str], dict[str, str]]:
     """判定を出すコマンドと、それに要る環境変数。
 
     走らせる部分と分けてあるので、テストは実行せずに何が実行されるかを確かめ
     られる。agent_command があるのと同じ理由だ。
     """
-    if LANGUAGE["source_suffix"] == ".ts":
+    if LANGUAGE["name"] == "csharp":
+        # テストのアセンブリは柵のテストの場所を全部コンパイルする。ステップの
+        # テストだけを走らせるのは、クラスの名前での絞り込みだ。前後の "." は、
+        # BoardTests が BoardTestsExtra に当たらないようにするため。
+        argv = [str(LANGUAGE["test_runner"]), "test",
+                str(DOTNET_BUILD / "tests" / "Tests.csproj"),
+                "--no-restore", "-nologo", "-p:UseSharedCompilation=false",
+                # 既定の TestResults/ は作業ツリーに書かれ、assert_touched に引っかかる。
+                "--results-directory", str(xml_path.with_suffix("")),
+                "--logger", f"junit;LogFilePath={xml_path}"]
+        classes = csharp_test_classes(files_test)
+        if classes:
+            argv += ["--filter", "|".join(f"FullyQualifiedName~.{c}." for c in classes)]
+        return argv, dict(DOTNET_ENV)
+    if LANGUAGE["name"] == "typescript":
         # `watch` ではなく `run`。vitest の既定は対話的で、永遠に止まったランナーは
         # 終わらないステップとまったく同じに見える。
         # 実行ファイルは npx ではなく、凍結したツールチェーンから絶対パスで取る。
         # npx は取ってくることも厭わないからだ。
-        return ([str(VITEST), "run", *files_test,
+        return ([str(LANGUAGE["test_runner"]), "run", *files_test,
                  "--reporter=junit", f"--outputFile={xml_path}"],
                 {"CI": "1", "NO_COLOR": "1"})
     # バイトコードは作らない。.pyc は書いた者の所有になり、tests/ の下に solver
     # 所有のものがあると、ランナーはそこのモードを当て直せなくなる。
-    return ([str(PYTEST), *files_test, *PYTEST_ARGS, "--junitxml", str(xml_path)],
+    return ([str(LANGUAGE["test_runner"]), *files_test, *PYTEST_ARGS,
+             "--junitxml", str(xml_path)],
             {"PYTHONDONTWRITEBYTECODE": "1"})
 
 
@@ -675,22 +1154,33 @@ def pytest_run(tag: str, files_test: list[str]) -> TestRun:
     落ちることを確かめることで、スイートの残りまで数えると R1 が意味を失う。
     VERIFY には tests/ 全体を渡す。その仕事はもう半分、これらがいま通り、かつ
     通っていたものが1つも落ちていないことを確かめることだからだ。"""
+    report_now("runner", tag.split("-")[0])
     STATE.mkdir(parents=True, exist_ok=True)
     xml_path = STATE / f"pytest-{tag}.xml"
     argv, env = test_argv(files_test, xml_path)
     # vitest は既にあるレポートに追記するので、前の試行の古いレポートが今回の
     # 分と一緒に数えられてしまう。
     xml_path.unlink(missing_ok=True)
+    csharp = LANGUAGE["name"] == "csharp"
+    if csharp:
+        problem = prepare_dotnet()
+        if problem:
+            return TestRun(0, 0, 1, 0, ["<dotnet restore failed>"], [], problem)
+    # C# は走らせる前にビルドする。Unity のプロジェクトでは数十秒かかる。
+    seconds = max(TIMEOUTS["test"], LANGUAGE.get("min_test_timeout", 0))
     try:
-        proc = run(argv, env=env, timeout=TIMEOUTS["test"])
+        proc = run(argv, env=env, timeout=seconds)
     except subprocess.TimeoutExpired:
         # 失敗ではなくエラーとして報告する。実際そうで、スイートは判定をまったく
         # 出していない。RED_GATE では R2 がそのまま拒み、VERIFY は失敗した試行と
         # 数えて、その理由をソルバーに伝える。
-        seconds = TIMEOUTS["test"]
         return TestRun(0, 0, 1, 0, [f"<timeout: no verdict after {seconds}s>"], [],
                        f"The test run did not terminate within {seconds}s. The most "
                        f"likely cause is a loop in the implementation that never exits.")
+    if csharp and not xml_path.exists():
+        failed = dotnet_build_failure(proc.stdout + proc.stderr)
+        if failed:
+            return failed
     return parse_junit(xml_path, proc.stdout + proc.stderr)
 
 
@@ -881,15 +1371,19 @@ def record_usage(who: str, phase: str, data: dict) -> None:
            is_error=data.get("is_error"))
 
 
-def run_agent(who: str, phase: str, invoke) -> subprocess.CompletedProcess:
+def run_agent(who: str, phase: str, invoke, detail: str = "") -> subprocess.CompletedProcess:
     """エージェントを1回呼ぶ。枠が無くて失敗したときだけ、待ってやり直す。
 
     それ以外の結果は、成功も失敗もそのまま返す。判断は呼び出し側に残す。
     TimeoutExpired もそのまま上に通す。出力が JSON なら、消費量を台帳に残し、
-    結果の文だけを返す。
+    結果の文だけを返す。detail はいまの作業の説明にだけ使う（report_now）。
     """
     for round_no in range(1, QUOTA["waits"] + 2):
-        proc, data = unwrap_result(invoke())
+        report_now(who, phase, detail)
+        try:
+            proc, data = unwrap_result(invoke())
+        finally:
+            report_now("runner", "check")
         if data is not None:
             record_usage(who, phase, data)
         kind = quota_problem(proc.stdout + proc.stderr) if proc.returncode != 0 else None
@@ -899,6 +1393,7 @@ def run_agent(who: str, phase: str, invoke) -> subprocess.CompletedProcess:
             break
         ledger("QUOTA_WAIT", who=who, phase=phase, kind=kind, round=round_no,
                of=QUOTA["waits"], seconds=QUOTA["wait_seconds"])
+        report_now("runner", "quota")
         time.sleep(QUOTA["wait_seconds"])
     ledger("QUOTA_EXHAUSTED", who=who, phase=phase, kind=kind)
     raise QuotaExhausted(who, phase, kind)
@@ -957,8 +1452,21 @@ def call_solver(phase: str, brief: str, backend: str | None = None) -> str:
 # --------------------------------------------------------------------------
 
 
-def dep_contract_lines(step: dict) -> list[str]:
+def existing_requirements(step: dict, provided: set[str]) -> list[str]:
+    """requires に書かれた名前のうち、依存先ではなく既存のコードが宣言するものの行。
+
+    行は計画の requires の文字列ではなく、HEAD から読んだものを渡す。プランナーが
+    写し間違えても、ソルバーには実際にある署名が届く。
+    """
+    wanted = {declared_name(r) for r in step["contracts"].get("requires", [])} - provided
+    if not wanted:
+        return []
+    return [line for line in existing_contracts() if declared_name(line) in wanted]
+
+
+def dep_contract_lines(step: dict, *, existing: bool = True) -> list[str]:
     """このステップが依存するすべてのステップの provides の行を、平らに並べる。
+    `existing` なら、requires が名指しする既存の宣言の行も足す。
 
     dep_contracts は同じものをブリーフ用に描く。そこではステップごとのまとまりに
     価値がある。スタブの生成に要るのは名前と置き場だけなので、行で渡す。
@@ -975,6 +1483,8 @@ def dep_contract_lines(step: dict) -> list[str]:
         provides = value.get("provides") if isinstance(value, dict) else value
         if isinstance(provides, list):
             lines.extend(str(p) for p in provides)
+    if existing:
+        lines += existing_requirements(step, {declared_name(line) for line in lines})
     return lines
 
 
@@ -985,6 +1495,10 @@ def dep_contracts(step: dict) -> str:
         if not path.exists():
             raise Halt("PLAN_LOAD", f"step {step['id']} depends on {dep}, which has no contract yet")
         parts.append(f"From {dep}:\n{path.read_text(encoding='utf-8')}")
+    found = existing_requirements(step, {declared_name(line) for line
+                                         in dep_contract_lines(step, existing=False)})
+    if found:
+        parts.append("From the code already in the repository:\n" + "\n".join(found))
     return "\n\n".join(parts) if parts else "(none -- this step depends on nothing)"
 
 
@@ -1069,16 +1583,9 @@ def naming_note() -> str:
     ファイルはコンパイルできず、vitest はそれをファイル名を持つ合成の失敗テスト
     1件として報告した。ランナーは「1件、期待は12件」と見て、構文エラーを
     プランナーに送るところだった。報告の側も直してあるが、ブリーフで取り除ける
-    罠は取り除いたほうがよい。
+    罠は取り除いたほうがよい。文はその罠を持つ言語の `naming_note` にある。
     """
-    if LANGUAGE["source_suffix"] != ".ts":
-        return ""
-    return """
-Name your tests with DOUBLE quotes or backticks, never single quotes. The
-criteria above are prose and contain apostrophes ("the result's resource"),
-and one of those inside a single-quoted name ends the string: the file stops
-compiling and not one of your tests runs.
-"""
+    return LANGUAGE["naming_note"]
 
 
 # --------------------------------------------------------------------------
@@ -1291,14 +1798,234 @@ def parse_contracts(lines: list[str]) -> list[dict] | None:
     return declarations
 
 
-def generate_stub(step: dict, requires: list[str]) -> dict[str, str] | None:
+# C# のスタブの本体。番兵の値は使わない。bool には誤った値が無く、文字列を
+# キャストして押し込む手は InvalidCastException になる（実測）。どの型にも同じ
+# 1行で済み、R5 はこの印の付いた例外だけを赤と認める（csharp_failure_kind）。
+CSHARP_STUB_EXPRESSION = 'throw new System.NotImplementedException("__stub__")'
+CSHARP_STUB_BODY = "{ " + CSHARP_STUB_EXPRESSION + "; }"
+CSHARP_STUB_MARK = re.compile(r"^\s*System\.NotImplementedException\s*:\s*__stub__\s*$")
+CSHARP_ACCESS = re.compile(r"^(?:public|internal|protected|private)\b")
+CSHARP_MODIFIERS = r"(?:(?:public|internal|protected|private|static|abstract|sealed|partial|readonly|virtual|override|new)\s+)*"
+CSHARP_TYPE_LINE = re.compile(
+    rf"^(?P<mods>{CSHARP_MODIFIERS})(?P<kind>class|struct|interface|enum)\s+(?P<name>[A-Za-z_]\w*)"
+    r"(?P<bases>\s*:\s*[^{]+?)?\s*(?:\{(?P<body>.*)\})?\s*;?\s*$")
+CSHARP_CTOR_LINE = re.compile(
+    rf"^(?P<mods>{CSHARP_MODIFIERS})(?P<type>[A-Za-z_]\w*)\.(?P=type)\s*\((?P<params>.*)\)\s*;?\s*$")
+CSHARP_MEMBER_LINE = re.compile(
+    rf"^(?P<mods>{CSHARP_MODIFIERS})(?P<ret>\S.*?)\s+(?P<type>[A-Za-z_]\w*)\.(?P<name>[A-Za-z_]\w*)"
+    r"\s*(?P<rest>\(.*\)|\{.*\})?\s*;?\s*$")
+# 契約に現れたら `using UnityEngine;` を足す型。全部は知らないので、よく出る
+# ものだけを挙げる。無い型がコンパイルで落ちれば、RED_GATE がそのまま止める。
+CSHARP_UNITY_TYPES = re.compile(
+    r"\b(?:Vector[234](?:Int)?|Quaternion|Color(?:32)?|Mathf|Rect(?:Int)?|Bounds(?:Int)?|"
+    r"Matrix4x4|GameObject|Transform|MonoBehaviour|ScriptableObject|Sprite|Texture2D|"
+    r"AudioClip|KeyCode|Ray|RaycastHit)\b")
+
+
+def csharp_members(body: str) -> list[str]:
+    """型の本体をメンバーに分ける。深さ 0 の `;` と、深さ 0 に戻る `}` で切る。
+
+    `int Height { get; set; } int Score(Board b);` のように、プロパティの `}` の
+    後に `;` が無くても2つに分ける。
+    """
+    members, current, depth = [], [], 0
+    for ch in body:
+        current.append(ch)
+        if ch in "({[<":
+            depth += 1
+        elif ch in ")]>":
+            depth -= 1
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                members.append("".join(current))
+                current = []
+                continue
+        if ch == ";" and depth == 0:
+            members.append("".join(current)[:-1])
+            current = []
+    members.append("".join(current))
+    return [m.strip() for m in members if m.strip()]
+
+
+def csharp_stub_member(member: str) -> str:
+    """クラスか構造体のメンバー1つを、スタブの宣言にする。"""
+    if not CSHARP_ACCESS.match(member):
+        member = "public " + member
+    if "(" in member and member.rstrip().endswith(")") and "=>" not in member:
+        return f"{member} {CSHARP_STUB_BODY}"       # メソッドとコンストラクタ
+    if member.rstrip().endswith("}"):
+        return member                                # 自動プロパティ
+    return member + ";"                              # フィールド
+
+
+def csharp_namespace(path: str) -> str | None:
+    """新しいファイルの名前空間。柵の中のフォルダから作る（layout_note の決まり）。
+
+    根にあれば空文字（グローバル名前空間）。識別子にならないフォルダ名なら None。
+    """
+    prefix = LAYOUT["src"] + "/"
+    if not path.startswith(prefix):
+        return None
+    folders = path[len(prefix):].split("/")[:-1]
+    if not all(re.fullmatch(r"[A-Za-z_]\w*", f) for f in folders):
+        return None
+    return ".".join(folders)
+
+
+def generate_csharp_stub(step: dict, requires: list[str],
+                         originals: dict[str, str]) -> dict[str, str] | None:
+    """C# のスタブを契約から書く。None ならソルバーに頼む。
+
+    メソッドとコンストラクタの本体は CSHARP_STUB_BODY。フィールドと自動プロパティは
+    宣言のまま残す（値を持つだけで、振る舞いが無い）。既存のファイルは
+    csharp_merge_stub がメンバーの本体だけを差し替える。読めない行が1つでもあれば
+    None。
+    """
+    types: dict[str, dict] = {}     # 型の名前 -> {path, head, members, specs}
+    order: list[str] = []
+    for line in step["contracts"]["provides"]:
+        match = re.match(r"^([\w./-]+\.cs)\s*:\s*(.+)$",
+                         line.split(" -- ")[0].split(chr(8212))[0].strip())
+        if not match:
+            return None
+        path, decl = match.group(1), match.group(2).strip()
+        if path not in step["files_write"]:
+            return None
+        declared = CSHARP_TYPE_LINE.match(decl)
+        if declared:
+            name, kind = declared.group("name"), declared.group("kind")
+            mods = declared.group("mods").strip()
+            if not CSHARP_ACCESS.match(mods):
+                mods = ("public " + mods).strip()
+            entry = types.setdefault(name, {"path": path, "members": [], "specs": []})
+            if entry["path"] != path or "head" in entry:
+                return None
+            entry["head"] = f"{mods} {kind} {name}{declared.group('bases') or ''}".rstrip()
+            entry["kind"] = kind
+            entry["bases"] = declared.group("bases") or ""
+            body = entry["body"] = declared.group("body") or ""
+            if kind == "enum":
+                entry["members"].append(body.strip())
+            elif kind == "interface":
+                entry["members"] += [m if m.endswith("}") else m + ";"
+                                     for m in csharp_members(body)]
+            else:
+                entry["members"] += [csharp_stub_member(m) for m in csharp_members(body)]
+                entry["specs"] += csharp_members(body)
+            if name not in order:
+                order.append(name)
+            continue
+        ctor = CSHARP_CTOR_LINE.match(decl)
+        member = CSHARP_MEMBER_LINE.match(decl) if not ctor else None
+        if ctor:
+            owner = ctor.group("type")
+            text = f"{ctor.group('mods')}{owner}({ctor.group('params')})"
+        elif member:
+            owner = member.group("type")
+            text = (f"{member.group('mods')}{member.group('ret')} {member.group('name')}"
+                    f"{member.group('rest') or ''}")
+        else:
+            return None
+        entry = types.setdefault(owner, {"path": path, "members": [], "specs": []})
+        if entry["path"] != path:
+            return None
+        entry["members"].append(csharp_stub_member(text.strip()))
+        entry["specs"].append(text.strip())
+        if owner not in order:
+            order.append(owner)
+
+    if {t["path"] for t in types.values()} != set(step["files_write"]):
+        return None
+
+    # 型の宣言の行が無いメンバーは、普通のクラスに入れる。既存のファイルでは、
+    # 型の行があったか（typed）で、型の頭を確かめるかどうかを分ける。
+    for name, entry in types.items():
+        entry["name"] = name
+        entry["typed"] = "head" in entry
+        entry.setdefault("head", "public class " + name)
+        entry.setdefault("kind", "class")
+
+    # 名前空間。既存のファイルは今の名前空間を保つ（layout_note）。requires の行は
+    # `-- namespace X` を持てばそれ、無ければ作業ツリーのファイル、それも無ければ
+    # フォルダから決める。前のステップが書き換えた既存のファイルの行は、名前空間を
+    # 持たないが作業ツリーにある。
+    namespaces: dict[str, str] = {}
+    known: dict[str, str] = {}      # 型の名前 -> 名前空間。既存のファイルの using に使う
+    for path in step["files_write"]:
+        if path in originals:
+            outline = csharp_outline(originals[path])
+            ns = outline["types"][0]["namespace"] if outline and outline["types"] else ""
+        else:
+            ns = csharp_namespace(path)
+            if ns is None:
+                return None
+        namespaces[path] = ns
+        known.update({name: ns for name in order if types[name]["path"] == path})
+    for line in requires:
+        m = re.match(r"^([\w./-]+\.cs)\s*:", line.strip())
+        if not m:
+            continue
+        stated = re.search(r" -- namespace ([\w.]+)\s*$", line)
+        if stated:
+            ns = stated.group(1)
+        elif m.group(1) in namespaces:
+            ns = namespaces[m.group(1)]
+        else:
+            ns = csharp_file_namespace(m.group(1))
+        namespaces.setdefault(m.group(1), ns)
+        known.setdefault(declared_name(line).split(".")[0], ns)
+
+    unity = (UNITY_REFS / "refs").is_dir() and any(
+        CSHARP_UNITY_TYPES.search(line) for line in step["contracts"]["provides"] + requires)
+    files: dict[str, str] = {}
+    for path in step["files_write"]:
+        if path in originals:
+            merged = csharp_merge_stub(
+                originals[path], [types[name] for name in order if types[name]["path"] == path],
+                known, (UNITY_REFS / "refs").is_dir())
+            if merged is None:
+                return None
+            files[path] = merged
+            continue
+        own = namespaces.get(path, "")
+        usings = ["System", "System.Collections.Generic", "System.Linq"] \
+            + (["UnityEngine"] if unity else []) \
+            + sorted({ns for ns in namespaces.values() if ns and ns != own})
+        blocks = []
+        for name in order:
+            entry = types[name]
+            if entry["path"] != path:
+                continue
+            separator = ",\n" if entry["kind"] == "enum" else "\n"
+            inner = separator.join(f"    {m}" for m in entry["members"] if m)
+            blocks.append(f"{entry['head']}\n{{\n{inner}\n}}")
+        text = "\n\n".join(blocks)
+        if own:
+            text = f"namespace {own}\n{{\n" + "\n".join(
+                f"    {line}" if line else "" for line in text.splitlines()) + "\n}"
+        files[path] = "".join(f"using {u};\n" for u in usings) + "\n" + text + "\n"
+    return files
+
+
+def generate_stub(step: dict, requires: list[str],
+                  originals: dict[str, str] | None = None) -> dict[str, str] | None:
     """スタブ全体を返す。None なら、やはりソルバーに頼む。
 
     None は恥ずべき失敗ではない。これが言語の2つ目の、より劣った構文解析器に
     ならずに済むのは None のおかげだ。見慣れないものは、前から扱っていた経路に
     戻す。
+
+    `originals` は、files_write のうち最後のコミットにあるファイルの中身だ。
+    そのファイルでは、provides の名前の宣言だけをスタブに差し替え、ほかは残す。
+    丸ごと書き直すと、ステップに関係の無い関数まで消える。
     """
-    if LANGUAGE["source_suffix"] != ".ts":
+    originals = originals or {}
+    if LANGUAGE["name"] == "csharp":
+        return generate_csharp_stub(step, requires, originals)
+    if LANGUAGE["name"] != "typescript":
         return None   # Python はいまも頼む。まだこれを要したことが無い
 
     declarations = parse_contracts(step["contracts"]["provides"])
@@ -1316,7 +2043,10 @@ def generate_stub(step: dict, requires: list[str]) -> dict[str, str] | None:
     # アサーションの失敗ではなく TypeError を受け取る。RED_GATE はそれをそのまま
     # 拒む（R2/R5）。ブリーフはずっとそう言っていた。テストは確かめる前に値を
     # 分解するので、番兵の値は署名が述べる「形」を持たなければならない。
-    inherited = parse_contracts(requires) or []
+    # 1行ずつ読む。既存のコードの行には、クラスやアロー関数の const のように
+    # この形に合わないものがある。まとめて読むと、その1行のせいで依存先の型が
+    # すべて消える。
+    inherited = [d for line in requires for d in (parse_contracts([line]) or [])]
     keys = literal_keys(step)
     types = ts_type_values(inherited + declarations, keys)
     # よそから import する名前の置き場。書き出すファイルがそれを言えるようにする。
@@ -1331,6 +2061,7 @@ def generate_stub(step: dict, requires: list[str]) -> dict[str, str] | None:
         mine = [d for d in declarations if d["file"] == path]
         declared_here = {d["name"] for d in mine}
         body: list[str] = []
+        pieces: dict[str, str] = {}
         needed: dict[str, set] = {}
 
         for d in mine:
@@ -1340,37 +2071,51 @@ def generate_stub(step: dict, requires: list[str]) -> dict[str, str] | None:
                 # 読みにくい。
                 line = f"export {d['kind']} {d['name']}{d['rest']}".rstrip().rstrip(";")
                 body.append(line if line.endswith("}") else line + ";")
-                continue
-            if d["kind"] == "const":
+            elif d["kind"] == "const":
                 kind = d["rest"].split(":", 1)[-1].strip() if ":" in d["rest"] else "unknown"
                 body.append(f"export const {d['name']}: {kind} = "
                             f"{sentinel_for(kind, types, keys)};")
-                continue
-            signature = TS_SIGNATURE.match(d["rest"].strip())
-            if signature is None:
+            else:
+                signature = TS_SIGNATURE.match(d["rest"].strip())
+                if signature is None:
+                    return None
+                returns = signature.group("returns")
+                value = sentinel_for(returns, types, keys)
+                body.append(
+                    f"export function {d['name']}({signature.group('args')}): {returns} {{"
+                    + (f"{chr(10)}  return {value};{chr(10)}}}" if value else f"{chr(10)}}}"))
+            pieces[d["name"]] = body[-1]
+
+        # 既存のファイルでは、差し替えなかった部分がすでに宣言や import をしている
+        # 名前に import を足さない。同じ名前を2度 import すると、esbuild はファイル
+        # ごと拒む。
+        rest = ""
+        if path in originals:
+            merged = ts_merge_stub(originals[path], pieces)
+            if merged is None:
                 return None
-            returns = signature.group("returns")
-            value = sentinel_for(returns, types, keys)
-            body.append(
-                f"export function {d['name']}({signature.group('args')}): {returns} {{"
-                + (f"{chr(10)}  return {value};{chr(10)}}}" if value else f"{chr(10)}}}"))
+            merged_text, rest = merged
+
+        def known(name: str) -> bool:
+            return bool(re.search(rf"(?<![\w$]){re.escape(name)}(?![\w$])", rest))
 
         # import: このファイルが口にし、別のファイルが宣言している名前すべて。
         text = chr(10).join(body)
         for name, source in elsewhere.items():
-            if name in declared_here or not re.search(rf"(?<!\w){name}(?!\w)", text):
+            if name in declared_here or known(name) \
+                    or not re.search(rf"(?<!\w){name}(?!\w)", text):
                 continue
             needed.setdefault(relative_module(path, source), set()).add(name)
         for d in declarations:
-            if d["file"] == path or d["name"] in declared_here:
+            if d["file"] == path or d["name"] in declared_here or known(d["name"]):
                 continue
             if re.search(rf"(?<!\w){d['name']}(?!\w)", text):
                 needed.setdefault(relative_module(path, d["file"]), set()).add(d["name"])
 
         imports = [f'import {{ {", ".join(sorted(names))} }} from "{module}";'
                    for module, names in sorted(needed.items())]
-        files[path] = (chr(10).join(imports) + chr(10) * 2 if imports else "") \
-            + text + chr(10)
+        header = chr(10).join(imports) + chr(10) * 2 if imports else ""
+        files[path] = header + (merged_text if path in originals else text + chr(10))
     return files
 
 
@@ -1381,11 +2126,62 @@ def relative_module(importer: str, target: str) -> str:
     return rel if rel.startswith(".") else "./" + rel
 
 
-def brief_stub(step: dict) -> str:
+def existing_files_section(existing: list[str]) -> str:
+    """スタブのブリーフの、既存のファイルについての節。無ければ空。"""
+    if not existing:
+        return ""
+    return f"""
+# These files already exist
+{chr(10).join(existing)}
+
+They hold code that is not yours: other functions, classes, constants, imports
+and comments. Read each one before you write to it. Change only the
+declarations of the names under "Signatures to provide": replace each one with
+its stub as described below, keeping the signature given above. A name the file
+does not have yet goes at the end of the file. Leave every other line exactly
+as it is. Do not rewrite the file from scratch.
+
+The runner compares everything else in these files with the last commit, and a
+stub that changed or removed anything else stops the step. Adding an import
+that a new signature needs is allowed.
+"""
+
+
+def brief_stub(step: dict, existing: list[str] | None = None) -> str:
     # 署名だけを渡す。goal も acceptance も invariants も渡さない。形ではなく意味を
     # 運ぶものがここにあると、それは忠実に実装され、それが覆う条件は一度も落ちる
     # のを見られないまま RED_GATE を通る（2026-08-18 にステップ S1 で痛い目を見て
     # 分かった）。
+    if LANGUAGE["name"] == "csharp":
+        # C# は番兵の値を使わない（CSHARP_STUB_BODY）。下の本文の半分は、値を
+        # 選ぶことの難しさについてで、ここでは要らない。
+        return f"""Create stubs only.
+
+# Signatures to provide
+{render_provides(step)}
+
+# Files you may create or modify
+{chr(10).join(step["files_write"])}
+{existing_files_section(existing or [])}
+Write each declaration with exactly the signature above. The body of every
+method, constructor and property accessor you write is exactly this one
+statement and nothing else:
+
+    {CSHARP_STUB_BODY}
+
+Keep the message "__stub__" exactly. The runner accepts a test that fails on
+this exception as a test that fails against the stub; any other exception --
+including a NotImplementedException with another message -- rejects the step.
+
+Do not return values. C# has no wrong value for a bool, and forcing one in
+with a cast throws InvalidCastException, which the runner rejects. Fields and
+auto-properties (`{{ get; set; }}`) stay as declared: they hold values and have
+no behaviour to stub.
+
+Put each type in the namespace that follows its folder under {LAYOUT["src"]}/,
+and add the `using` directives the signatures need. Implement no behaviour
+whatsoever.
+"""
     return f"""Create stubs only.
 
 # Signatures to provide
@@ -1393,7 +2189,7 @@ def brief_stub(step: dict) -> str:
 
 # Files you may create or modify
 {chr(10).join(step["files_write"])}
-
+{existing_files_section(existing or [])}
 Each function must have exactly the signature above and must return a
 CONSPICUOUS SENTINEL: a value of the declared return type that no correct
 implementation would produce for any input. For a str return a marker such as
@@ -1625,9 +2421,9 @@ def escalate(step: dict, halt: Halt, attempt: int, run_: TestRun | None) -> None
 # 計画のリンタ（RUNNER_SPEC 8 章）
 # --------------------------------------------------------------------------
 
-# 契約の行が宣言するものの名前。言語ごとの形を持ち、そうでなければならない
-# 理由は、L3 が名前を比べるからだ。「このステップが依存するものの中に、求める
-# ものを提供するものはあるか」。
+# 契約の行が宣言するものの名前。言語ごとの形（LANGUAGES の `provides_pattern`）を
+# 持ち、そうでなければならない理由は、L3 が名前を比べるからだ。「このステップが
+# 依存するものの中に、求めるものを提供するものはあるか」。
 #
 # Python では def と class の両方を見る。データモデルを導入するステップは
 # `class GameState(...)` を提供し、`def` だけを照合すると、後のステップの
@@ -1643,11 +2439,6 @@ def escalate(step: dict, halt: Halt, attempt: int, run_: TestRun | None) -> None
 #
 # Python の文法で書いた規則が、有料の試行を使わせたのは、L14 の語彙、L15 の
 # 名前の境界に続いて3度目だ。規則は一度も誤っていなかった。誤っていたのは表現だ。
-PROVIDES_PATTERNS = {
-    ".py": re.compile(r"(?:def|class)" + chr(92) + r"s+([A-Za-z_]" + chr(92) + r"w*)"),
-    ".ts": re.compile(
-        r"(?:function|class|interface|type|enum|const|let)" + chr(92) + r"s+([A-Za-z_]" + chr(92) + r"w*)"),
-}
 
 
 def declared_name(line: str) -> str:
@@ -1657,9 +2448,11 @@ def declared_name(line: str) -> str:
     中身だ。合わない行を `provides` から捨てて `requires` には残すと、規則が
     厳しくなるのではなく、答えようのないものになる。
     """
-    pattern = PROVIDES_PATTERNS.get(LANGUAGE["source_suffix"])
-    match = pattern.search(line) if pattern else None
-    return match.group(1) if match else line.strip()
+    match = LANGUAGE["provides_pattern"].search(line)
+    if not match:
+        return line.strip()
+    # C# の型とメンバーのように、組が2つある言語もある。当たった方を取る。
+    return next(group for group in match.groups() if group)
 # L8 の「具体的」: 数、引用符で囲んだリテラル、例外の型。形容詞だけでできた
 # 受け入れ条件は、2人が同じように書けるテストにならない。
 #
@@ -1697,11 +2490,12 @@ def modules_of(files_write: list[str]) -> list[str]:
     suffix = LANGUAGE["source_suffix"]
     separator = LANGUAGE["module_separator"]
     index = LANGUAGE["index_name"]
+    prefix = LAYOUT["src"] + "/"
     names = []
     for f in files_write:
-        if not f.startswith("src/") or not f.endswith(suffix):
+        if not f.startswith(prefix) or not f.endswith(suffix):
             continue
-        parts = f[len("src/"):-len(suffix)].split("/")
+        parts = f[len(prefix):-len(suffix)].split("/")
         if parts[-1] == index:
             parts = parts[:-1]
         if parts:
@@ -1767,6 +2561,14 @@ def validate_plan(tasks: dict) -> list[str]:
         for s in steps
     }
 
+    # L3 で認める既存の宣言。計画のどれかのステップが同じ名前を提供するなら、それは
+    # 書き換えなので、既存のものとしては数えない。求める側はそのステップに依存する。
+    # 走らせる途中では HEAD に前のステップのコードも入るので、それも同じ理由で
+    # 外れる。依存していないステップの提供物が、途中から認められることは無い。
+    # git を呼ぶので、依存先で足りないときだけ読む。
+    planned = set().union(*provides_by_step.values())
+    existing: set[str] | None = None
+
     for s in steps:
         sid = s["id"]
 
@@ -1776,13 +2578,19 @@ def validate_plan(tasks: dict) -> list[str]:
                 problems.append(f"L2: step {sid} depends on {dep}, which is not an earlier step")
         seen.add(sid)
 
-        # L3 -- 求めるものはすべて、依存先のどれかが提供している
+        # L3 -- 求めるものはすべて、依存先のどれかが提供しているか、既存のコードが
+        # 宣言している
         available = set().union(*(provides_by_step[d] for d in s["depends_on"] if d in provides_by_step)) \
             if s["depends_on"] else set()
         for req in s["contracts"].get("requires", []):
             name = declared_name(req)
-            if name not in available:
-                problems.append(f"L3: step {sid} requires `{name}`, which no dependency provides")
+            if name in available:
+                continue
+            if existing is None:
+                existing = {declared_name(line) for line in existing_contracts()} - planned
+            if name not in existing:
+                problems.append(f"L3: step {sid} requires `{name}`, which no dependency "
+                                f"provides and the code already in the repository does not declare")
 
         # L5 -- ファイルは書くか試すかのどちらかで、両方にはならない
         overlap = set(s["files_write"]) & set(s["files_test"])
@@ -1802,12 +2610,14 @@ def validate_plan(tasks: dict) -> list[str]:
         # 最初の計画はふつうこれを誤る。「パッケージはリポジトリの根に置く」は
         # 普通の Python の配置だからだ。だからブリーフの助言ではなく、リンタが
         # 持つ規則にする。
+        #
+        # 2つのディレクトリの場所はプロジェクトごとに決まる（LAYOUT）。
         for f in s["files_write"]:
-            if not f.startswith("src/"):
-                problems.append(f"L12: step {sid} writes {f}, which is outside src/")
+            if not in_layout(f, "src"):
+                problems.append(f"L12: step {sid} writes {f}, which is outside {LAYOUT['src']}/")
         for f in s["files_test"]:
-            if not f.startswith("tests/"):
-                problems.append(f"L12: step {sid} tests {f}, which is outside tests/")
+            if not in_layout(f, "tests"):
+                problems.append(f"L12: step {sid} tests {f}, which is outside {LAYOUT['tests']}/")
 
         # L14 -- 契約は、渡すものの形を述べる
         #
@@ -1836,7 +2646,12 @@ def validate_plan(tasks: dict) -> list[str]:
         for provided in s["contracts"]["provides"]:
             shapeless = LANGUAGE["shapeless"]
             opener = LANGUAGE["shape_bracket"]
-            bare = sorted({name for name, bracket in ANNOTATION.findall(provided)
+            # 行頭のファイルのパスは型ではない（`List/Board.cs:` のような
+            # フォルダ名を、裸の List と読まない）。
+            signature_part = re.sub(r"^[\w./-]+\.\w+\s*:\s*", "", provided) \
+                if "shape_pattern" in LANGUAGE else provided
+            pattern = LANGUAGE.get("shape_pattern", ANNOTATION)
+            bare = sorted({name for name, bracket in pattern.findall(signature_part)
                            if name in shapeless and bracket != opener})
             if bare:
                 signature = provided.split(chr(8212))[0].strip()
@@ -2400,8 +3215,8 @@ only if the requirements rule out every answer.
 
 # Where the code goes -- not negotiable
 
-Every path in `files_write` starts with `src/`, and every path in `files_test`
-starts with `tests/`. Those two directories are the only ones the runner can
+Every path in `files_write` starts with `{SRC}/`, and every path in `files_test`
+starts with `{TESTS}/`. Those two directories are the only ones the runner can
 open and close for writing, so a plan that puts code anywhere else cannot be
 enforced and is rejected.
 
@@ -2413,7 +3228,8 @@ A plan that breaks any of these is rejected without being run, so check them
 yourself first.
 
     L2   a step may depend only on steps listed BEFORE it
-    L3   everything in contracts.requires is provided by something it depends on
+    L3   everything in contracts.requires is provided by something it depends on,
+         or is declared by the code already in the repository
     L4   no file appears in files_write of two different steps
     L5   files_write and files_test never overlap
     L6   every step has at least one "normal", one "boundary" and one "error"
@@ -2424,7 +3240,7 @@ yourself first.
          empty collection ([] {} ()), or True / False / None
     L10  the LAST step is kind "integration"
     L11  a "unit" step may not provide something that no later step requires
-    L12  files_write is under src/, files_test is under tests/
+    L12  files_write is under {SRC}/, files_test is under {TESTS}/
     L13  the FIRST step is kind "skeleton", and it is the only one
     L14  every type in contracts.provides states its contents: dict[str, Item],
          tuple[State, int], list[str]. A bare dict, list, tuple or set is
@@ -2517,11 +3333,1231 @@ making a plan this machine accepts is your problem, not the author's.
 # The requirements, written by the human
 {requirements}
 {environment_facts()}
-{BOOTSTRAP_RULES.replace('{LAYOUT_NOTE}', LANGUAGE['layout_note'])}
+{layout_text(BOOTSTRAP_RULES.replace('{LAYOUT_NOTE}', LANGUAGE['layout_note']))}
 {BOOTSTRAP_ESCALATE}
 {feedback_section(feedback)}
 Output nothing but the files. Do not restate the plan in your final message.
 """
+
+
+def python_signature(node: ast.FunctionDef | ast.AsyncFunctionDef) -> str:
+    prefix = "async def" if isinstance(node, ast.AsyncFunctionDef) else "def"
+    returns = f" -> {ast.unparse(node.returns)}" if node.returns else ""
+    return f"{prefix} {node.name}({ast.unparse(node.args)}){returns}"
+
+
+def python_declarations(text: str, module: str) -> list[str]:
+    """Python のモジュールの公開の宣言を、契約と同じ書式で1行ずつ返す。
+
+    本体は返さない。プランナーは条件を書く側で、実装を見て書いた条件は要件では
+    なく実装を述べる（BOOTSTRAP 1-1）。クラスは、呼び出し側が使うフィールドと
+    メソッドの署名を1行にまとめる。declared_name がクラスの名前を拾えるよう、
+    `class` を行の先に置く。構文の壊れたファイルは読めないので、何も返さない。
+    """
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return []
+    where = f" -- defined in {module}"
+    lines = []
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            if not node.name.startswith("_"):
+                lines.append(python_signature(node) + where)
+        elif isinstance(node, ast.ClassDef):
+            if node.name.startswith("_"):
+                continue
+            decorators = "".join(f"@{ast.unparse(d)} " for d in node.decorator_list)
+            bases = [ast.unparse(b) for b in node.bases + node.keywords]
+            head = f"{decorators}class {node.name}" + (f"({', '.join(bases)})" if bases else "")
+            members = []
+            for member in node.body:
+                if isinstance(member, ast.AnnAssign) and isinstance(member.target, ast.Name):
+                    if not member.target.id.startswith("_"):
+                        members.append(f"{member.target.id}: {ast.unparse(member.annotation)}")
+                elif isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    if member.name == "__init__" or not member.name.startswith("_"):
+                        members.append(python_signature(member))
+            lines.append(head + (": " + "; ".join(members) if members else "") + where)
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            if not node.target.id.startswith("_"):
+                lines.append(f"{node.target.id}: {ast.unparse(node.annotation)}{where}")
+        elif isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name) and not target.id.startswith("_"):
+                    lines.append(target.id + where)
+    return lines
+
+
+def ts_statements(text: str) -> list[str]:
+    """TypeScript の最上位の文を、コメントを除いて順に返す。"""
+    return [statement for _, _, statement in ts_statement_spans(text)]
+
+
+def ts_statement_spans(text: str) -> list[tuple[int, int, str]]:
+    """TypeScript の最上位の文を、元の文字列での範囲とともに順に返す。
+
+    範囲は (始まり, 終わり) で、`text[始まり:終わり]` がその文になる。前に付いた
+    コメントは含まない。文の中身の方はコメントを除いてある。
+
+    箱には TypeScript のパーサが無い（vitest は esbuild で型を捨てるだけだ）。
+    だから宣言の切れ目だけを数える。文字列、コメント、正規表現のリテラルの中の
+    括弧は数えない。文は、深さ 0 の `;`、本体を閉じる `}`、続きの無い改行で
+    終わる。
+
+    `}` で終わるのは本体の `{` だけだ。`: {a: number}` のような型や、`=` の後の
+    値の `{` では終わらない。そうしないと、戻り値の型がオブジェクトの関数が、
+    型の所で切れる。
+    """
+    statements: list[tuple[int, int, str]] = []
+    buf: list[str] = []
+    depth = 0
+    assigned = False   # 深さ 0 に `=` があった。その後の `{` は値で、本体ではない
+    body = False       # 深さ 0 で開いた `{` が本体か
+    last = ""          # 直前の空白でない文字
+    start = stop = 0   # いまの文の最初の文字と、最後の空白でない文字の次
+    started = False    # いまの文に空白でないものがもう入ったか
+    i, n = 0, len(text)
+
+    def end() -> None:
+        nonlocal assigned, body, started
+        statement = "".join(buf).strip()
+        if statement:
+            statements.append((start, stop, statement))
+        buf.clear()
+        assigned = body = started = False
+
+    def mark(first: int, after: int) -> None:
+        """空白でないものを buf に足したときに、文の範囲を広げる。"""
+        nonlocal start, stop, started
+        if not started:
+            start, started = first, True
+        stop = after
+
+    while i < n:
+        c = text[i]
+        nxt = text[i + 1] if i + 1 < n else ""
+        if c == "/" and nxt == "/":
+            j = text.find("\n", i)
+            i = n if j < 0 else j
+            continue
+        if c == "/" and nxt == "*":
+            j = text.find("*/", i + 2)
+            i = n if j < 0 else j + 2
+            buf.append(" ")
+            continue
+        # `/` は、値が来る位置なら正規表現、そうでなければ割り算。正規表現の中の
+        # 引用符を文字列の始まりと読むと、ファイルの残りが1つの文字列になる。
+        if c in "'\"`" or (c == "/" and (last == "" or last in "(,=:[!&|?{};")):
+            j, in_class = i + 1, False
+            while j < n:
+                if text[j] == "\\":
+                    j += 2
+                    continue
+                if c == "/" and text[j] == "\n":
+                    break
+                if c == "/" and text[j] == "[":
+                    in_class = True
+                elif c == "/" and text[j] == "]":
+                    in_class = False
+                elif text[j] == c and not in_class:
+                    break
+                j += 1
+            mark(i, min(j + 1, n))
+            buf.append(text[i:j + 1])
+            last, i = c, j + 1
+            continue
+        if c in "({[":
+            if c == "{" and depth == 0:
+                body = not assigned and last not in ":|&<,=("
+            depth += 1
+        elif c in ")}]":
+            depth = max(depth - 1, 0)
+        elif (c == "=" and depth == 0 and nxt not in "=>"
+              and text[i - 1:i] not in ("=", "!", "<", ">")):
+            assigned = True
+        if not c.isspace():
+            mark(i, i + 1)
+        buf.append(c)
+        if c == "}" and depth == 0 and body:
+            end()
+        elif c == ";" and depth == 0:
+            end()
+        elif c == "\n" and depth == 0 and started:
+            ahead = text[i + 1:i + 200].lstrip()[:1]
+            if last not in "=,(+-*/&|?:<>.[{" \
+                    and (not ahead or ahead not in ".?:|&=,)>"):
+                end()
+        if not c.isspace():
+            last = c
+        i += 1
+    end()
+    return statements
+
+
+def ts_top_level(text: str, token: str) -> int | None:
+    """括弧の外にある `token` の位置。`=` は `==` `=>` `<=` `>=` `!=` を除く。"""
+    depth = 0
+    for i, c in enumerate(text):
+        if c in "({[":
+            depth += 1
+        elif c in ")}]":
+            depth -= 1
+        elif depth == 0 and text.startswith(token, i):
+            if token == "=" and (text[i + 1:i + 2] in ("=", ">")
+                                 or text[i - 1:i] in ("=", "!", "<", ">")):
+                continue
+            return i
+    return None
+
+
+def strip_body(text: str) -> str:
+    """末尾の `{ ... }` を除く。本体の無い宣言はそのまま返す。"""
+    if not text.endswith("}"):
+        return text
+    depth = 0
+    for i in range(len(text) - 1, -1, -1):
+        if text[i] == "}":
+            depth += 1
+        elif text[i] == "{":
+            depth -= 1
+            if depth == 0:
+                return text[:i].rstrip()
+    return text
+
+
+TS_EXPORT = re.compile(
+    r"^export\s+(?:declare\s+)?(?:default\s+)?"
+    r"(?P<kind>(?:abstract\s+)?class|(?:async\s+)?function\*?|interface|type|enum|const|let|var)"
+    r"\s+[A-Za-z_$][\w$]*")
+TS_HIDDEN = re.compile(r"^(?:#|(?:(?:static|readonly|abstract|override|async)\s+)*(?:private|protected)\b)")
+
+
+def ts_class(raw: str, head: str) -> str:
+    """クラスの頭と、公開のメンバーの署名。private と protected と # は外す。"""
+    body = raw[raw.index("{") + 1:raw.rindex("}")]
+    members = []
+    for member in ts_statements(body):
+        m = " ".join(member.split()).rstrip(";").rstrip()
+        if not m or TS_HIDDEN.match(m):
+            continue
+        m = re.sub(r"^public\s+", "", m)
+        eq, paren = ts_top_level(m, "="), m.find("(")
+        if eq is not None and (paren < 0 or eq < paren):
+            m = m[:eq].rstrip()        # フィールド。初期値は実装なので外す
+        else:
+            m = strip_body(m)          # メソッド
+        members.append(m)
+    return f"{head} {{ {'; '.join(members)} }}" if members else head
+
+
+def ts_declarations(text: str, path: str) -> list[str]:
+    """TypeScript のファイルの export を、契約と同じ書式で1行ずつ返す。
+
+    関数は本体を外す。interface、type、enum は形そのものなので全部を残す。const
+    は型の注釈まで。値が関数なら、署名と `=>` まで。クラスは公開のメンバーの
+    署名だけ。`export { a } from` のような再 export は、宣言している元の
+    ファイルの方で拾う。
+    """
+    lines = []
+    for statement in ts_statements(text):
+        raw = statement.strip().rstrip(";").rstrip()
+        flat = " ".join(raw.split())
+        match = TS_EXPORT.match(flat)
+        if not match:
+            continue
+        decl = re.sub(r"^export\s+(?:declare\s+)?(?:default\s+)?", "", flat)
+        kind = match.group("kind").split()[-1]
+        if kind.startswith("function"):
+            decl = strip_body(decl)
+        elif kind in ("const", "let", "var"):
+            eq = ts_top_level(decl, "=")
+            if eq is not None:
+                value = decl[eq + 1:].strip()
+                arrow = ts_top_level(value, "=>")
+                if arrow is not None and re.match(r"(?:async\s*)?[(<]", value):
+                    decl = f"{decl[:eq].rstrip()} = {value[:arrow + 2]}"
+                else:
+                    decl = decl[:eq].rstrip()
+        elif kind == "class" and "{" in raw:
+            decl = ts_class(raw, decl[:decl.index("{")].rstrip())
+        lines.append(f"{path}: {decl}")
+    return lines
+
+
+def existing_contracts() -> list[str]:
+    """最後のコミットの柵の中（LAYOUT["src"]）にある公開の宣言。計画の言語の
+    ファイルだけを読む。
+
+    作業ツリーではなく HEAD から読む。ステップの途中の書きかけやスタブを、
+    すでにあるコードとして見せないためだ。
+    """
+    try:
+        listing = run(["git", "ls-tree", "-r", "-z", "--name-only", "HEAD", "--",
+                       LAYOUT["src"]])
+    except OSError:
+        return []   # 作業ツリーがまだ無い
+    if listing.returncode != 0:
+        return []   # コミットがまだ無い
+    suffix = LANGUAGE["source_suffix"]
+    lines: list[str] = []
+    for path in listing.stdout.split("\0"):
+        if not in_layout(path, "src") or not path.endswith(suffix):
+            continue
+        shown = run(["git", "show", f"HEAD:{path}"])
+        if shown.returncode != 0:
+            continue
+        if LANGUAGE["name"] == "typescript":
+            lines += ts_declarations(shown.stdout, path)
+        elif LANGUAGE["name"] == "python":
+            modules = modules_of([path])
+            if modules:
+                lines += python_declarations(shown.stdout, modules[0])
+        elif LANGUAGE["name"] == "csharp":
+            lines += csharp_declarations(shown.stdout, path)
+    return lines
+
+
+def head_sources(paths: list[str]) -> dict[str, str]:
+    """`paths` のうち、最後のコミットにあるファイルの中身。無いものは入れない。"""
+    sources = {}
+    for path in paths:
+        shown = run(["git", "show", f"HEAD:{path}"])
+        if shown.returncode == 0:
+            sources[path] = shown.stdout
+    return sources
+
+
+# export の有無を問わない。provides は export を求めるが、既存のファイルでは
+# export していない同じ名前の宣言を差し替えることもある。
+TS_DECLARED = re.compile(
+    r"^(?:export\s+)?(?:declare\s+)?(?:default\s+)?(?:abstract\s+)?(?:async\s+)?"
+    r"(?:function\*?|class|interface|type|enum|const|let|var)\s+([A-Za-z_$][\w$]*)")
+
+
+def ts_declared_names(flat: str) -> list[str]:
+    """1つの文が宣言する名前すべて。`const a = 1, b = 2` なら a と b。"""
+    match = TS_DECLARED.match(flat)
+    if not match:
+        return []
+    names = [match.group(1)]
+    if re.match(r"(?:export\s+)?(?:declare\s+)?(?:const|let|var)\b", flat):
+        depth = 0
+        for i, c in enumerate(flat):
+            if c in "({[":
+                depth += 1
+            elif c in ")}]":
+                depth -= 1
+            elif c == "," and depth == 0:
+                more = re.match(r"\s*([A-Za-z_$][\w$]*)\s*[:=]", flat[i + 1:])
+                if more:
+                    names.append(more.group(1))
+    return names
+
+
+def ts_merge_stub(original: str, pieces: dict[str, str]) -> tuple[str, str] | None:
+    """既存のファイルの、名前ごとの宣言だけをスタブの宣言に差し替える。
+
+    返すのは (差し替えた全文, 差し替えなかった部分)。後者は、import を足すか
+    どうかを決めるのに使う。ファイルにまだ無い名前は末尾に足す。1つの文が2つ
+    以上の名前を宣言している（`export const a = 1, b = 2`）なら、1つだけを
+    差し替えると残りが消えるので None を返し、ソルバーに回す。
+    """
+    spans: dict[str, tuple[int, int]] = {}
+    for start, stop, statement in ts_statement_spans(original):
+        names = ts_declared_names(" ".join(statement.split()))
+        if not any(name in pieces for name in names):
+            continue
+        if len(names) > 1:
+            return None
+        if names[0] not in spans:
+            spans[names[0]] = (start, stop)
+    text, rest = original, original
+    for name, (start, stop) in sorted(spans.items(), key=lambda kv: -kv[1][0]):
+        text = text[:start] + pieces[name] + text[stop:]
+        rest = rest[:start] + rest[stop:]
+    added = [piece for name, piece in pieces.items() if name not in spans]
+    if added:
+        text = text.rstrip() + chr(10) * 2 + chr(10).join(added) + chr(10)
+    return text, rest
+
+
+def top_level_units(text: str, path: str, provided: set[str]) -> dict[str, str] | None:
+    """ファイルの最上位の文のうち、`provided` の名前を宣言しないものの一覧。
+
+    キーは比べるための形、値は人に見せる1行目。import は入れない。スタブは新しい
+    型のために import を足すことがあり、足りない import はコンパイルで必ず分かる。
+    Python は ast.dump で比べるので、空白とコメントの違いは数えない。読めなければ
+    None。C# は型の頭とメンバーを単位にする（csharp_units）。
+    """
+    if path.endswith(".cs"):
+        return csharp_units(text, provided)
+    units: dict[str, str] = {}
+    if path.endswith(".py"):
+        try:
+            tree = ast.parse(text)
+        except SyntaxError:
+            return None
+        for node in tree.body:
+            if isinstance(node, (ast.Import, ast.ImportFrom)):
+                continue
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                names = {node.name}
+            elif isinstance(node, ast.Assign):
+                names = {t.id for t in node.targets if isinstance(t, ast.Name)}
+            elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+                names = {node.target.id}
+            else:
+                names = set()
+            if names and names <= provided:
+                continue
+            units[ast.dump(node)] = ast.unparse(node).splitlines()[0][:100]
+        return units
+    for _, _, statement in ts_statement_spans(text):
+        # 末尾の `;` は、あっても無くても同じ文だ。
+        flat = " ".join(statement.split()).rstrip(";").rstrip()
+        if flat.startswith("import "):
+            continue
+        # 名前の一部だけを提供する文は、差し替えれば必ず変わるので比べる側に残す。
+        names = ts_declared_names(flat)
+        if names and set(names) <= provided:
+            continue
+        units[flat] = flat[:100]
+    return units
+
+
+def stub_kept_the_rest(step: dict, originals: dict[str, str]) -> list[str]:
+    """既存のファイルで、スタブが provides の名前のほかを変えていないこと。
+
+    スタブが変えてよいのは、このステップが提供する名前の宣言だけだ。ほかの関数を
+    消せば、それを使う既存のテストが VERIFY で落ちる。そのときには、どの位相の
+    誰が消したのかがもう分からない。だからここで、書いた直後に比べる。
+    """
+    provided = {declared_name(p) for p in step["contracts"]["provides"]} \
+        | csharp_listed_members(step["contracts"]["provides"])
+    problems = []
+    for path, before in sorted(originals.items()):
+        target = PROJECT / path
+        after = target.read_text(encoding="utf-8") if target.is_file() else ""
+        kept_before = top_level_units(before, path, provided) or {}
+        kept_after = top_level_units(after, path, provided)
+        if kept_after is None:
+            problems.append(f"{path}: no longer parses")
+            continue
+        for key, label in kept_before.items():
+            if key not in kept_after:
+                problems.append(f"{path}: changed or removed: {label}")
+    return problems
+
+
+# --------------------------------------------------------------------------
+# C# の既存コードを読む
+#
+# 箱には C# のパーサが無い（Roslyn を呼ぶには、ビルドを1回待つ）。TypeScript と
+# 同じく、宣言の切れ目だけを数える。C# では宣言が型の中にあるので、単位は型と
+# そのメンバーだ。
+# --------------------------------------------------------------------------
+
+# テストのビルドで常に定義されるシンボル。dotnet test は Debug でビルドする。
+CSHARP_BASE_DEFINES = frozenset({"DEBUG", "TRACE", "NETSTANDARD", "NETSTANDARD2_1",
+                                 "NETSTANDARD2_0_OR_GREATER", "NETSTANDARD2_1_OR_GREATER"})
+CSHARP_MODIFIER_WORDS = frozenset({
+    "public", "private", "protected", "internal", "static", "virtual", "override",
+    "abstract", "sealed", "readonly", "extern", "unsafe", "new", "async", "partial",
+    "const", "volatile", "event", "implicit", "explicit"})
+CSHARP_TYPE_HEAD = re.compile(
+    r"^(?P<mods>(?:(?:" + "|".join(sorted(CSHARP_MODIFIER_WORDS | {"ref"})) + r")\s+)*)"
+    r"(?P<kind>class|struct|interface|enum|record)\s+@?(?P<name>[A-Za-z_]\w*)(?P<rest>.*)$")
+CSHARP_DIRECTIVE = re.compile(r"[ \t]*#[ \t]*(\w+)[ \t]*([^\n]*)")
+CSHARP_NAME_BEFORE = re.compile(r"(~?[A-Za-z_]\w*)\s*(<[^()]*>)?\s*$")
+
+
+def csharp_defines() -> set[str]:
+    """テストのビルドで定義されるシンボル。Unity の参照があれば、その定義も足す
+    （dotnet_projects と同じもの）。"""
+    defines = set(CSHARP_BASE_DEFINES)
+    if (UNITY_REFS / "refs").is_dir():
+        try:
+            defines |= {line.strip() for line in (UNITY_REFS / "defines.txt")
+                        .read_text(encoding="utf-8").splitlines() if line.strip()}
+        except OSError:
+            pass
+    return defines
+
+
+def csharp_condition(expr: str, defines: set[str]) -> bool:
+    """`#if` の条件を評価する。読めなければ ValueError。"""
+    tokens = re.findall(r"\|\||&&|==|!=|[!()]|\w+|\S", expr)
+    pos = 0
+
+    def peek() -> str:
+        return tokens[pos] if pos < len(tokens) else ""
+
+    def take() -> str:
+        nonlocal pos
+        pos += 1
+        return tokens[pos - 1] if pos <= len(tokens) else ""
+
+    def primary() -> bool:
+        token = take()
+        if token == "!":
+            return not primary()
+        if token == "(":
+            value = either()
+            if take() != ")":
+                raise ValueError(expr)
+            return value
+        if token in ("true", "false"):
+            return token == "true"
+        if re.fullmatch(r"[A-Za-z_]\w*", token):
+            return token in defines
+        raise ValueError(expr)
+
+    def equality() -> bool:
+        value = primary()
+        while peek() in ("==", "!="):
+            op, other = take(), primary()
+            value = (value == other) if op == "==" else (value != other)
+        return value
+
+    def both() -> bool:
+        value = equality()
+        while peek() == "&&":
+            take()
+            value = equality() and value
+        return value
+
+    def either() -> bool:
+        value = both()
+        while peek() == "||":
+            take()
+            value = both() or value
+        return value
+
+    value = either()
+    if pos != len(tokens):
+        raise ValueError(expr)
+    return value
+
+
+def csharp_scan(text: str, defines: set[str]) -> tuple[str, str, list[tuple[int, int]]] | None:
+    """C# のソースを、構造を数えられる形にする。(code, shape, 無効な範囲)。
+
+    code と shape は元と同じ長さで、位置がそのまま元の位置になる。code はコメント、
+    プリプロセッサの行、条件が偽の範囲を空白にしたもの。shape はさらに文字列と
+    文字のリテラルを空白にしたもので、括弧と `;` を数えるのに使う。無効な範囲は、
+    `#if` の条件が偽で飛ばした行の範囲。
+
+    条件は、テストのビルドと同じシンボルで評価する。Unity の参照は UNITY_EDITOR の
+    系統を外してあるので、`#if UNITY_EDITOR` の中はテストから見えない。無効な範囲は
+    字句として正しいとは限らない（C# の仕様）ので、行ごとに飛ばす。
+
+    閉じない `#if`、読めない条件、閉じないコメントなら None。
+    """
+    n = len(text)
+    code, shape = list(text), list(text)
+    inactive: list[tuple[int, int]] = []
+    stack: list[list[bool]] = []    # [どれかの枝を取ったか, いまの枝が有効か]
+    defines = set(defines)
+    region: int | None = None       # いま飛ばしている範囲の始まり
+
+    def blank(a: int, b: int, *targets: list[str]) -> None:
+        for target in targets:
+            for k in range(a, b):
+                if target[k] != "\n":
+                    target[k] = " "
+
+    def starts_literal(i: int) -> bool:
+        return text[i] in "\"'" or bool(re.match(r'(?:@\$?|\$@?)"', text[i:i + 3]))
+
+    def literal_end(i: int) -> int:
+        verbatim = interpolated = False
+        while text[i] in "@$":
+            verbatim |= text[i] == "@"
+            interpolated |= text[i] == "$"
+            i += 1
+        quote, j = text[i], i + 1
+        while j < n:
+            c = text[j]
+            if c == "\\" and not verbatim:
+                j += 2
+                continue
+            if c == quote:
+                if verbatim and text[j + 1:j + 2] == quote:
+                    j += 2
+                    continue
+                return j + 1
+            if interpolated and c == "{":
+                if text[j + 1:j + 2] == "{":
+                    j += 2
+                    continue
+                j = hole_end(j + 1)
+                continue
+            if c == "\n" and not verbatim:
+                return j        # 閉じない文字列は行で終える
+            j += 1
+        return n
+
+    def hole_end(j: int) -> int:
+        """補間文字列の `{ ... }` の、閉じる `}` の次。中の文字列も飛ばす。"""
+        depth = 0
+        while j < n:
+            c = text[j]
+            if starts_literal(j):
+                j = literal_end(j)
+                continue
+            if c == "{":
+                depth += 1
+            elif c == "}":
+                if depth == 0:
+                    return j + 1
+                depth -= 1
+            j += 1
+        return n
+
+    if text.startswith("﻿"):
+        blank(0, 1, code, shape)
+    i = 0
+    while i < n:
+        if i == 0 or text[i - 1] == "\n":
+            eol = text.find("\n", i)
+            eol = n if eol < 0 else eol
+            directive = CSHARP_DIRECTIVE.match(text, i, eol)
+            if directive:
+                if region is not None:
+                    inactive.append((region, i))
+                    region = None
+                word = directive.group(1)
+                arg = directive.group(2).split("//")[0].strip()
+                on = all(entry[1] for entry in stack)
+                try:
+                    if word == "if":
+                        value = csharp_condition(arg, defines)
+                        stack.append([value, value])
+                    elif word == "elif":
+                        entry = stack[-1]
+                        entry[1] = not entry[0] and csharp_condition(arg, defines)
+                        entry[0] = entry[0] or entry[1]
+                    elif word == "else":
+                        entry = stack[-1]
+                        entry[1], entry[0] = not entry[0], True
+                    elif word == "endif":
+                        stack.pop()
+                    elif word == "define" and on:
+                        defines.add(arg)
+                    elif word == "undef" and on:
+                        defines.discard(arg)
+                except (ValueError, IndexError):
+                    return None
+                blank(i, eol, code, shape)
+                i = eol + 1     # 改行ごと進む。空の行では eol が i と同じだ
+                continue
+            if not all(entry[1] for entry in stack):
+                if region is None:
+                    region = i
+                blank(i, eol, code, shape)
+                i = eol + 1
+                continue
+        c, nxt = text[i], text[i + 1:i + 2]
+        if c == "/" and nxt == "/":
+            eol = text.find("\n", i)
+            eol = n if eol < 0 else eol
+            blank(i, eol, code, shape)
+            i = eol
+        elif c == "/" and nxt == "*":
+            end = text.find("*/", i + 2)
+            if end < 0:
+                return None
+            blank(i, end + 2, code, shape)
+            i = end + 2
+        elif starts_literal(i):
+            end = literal_end(i)
+            blank(i, end, shape)
+            i = end
+        else:
+            i += 1
+    if stack:
+        return None
+    if region is not None:
+        inactive.append((region, n))
+    return "".join(code), "".join(shape), inactive
+
+
+def csharp_match(shape: str, i: int, hi: int) -> int | None:
+    """shape[i] の `{` を閉じる `}` の位置。"""
+    depth = 0
+    for j in range(i, hi):
+        if shape[j] == "{":
+            depth += 1
+        elif shape[j] == "}":
+            depth -= 1
+            if depth == 0:
+                return j
+    return None
+
+
+def csharp_split(shape: str, lo: int, hi: int) -> list[tuple[int, int, int | None, int | None]] | None:
+    """shape[lo:hi] の宣言を順に切る。(始まり, 終わり, 本体の `{`, それを閉じる `}`)。
+
+    宣言は、深さ 0 の `;` か、本体を閉じる `}` で終わる。`=` か `=>` の後の `{` は
+    値で、本体ではない（`int[] a = { 1 };`、`=> new Board { W = 1 };`）。本体の後に
+    `= 値;` が続けば、プロパティの初期値としてそこまで含める。
+    """
+    units = []
+    i = lo
+    while i < hi:
+        while i < hi and shape[i].isspace():
+            i += 1
+        if i >= hi:
+            break
+        start, depth, assigned = i, 0, False
+        open_: int | None = None
+        close: int | None = None
+        while i < hi:
+            c = shape[i]
+            if c == "{" and depth == 0 and not assigned and open_ is None:
+                close = csharp_match(shape, i, hi)
+                if close is None:
+                    return None
+                open_, i = i, close + 1
+                j = i
+                while j < hi and shape[j].isspace():
+                    j += 1
+                if j < hi and shape[j] == "=":
+                    i = j           # 初期値。`;` まで続ける
+                    continue
+                if j < hi and shape[j] == ";":
+                    i = j + 1
+                break
+            if c in "([{":
+                depth += 1
+            elif c in ")]}":
+                depth -= 1
+                if depth < 0:
+                    return None
+            elif c == "=" and depth == 0:
+                assigned = True
+            elif c == ";" and depth == 0:
+                i += 1
+                break
+            i += 1
+        units.append((start, i, open_, close))
+    return units
+
+
+def csharp_after_attributes(shape: str, i: int, hi: int) -> int:
+    """属性（`[SerializeField]`）と空白を飛ばした位置。"""
+    while True:
+        while i < hi and shape[i].isspace():
+            i += 1
+        if i >= hi or shape[i] != "[":
+            return i
+        depth = 0
+        while i < hi:
+            if shape[i] == "[":
+                depth += 1
+            elif shape[i] == "]":
+                depth -= 1
+                if depth == 0:
+                    break
+            i += 1
+        i += 1
+
+
+def csharp_norm(text: str) -> str:
+    """比べるための形。空白を詰め、記号の前後の空白を除く。"""
+    return re.sub(r"\s*([(),<>\[\]?.:])\s*", r"\1", " ".join(text.split()))
+
+
+def csharp_member_parts(header: str) -> dict:
+    """メンバーの宣言の頭（属性、本体、`=>` より後を除いたもの）を分ける。
+
+    返すのは mods（修飾子の集合）、kind（"method"、"operator"、"indexer"。どれでも
+    なければ None で、プロパティかフィールドかは呼び出し側が本体の有無で決める）、
+    name と names（フィールドは `int a, b` の全部）、type（戻り値かフィールドの型。
+    コンストラクタは空）、after（メソッドの名前より後。型引数と引数）、sig（修飾子を
+    除いた署名を csharp_norm で詰めたもの。比べるのに使う）。
+    """
+    rest = " ".join(header.split()).rstrip(";").strip()
+    mods: list[str] = []
+    while (m := re.match(r"([a-z]+)\s+", rest)) and m.group(1) in CSHARP_MODIFIER_WORDS:
+        mods.append(m.group(1))
+        rest = rest[m.end():]
+    parts = {"mods": mods, "kind": None, "name": "", "names": [], "type": "", "after": "",
+             "sig": ""}
+    if re.search(r"\boperator\b", rest):
+        return {**parts, "kind": "operator", "name": "operator", "sig": csharp_norm(rest)}
+    # 引数の括弧は `=` より前にある。後ろの括弧は初期値（`= new Board(0, 0)`）だ。
+    eq = ts_top_level(rest, "=")
+    depth = angle = 0
+    for i, c in enumerate(rest[:eq]):
+        if c == "<" and depth == 0:
+            angle += 1
+        elif c == ">" and depth == 0:
+            angle -= 1
+        elif c == "(":
+            if depth == 0 and angle == 0:
+                before = CSHARP_NAME_BEFORE.search(rest[:i])
+                if before and before.group(1) not in CSHARP_MODIFIER_WORDS:
+                    close, inner = i, 0
+                    for close in range(i, len(rest)):
+                        inner += {"(": 1, ")": -1}.get(rest[close], 0)
+                        if inner == 0:
+                            break
+                    name = before.group(1)
+                    return {**parts, "kind": "method", "name": name, "names": [name],
+                            "type": rest[:before.start()].strip(),
+                            "after": rest[before.start(1) + len(name):close + 1].strip(),
+                            "sig": csharp_norm(rest[:close + 1])}
+            depth += 1
+        elif c == ")":
+            depth -= 1
+    if re.search(r"\bthis\s*\[", rest):
+        return {**parts, "kind": "indexer", "name": "this", "names": ["this"],
+                "sig": csharp_norm(rest)}
+    # フィールドかプロパティ。`int a = 1, b` の2つ目からは、深さ 0 の `,` の後の名前。
+    pieces, depth, current = [], 0, ""
+    for c in rest:
+        if c in "([{<":
+            depth += 1
+        elif c in ")]}>":
+            depth -= 1
+        if c == "," and depth == 0:
+            pieces.append(current)
+            current = ""
+            continue
+        current += c
+    pieces.append(current)
+    first = pieces[0]
+    eq = ts_top_level(first, "=")
+    first = first[:eq] if eq is not None else first
+    named = re.search(r"([A-Za-z_]\w*)\s*$", first)
+    if not named:
+        return parts
+    names = [named.group(1)] + [m.group(1) for piece in pieces[1:]
+                                if (m := re.match(r"\s*([A-Za-z_]\w*)\s*(?:=|$)", piece))]
+    return {**parts, "name": names[0], "names": names,
+            "type": first[:named.start()].strip(), "sig": csharp_norm(first)}
+
+
+def csharp_spec(spec: str) -> tuple[str, dict]:
+    """契約のメンバー（型の名前を除いたもの）の種類と、csharp_member_parts の結果。"""
+    parts = csharp_member_parts(spec)
+    if parts["kind"]:
+        return parts["kind"], parts
+    if "{" in spec or "=>" in spec:
+        return "property", csharp_member_parts(re.split(r"\{|=>", spec, 1)[0])
+    return "field", parts
+
+
+def csharp_outline(text: str) -> dict | None:
+    """C# のファイルの型とメンバーの位置。読めなければ None。
+
+    返すのは code と shape（csharp_scan）、inactive（無効な範囲）、usings（using の
+    範囲）、others（型でも using でもない最上位の宣言の範囲）、types。型は
+    namespace の中まで降りて集め、入れ子の型はメンバーとして扱う。型もメンバーも、
+    start は属性の前、sig は属性の後、stop は終わりの次。open と close は本体の
+    `{` と `}`、arrow は `=>` の位置（無ければ None）。
+    """
+    scanned = csharp_scan(text, csharp_defines())
+    if scanned is None:
+        return None
+    code, shape, inactive = scanned
+    types: list[dict] = []
+    usings: list[tuple[int, int]] = []
+    others: list[tuple[int, int]] = []
+
+    def head_of(start: int, stop: int, open_: int | None) -> tuple[int, str]:
+        sig = csharp_after_attributes(shape, start, stop)
+        end = open_ if open_ is not None else stop
+        return sig, " ".join(code[sig:end].split()).rstrip(";").rstrip()
+
+    def members_of(lo: int, hi: int) -> list[dict] | None:
+        units = csharp_split(shape, lo, hi)
+        if units is None:
+            return None
+        members = []
+        for start, stop, open_, close in units:
+            sig, head = head_of(start, stop, open_)
+            member = {"start": start, "sig": sig, "stop": stop, "open": open_,
+                      "close": close, "arrow": None}
+            nested = CSHARP_TYPE_HEAD.match(head)
+            if nested:
+                name = nested.group("name")
+                members.append({**member, "kind": "type", "name": name, "names": [name],
+                                "parts": {"mods": nested.group("mods").split()}})
+                continue
+            end = open_ if open_ is not None else stop
+            arrow = ts_top_level(shape[sig:end], "=>")
+            eq = ts_top_level(shape[sig:end], "=")
+            if arrow is not None and (eq is None or arrow < eq):
+                member["arrow"] = sig + arrow
+                end = sig + arrow
+            parts = csharp_member_parts(code[sig:end])
+            kind = parts["kind"] or ("property" if open_ is not None or member["arrow"] is not None
+                                     else "field")
+            members.append({**member, "kind": kind, "name": parts["name"],
+                            "names": parts["names"], "parts": parts})
+        return members
+
+    def walk(lo: int, hi: int, namespace: str) -> bool:
+        units = csharp_split(shape, lo, hi)
+        if units is None:
+            return False
+        for start, stop, open_, close in units:
+            sig, head = head_of(start, stop, open_)
+            space = re.fullmatch(r"namespace\s+([\w.]+)", head)
+            declared = CSHARP_TYPE_HEAD.match(head)
+            if space:
+                if open_ is None:
+                    return False    # ファイル単位の namespace は C# 10 で、ここでは使えない
+                if not walk(open_ + 1, close, ".".join(filter(None, [namespace, space.group(1)]))):
+                    return False
+            elif re.match(r"(?:global\s+)?using\b", head):
+                usings.append((start, stop))
+            elif declared and open_ is not None:
+                kind = declared.group("kind")
+                members = [] if kind == "enum" else members_of(open_ + 1, close)
+                if members is None:
+                    return False
+                types.append({"name": declared.group("name"), "kind": kind,
+                              "mods": declared.group("mods").split(),
+                              "rest": declared.group("rest"), "namespace": namespace,
+                              "start": start, "sig": sig, "stop": stop, "open": open_,
+                              "close": close, "members": members})
+            else:
+                others.append((start, stop))
+        return True
+
+    if not walk(0, len(text), ""):
+        return None
+    return {"code": code, "shape": shape, "inactive": inactive, "usings": usings,
+            "others": others, "types": types}
+
+
+def csharp_file_namespace(path: str) -> str | None:
+    """作業ツリーにある C# のファイルの名前空間。無ければフォルダから決める。"""
+    target = PROJECT / path
+    if target.is_file():
+        outline = csharp_outline(target.read_text(encoding="utf-8"))
+        if outline and outline["types"]:
+            return outline["types"][0]["namespace"]
+    return csharp_namespace(path)
+
+
+def csharp_accessors(outline: dict, member: dict) -> str:
+    """プロパティの公開のアクセサ。`{ get; set; }` の形。"""
+    if member["open"] is None:
+        return "{ get; }"          # `int X => ...;`
+    heads = []
+    code, shape = outline["code"], outline["shape"]
+    for start, stop, open_, _ in csharp_split(shape, member["open"] + 1, member["close"]) or []:
+        end = open_ if open_ is not None else stop
+        arrow = ts_top_level(shape[start:end], "=>")
+        end = start + arrow if arrow is not None else end
+        head = " ".join(code[start:end].split()).rstrip(";").strip()
+        if head and not re.search(r"\b(?:private|protected|internal)\b", head):
+            heads.append(head + ";")
+    return "{ " + " ".join(heads) + " }"
+
+
+def csharp_declarations(text: str, path: str) -> list[str]:
+    """C# のファイルの public な型とメンバーを、契約と同じ書式で1行ずつ返す。
+
+    型は頭だけを1行にし（`class Board : MonoBehaviour`）、public なメンバーを
+    `static int Board.Score(Board board)` の形で1行ずつ続ける。名前が型とメンバーの
+    2つの単位を持つので、requires はメンバーを名指しできる。enum と interface は
+    形そのものなので、中身ごと1行にする。本体と初期値は返さない（BOOTSTRAP 1-1）。
+
+    名前空間があれば、行の末尾に `-- namespace X` を付ける。既存のファイルは今の
+    名前空間を保つので、フォルダから決めた名前と違いうる。その型を使うコードは、
+    これで `using` を書く。
+
+    演算子、インデクサ、入れ子の型は契約の名前で表せないので返さない。
+    """
+    outline = csharp_outline(text)
+    if outline is None:
+        return []
+    code = outline["code"]
+    lines = []
+
+    def signature(owner: str, member: dict) -> str:
+        parts = member["parts"]
+        mods = " ".join(m for m in parts["mods"] if m != "public")
+        name = f"{owner}.{member['name']}" if owner else member["name"]
+        if member["kind"] == "method":
+            text_ = f"{mods} {parts['type']} {name}{parts['after']}"
+        elif member["kind"] == "property":
+            text_ = f"{mods} {parts['type']} {name} {csharp_accessors(outline, member)}"
+        else:
+            return ""
+        return " ".join(text_.split())
+
+    for t in outline["types"]:
+        if "public" not in t["mods"]:
+            continue
+        where = f" -- namespace {t['namespace']}" if t["namespace"] else ""
+        mods = " ".join(m for m in t["mods"] if m not in ("public", "partial"))
+        head = " ".join(f"{mods} {t['kind']} {t['name']}{t['rest']}".split())
+        if t["kind"] == "enum":
+            body = " ".join(code[t["open"] + 1:t["close"]].split())
+            lines.append(f"{path}: {head} {{ {body} }}{where}")
+            continue
+        if t["kind"] == "interface":
+            members = [signature("", m) for m in t["members"]]
+            body = " ".join(f"{m};" if not m.endswith("}") else m for m in members if m)
+            lines.append(f"{path}: {head} {{ {body} }}{where}")
+            continue
+        lines.append(f"{path}: {head}{where}")
+        for m in t["members"]:
+            if "public" not in m["parts"]["mods"]:
+                continue
+            if m["kind"] == "field":
+                mods = " ".join(x for x in m["parts"]["mods"] if x != "public")
+                lines += [f"{path}: " + " ".join(f"{mods} {m['parts']['type']} {t['name']}.{n}"
+                                                 .split()) + where for n in m["names"]]
+            elif m["kind"] in ("method", "property"):
+                lines.append(f"{path}: {signature(t['name'], m)}{where}")
+    return lines
+
+
+def csharp_balanced(text: str) -> bool:
+    """差し替える範囲の中で、`#if` と `#endif` の数が合うか。"""
+    return (len(re.findall(r"(?m)^[ \t]*#[ \t]*if\b", text))
+            == len(re.findall(r"(?m)^[ \t]*#[ \t]*endif\b", text)))
+
+
+def csharp_merge_stub(original: str, entries: list[dict], known: dict[str, str],
+                      unity: bool) -> str | None:
+    """既存の C# のファイルで、provides のメンバーの本体だけをスタブにする。
+
+    署名が契約と同じメンバーは、本体（`{ ... }` か `=> ...;`）だけを
+    CSHARP_STUB_BODY に替える。属性、修飾子、コメント、ほかのメンバーは残る。
+    プロパティはアクセサの本体を替え、自動プロパティとフィールドは残す。ファイルに
+    無いメンバーは型の末尾に足し、それが口にするほかの名前空間の型には using を足す。
+
+    次のときは None でソルバーに回す。型がファイルに無い。同じ名前のメンバーは
+    あるが、署名が契約と同じものがちょうど1つではない（署名を変えるステップか、
+    オーバーロード）。本体の無いメソッド（abstract など）。enum か interface の中身が
+    契約と違う。ファイルが読めない。
+
+    `entries` は generate_csharp_stub の型ごとのまとまり、`known` は型の名前から
+    名前空間への対応。
+    """
+    outline = csharp_outline(original)
+    if outline is None:
+        return None
+    shape = outline["shape"]
+    edits: list[tuple[int, int, str]] = []
+    added: list[str] = []
+    file_namespace = ""
+    for entry in entries:
+        found = [t for t in outline["types"] if t["name"] == entry["name"]]
+        if len(found) != 1:
+            return None
+        t = found[0]
+        file_namespace = t["namespace"]
+        if entry["typed"]:
+            if entry["kind"] != t["kind"]:
+                return None
+            if entry["bases"] and csharp_norm(entry["bases"]) not in csharp_norm(t["rest"]):
+                return None
+            if t["kind"] in ("enum", "interface"):
+                inside = outline["code"][t["open"] + 1:t["close"]]
+                if re.sub(r"[\s;,]", "", entry["body"]) != re.sub(r"[\s;,]", "", inside):
+                    return None
+                continue
+
+        new: list[str] = []
+        for spec in entry["specs"]:
+            kind, parts = csharp_spec(spec)
+            named = [m for m in t["members"] if parts["name"] and parts["name"] in m["names"]]
+            if not named:
+                new.append(csharp_stub_member(spec))
+                continue
+            same = [m for m in named if m["kind"] == kind
+                    and m["parts"]["sig"] == parts["sig"]
+                    and (kind != "method"
+                         or ("static" in m["parts"]["mods"]) == ("static" in parts["mods"]))]
+            if len(same) != 1:
+                return None
+            m = same[0]
+            if kind == "method":
+                if m["open"] is not None:
+                    edits.append((m["open"], m["close"] + 1, CSHARP_STUB_BODY))
+                elif m["arrow"] is not None:
+                    edits.append((m["arrow"], m["stop"], CSHARP_STUB_BODY))
+                else:
+                    return None
+            elif kind == "property":
+                if m["open"] is None:
+                    edits.append((m["arrow"], m["stop"], f"=> {CSHARP_STUB_EXPRESSION};"))
+                    continue
+                for start, stop, open_, close in csharp_split(shape, m["open"] + 1, m["close"]) or []:
+                    arrow = ts_top_level(shape[start:stop], "=>")
+                    if open_ is not None:
+                        edits.append((open_, close + 1, CSHARP_STUB_BODY))
+                    elif arrow is not None:
+                        edits.append((start + arrow, stop, f"=> {CSHARP_STUB_EXPRESSION};"))
+
+        if new:
+            # 型の末尾、閉じる `}` の行の前に、ほかのメンバーと同じ字下げで足す。
+            close = t["close"]
+            line_start = original.rfind("\n", 0, close) + 1
+            before = original[line_start:close]
+            outer = re.match(r"[ \t]*", before).group(0)
+            indent = outer + "    "
+            if t["members"]:
+                first = t["members"][0]["start"]
+                lead = original[original.rfind("\n", 0, first) + 1:first]
+                if lead and not lead.strip():
+                    indent = lead
+            block = ("\n" if t["members"] else "") + "".join(f"{indent}{m}\n" for m in new)
+            if before.strip():
+                edits.append((close, close, "\n" + block + outer))
+            else:
+                edits.append((line_start, line_start, block))
+            added += new
+
+    if added:
+        text = "\n".join(added)
+        present = set()
+        for start, stop in outline["usings"]:
+            used = re.fullmatch(r"using\s+([\w.]+)\s*;?", " ".join(outline["code"][start:stop].split()))
+            if used:
+                present.add(used.group(1))
+        wanted = {ns for name, ns in known.items()
+                  if ns and ns != file_namespace and not file_namespace.startswith(ns + ".")
+                  and re.search(rf"(?<!\w){re.escape(name)}(?!\w)", text)}
+        if unity and CSHARP_UNITY_TYPES.search(text):
+            wanted.add("UnityEngine")
+        wanted -= present
+        if wanted:
+            directives = "".join(f"using {ns};\n" for ns in sorted(wanted))
+            if outline["usings"]:
+                at = outline["usings"][-1][1]
+                edits.append((at, at, "\n" + directives.rstrip("\n")))
+            else:
+                at = 1 if original.startswith("﻿") else 0
+                edits.append((at, at, directives + "\n"))
+
+    edits.sort(key=lambda e: (e[0], e[1]))
+    for (a, b, _), (c, _, _) in zip(edits, edits[1:]):
+        if b > c:
+            return None
+    if not all(csharp_balanced(original[a:b]) for a, b, _ in edits):
+        return None
+    text = original
+    for a, b, replacement in reversed(edits):
+        text = text[:a] + replacement + text[b:]
+    return text
+
+
+def csharp_listed_members(provides: list[str]) -> set[str]:
+    """型の行の本体に並んだメンバーの名前（`Board.Width`）。"""
+    names = set()
+    for line in provides:
+        m = re.match(r"^[\w./-]+\.cs\s*:\s*(.+)$", line.split(" -- ")[0].split(chr(8212))[0].strip())
+        declared = CSHARP_TYPE_LINE.match(m.group(1).strip()) if m else None
+        if declared and declared.group("kind") in ("class", "struct"):
+            for member in csharp_members(declared.group("body") or ""):
+                names |= {f"{declared.group('name')}.{n}" for n in csharp_spec(member)[1]["names"]}
+    return names
+
+
+def csharp_units(text: str, provided: set[str]) -> dict[str, str] | None:
+    """top_level_units の C# 版。単位は型の頭とメンバー。
+
+    クラスを1つの単位にすると、1つのメソッドの差し替えでクラス全体が変わった
+    ことになる。だから型の頭（属性、修飾子、基底）と、メンバーの1つずつを比べる。
+    `provided` の名前（`Board.Score` か型の `Board`）のメンバーは比べない。enum と
+    interface は形そのものなので、型ごと1つの単位にする。コメントとプリプロセッサの
+    行は数えない。条件が偽の範囲は、そのまま文字列で比べる（UNITY_EDITOR の中も、
+    Unity のエディタでは動く）。ただし比べないメンバーの中にあるものは除く。using は
+    比べない。
+    """
+    outline = csharp_outline(text)
+    if outline is None:
+        return None
+    code = outline["code"]
+    units: dict[str, str] = {}
+    skipped: list[tuple[int, int]] = []
+
+    def add(prefix: str, a: int, b: int) -> None:
+        flat = " ".join(code[a:b].split())
+        units[prefix + flat] = flat[:100]
+
+    for t in outline["types"]:
+        whole = t["kind"] in ("enum", "interface")
+        if t["name"] in provided and whole:
+            skipped.append((t["start"], t["stop"]))
+            continue
+        if whole:
+            add("", t["start"], t["stop"])
+            continue
+        if t["name"] not in provided:
+            add("", t["start"], t["open"] + 1)
+        for m in t["members"]:
+            if m["names"] and all(f"{t['name']}.{n}" in provided for n in m["names"]):
+                skipped.append((m["start"], m["stop"]))
+                continue
+            add(f"{t['name']}.", m["start"], m["stop"])
+    for a, b in outline["others"]:
+        add("", a, b)
+    for a, b in outline["inactive"]:
+        if any(s <= a and b <= e for s, e in skipped):
+            continue
+        flat = " ".join(text[a:b].split())
+        units["#inactive " + flat] = flat[:100]
+    return units
+
+
+def csharp_facts() -> tuple[str, str]:
+    """C# の計画に伝える、UI とエンジンについての事実。(1行の要約, 段落)。
+
+    Unity の参照があるとき（loop-unity-refs）の中身は、thm で probe-unity が測った
+    結果だ。エンジン本体の無い .NET 8 では、C# だけで書かれた計算は動き、エンジンの
+    ネイティブに降りるものは SecurityException で落ちる。MonoBehaviour を new する
+    ことすらできない。そのテストは赤ではなく壊れた呼び出しになり、R5 が拒む。
+    それを計画を書く前に知らせる。
+    """
+    if not (UNITY_REFS / "refs").is_dir():
+        return ("User interface: none. There is no display and no UI toolkit.",
+                """There is no screen here. Every criterion has to be checkable by calling code
+and comparing what it returns. If the requirements ask for a user interface,
+keep it in a thin step whose criteria are about the values it passes on, not
+what is drawn. A human checks the screen afterwards.
+""")
+    try:
+        version = (UNITY_REFS / "version.txt").read_text(encoding="utf-8").strip()
+    except OSError:
+        version = "(unknown version)"
+    return (f"Unity: compiled against the reference assemblies of Unity {version} and "
+            f"this project's packages. The engine itself is not here.",
+            """The code is compiled against Unity's assemblies with the symbols Unity defines
+for the player, so it may use UnityEngine types. The tests, however, run on
+plain .NET 8 with no engine behind them. Measured on this machine, inside a
+test:
+
+    works:   plain C# classes and structs, static methods, collections;
+             Vector2 / Vector3 arithmetic; Mathf; Color
+    throws:  creating a GameObject, a MonoBehaviour (even with `new`) or a
+             ScriptableObject; Debug.Log; Random; Time; Quaternion.Euler;
+             JsonUtility -- anything that calls into the engine
+             (SecurityException: ECall methods must be packaged into a
+             system module)
+
+So every criterion must be checkable by calling code that is none of those
+things. Put the behaviour a criterion checks in a plain class or a static
+method that takes and returns plain values, and let a MonoBehaviour call it.
+The code that runs under a test must not call Debug.Log, Random, Time or any
+other engine function either; pass such values in as parameters.
+
+Do not write criteria about a MonoBehaviour, a scene, a prefab or what appears
+on screen. The test cannot create them: it fails with an exception rather than
+an assertion, and RED_GATE rejects the step (R5). A human checks those in
+Unity afterwards.
+""")
 
 
 def environment_facts() -> str:
@@ -2542,22 +4578,33 @@ def environment_facts() -> str:
         except (OSError, IndexError):
             return "(not installed)"
 
-    typescript = LANGUAGE["source_suffix"] == ".ts"
+    typescript = LANGUAGE["name"] == "typescript"
 
     skip = {".git", ".venv", ".runner", "plan", "__pycache__", ".pytest_cache",
             "node_modules"}
-    # index.html と vitest.config.mjs は、35-node.sh が言語に関係なく置く。
-    # 箱は計画の言語を知らないからだ。Python の計画に見せると、クリティックは
-    # 「人が開く index.html からこの計画のコードに届かない」と指摘し、
-    # プランナーはそれに答えられない。TypeScript のときだけ見せる。
-    if not typescript:
-        skip |= {"index.html", "vitest.config.mjs"}
-    listing = []
-    for child in sorted(PROJECT.rglob("*")):
-        if any(part in skip for part in child.relative_to(PROJECT).parts):
-            continue
-        rel = child.relative_to(PROJECT)
-        listing.append(f"  {rel}/" if child.is_dir() else f"  {rel}")
+    # 箱は計画の言語を知らないので、すべての言語の環境のファイルを根に置く。
+    # ほかの言語のものを見せると、クリティックは的外れな指摘を出す。Python の計画に
+    # index.html を見せると「人が開く index.html からこの計画のコードに届かない」と
+    # 指摘し、プランナーはそれに答えられない。計画の言語のものだけを見せる。
+    for other in LANGUAGES.values():
+        if other["name"] != LANGUAGE["name"]:
+            skip |= other["environment_files"]
+    # 根の直下と、ステップが書く2つのディレクトリの中だけを並べる。取り込んだ
+    # リポジトリの残り（Unity なら Assets/ の下の画像や音や .meta）は、どのステップも
+    # 書かず、並べるとブリーフが数万トークンになる。
+    def shown(child: Path) -> bool:
+        parts = child.relative_to(PROJECT).parts
+        return not any(part in skip for part in parts) and child.suffix != ".meta"
+
+    def entry(child: Path) -> str:
+        rel = child.relative_to(PROJECT).as_posix()
+        return f"  {rel}/" if child.is_dir() else f"  {rel}"
+
+    listing = [entry(child) for child in sorted(PROJECT.iterdir())
+               if shown(child)] if PROJECT.is_dir() else []
+    for base in (SRC, TESTS):
+        if base.is_dir():
+            listing += [entry(child) for child in sorted(base.rglob("*")) if shown(child)]
     tree = "\n".join(listing) or "  (empty apart from the directories above)"
 
     # 根に置かれたファイルは環境の持ち物で、どのステップも書かない。最初の
@@ -2570,26 +4617,77 @@ def environment_facts() -> str:
         if PROJECT.is_dir() else []
     provided_text = ""
     if provided:
-        provided_text = f"""
+        provided_text = layout_text(f"""
 These files at the root belong to the environment: {", ".join(provided)}.
 No step writes them, and each is already in its final form before the first
 step runs. So a criterion that checks only one of them -- what it says, what it
 imports, that it exists -- is already true against the stub. RED_GATE runs every
 test before anything is implemented, sees that one pass, and stops the step
-(R4). Every criterion has to stay false until this step's own code under src/
+(R4). Every criterion has to stay false until this step's own code under {{SRC}}/
 is written. Where one of these files matters, test the code it calls, not the
 file.
-"""
+""")
         if "index.html" in provided:
             provided_text += """For the page: call `start` on an element and check what it puts there. Do not
 write a criterion about the text of index.html.
 """
 
+    # 取り込んだリポジトリには、最初のステップより前からコードがある。プランナーは
+    # コードを読めない（BOOTSTRAP 1-1）ので、ここに無ければ、そこにある関数も型も
+    # 知らずに計画を書く。署名だけを渡し、本体は渡さない。
+    existing = existing_contracts()
+    existing_text = ""
+    if existing:
+        existing_text = layout_text("""
+# What the code already declares
+
+The repository already has code under {SRC}/, written before this plan. These are
+its public declarations, read from the last commit and written in the same form
+as `contracts.provides`. They exist before the first step runs.
+
+Only the signatures are shown. The bodies are left out on purpose: you write
+the criteria, and criteria written while looking at an implementation describe
+that implementation rather than what the requirements ask for.
+
+A step that uses one of these puts that line in `contracts.requires`, copied as
+it stands, and needs no step to provide it (L3). If a step of this plan
+provides the same name, that step changes it: a step that uses the name then
+depends on that step instead.
+
+To change one of these, a step lists its file in `files_write` and the name in
+`contracts.provides`. Its stub replaces only the names in `provides`; every
+other declaration in the file keeps its real, working code while the tests
+first run. So a criterion that is already true because of code the step does
+not change passes against the stub, and RED_GATE stops the step (R4). Write
+each criterion so that it calls a name this step provides and fails until
+that name is written.
+
+Do not write criteria to show that the rest still works. The tests already in
+the repository run on every step, and a step that breaks one of them is not
+green. That is how unchanged behaviour is kept.
+
+""") + "\n".join(f"    {line}" for line in existing) + "\n"
+
     # テストが何に届くかを決めるファイル。言語ごとに名前は違うが仕事は同じで、
     # どちらでもプランナーに見せる必要がある。import のパスに逆らう計画は負ける。
-    wiring = PROJECT / ("vitest.config.mjs" if LANGUAGE["source_suffix"] == ".ts"
-                        else "conftest.py")
-    wiring_text = wiring.read_text(encoding="utf-8") if wiring.exists() else "(none)"
+    #
+    # C# にはそのファイルが根に無い。ランナーが書くテストの csproj がその仕事を
+    # するので、それを見せる。Unity の参照の一覧は長いので、見せる前に数にまとめる。
+    if LANGUAGE["wiring"]:
+        wiring = PROJECT / LANGUAGE["wiring"]
+        wiring_heading = f"{wiring.name} at the root, which the test runner loads automatically:"
+        wiring_text = wiring.read_text(encoding="utf-8") if wiring.exists() else "(none)"
+    else:
+        wiring_heading = ("The test project the runner writes and builds (outside the "
+                          "repository; no step writes it):")
+        try:
+            wiring_text = dotnet_projects()[DOTNET_BUILD / "tests" / "Tests.csproj"]
+            refs = wiring_text.count("<Reference ")
+            wiring_text = re.sub(r"(\s*<Reference [^\n]*)+",
+                                 f"\n    <!-- {refs} Unity reference assemblies -->"
+                                 if refs else "", wiring_text)
+        except (OSError, KeyError, ValueError):
+            wiring_text = "(not available: the .NET toolchain is not installed)"
 
     # 起動のつなぎを、説明ではなく全文で見せる。文章の説明は、それに向けて書く
     # プランナーには足りたが、出来上がった計画を読むクリティックには足りなかった。
@@ -2612,10 +4710,10 @@ It is what a person opens, and it is already wired:
     # どの実装でも変わらず、ソルバーは時間切れまで考えた。開けることは箱の検査が
     # 確かめ、計画には start が何を組み立てるかだけを書かせる。
     if page_text:
-        page_text += """
+        page_text += layout_text("""
 Opening the page through a development server (Vite, for example) is also the
 environment's job. The server serves index.html, and index.html loads `start`
-from src/main.ts; that path is checked when the machine is provisioned. If the
+from {SRC}/main.ts; that path is checked when the machine is provisioned. If the
 requirements say the page must open from a dev server, a step that exports
 `start` satisfies it. Write criteria about what `start` puts in the document.
 
@@ -2623,7 +4721,7 @@ Do not write criteria that start a development server, transform index.html, or
 check what a server sends back. That output is decided by the server, not by
 any code a step writes: no implementation can change it, and the step spends
 every attempt on it.
-"""
+""")
 
     # ここのほかのものと同じ理由で、書き写さずに集める。ただし、これは効き目が
     # 大きい。「窓が開く」のような条件は TclError で落ちるテストになり、それは
@@ -2658,7 +4756,10 @@ tests, to check its work by running something, or to install anything: it will
 try, be refused, and spend part of its attempt on it.
 """
 
-    if typescript:
+    if LANGUAGE["name"] == "csharp":
+        runtime = "Runtime: .NET 8 for the tests; the code is built as netstandard2.1"
+        toolkit, screen = csharp_facts()
+    elif typescript:
         runtime = f"Runtime: {version(Path('node'))}"
         toolkit = ("User interface: the DOM, via happy-dom. Every test file is "
                    "given a `document` with no display behind it.")
@@ -2695,7 +4796,7 @@ A human checks the screen afterwards; the runner never can.
 
 Language: {LANGUAGE["label"]}
 {runtime}
-Test runner: {version(VITEST if typescript else PYTEST)}
+Test runner: {version(LANGUAGE["test_runner"])}
 
 Graphical display: {f"DISPLAY={display}" if display else "NONE. DISPLAY is not set"}
 {toolkit}
@@ -2704,12 +4805,13 @@ Graphical display: {f"DISPLAY={display}" if display else "NONE. DISPLAY is not s
 The runner executes the tests itself, as:
     {command}
 {solver_tools}
-Everything under the project root, except plan/, .git/ and the frozen
-toolchain -- this is the whole of what exists today:
+The project root, and everything under the two directories steps write to
+({LAYOUT["src"]}/ and {LAYOUT["tests"]}/), except plan/, .git/ and the frozen
+toolchain:
 
 {tree}
-{provided_text}
-{wiring.name} at the root, which the test runner loads automatically:
+{provided_text}{existing_text}
+{wiring_heading}
 
 {wiring_text}
 {page_text}
@@ -3064,6 +5166,11 @@ Then say plainly:
   artifact's own logic: the read path is reachable, and what it finds is
   always nothing. Report that.
 
+  Code listed under "What the code already declares" is not such a thing. It
+  exists before the first step, so a step that calls it or reads what it
+  provides is using something that is already there. Do not report it as
+  something no step writes.
+
 Show your derivation with the actual numbers from the criteria, so that someone
 can check each step. Do not describe what the plan intends -- describe what it
 specifies. If your derivation contradicts what the prose in `goal` or
@@ -3152,7 +5259,7 @@ def call_critic(brief: str, mode: str) -> str:
     try:
         proc = run_agent("critic", "CRITIQUE", lambda: run(
             agent_command("critic", CRITIC_RUN, brief_path, limit),
-            timeout=limit + BACKSTOP_MARGIN))
+            timeout=limit + BACKSTOP_MARGIN), detail=mode)
     except subprocess.TimeoutExpired:
         raise Halt("CRITIQUE", f"critic still running after {limit + BACKSTOP_MARGIN}s",
                    "critic-run's internal timeout did not fire; check with: "
@@ -3511,6 +5618,7 @@ def cmd_plan_propose(step_id: str | None) -> int:
         print(f"nothing to revise: {ESCALATION} does not exist", file=sys.stderr)
         return 1
     load_settings(json.loads((PLAN / "tasks.json").read_text(encoding="utf-8")))
+    NOW["step"] = step_id
     step = None
     if step_id:
         step, _ = load_plan(step_id)
@@ -3761,7 +5869,38 @@ def complete_run(done: set[str], tasks: dict) -> None:
     publish("run completion")
 
 
+def check_baseline() -> None:
+    """最初のステップの前に、リポジトリにすでにあるテストが緑であること。
+
+    VERIFY はスイート全体の緑を求める。取り込んだ時点で落ちているテストや、
+    スキップされるテストがあると、どのステップも緑にならない。それは実装の失敗に
+    見え、ソルバーは試行を使い切り、エスカレーションはプランナーに届く。どちらも
+    直せない。直せるのは人だけなので、エスカレーションせずに止める。
+
+    テストのファイルが無ければ何もしない。新しいプロジェクトはいつもそうだ。
+    """
+    if not TESTS.is_dir() or not any(f.suffix in LANGUAGE["test_suffixes"]
+                                     for f in source_files(TESTS)):
+        return
+    baseline = pytest_run("baseline", [TESTS.relative_to(PROJECT).as_posix()])
+    ledger("BASELINE", tests=baseline.tests, failures=baseline.failures,
+           errors=baseline.errors, skipped=baseline.skipped)
+    if not (baseline.failures or baseline.errors or baseline.skipped):
+        return
+    detail = list(baseline.failure_details)
+    if baseline.skipped_names:
+        detail.append("skipped:\n  " + "\n  ".join(baseline.skipped_names))
+    raise Halt(
+        "PLAN_LOAD",
+        f"the tests already in the repository are not green before the first step "
+        f"({baseline.failures} failed, {baseline.errors} errored, {baseline.skipped} "
+        f"skipped); every step is checked against the whole suite, so none could "
+        f"go green. Fix or remove them, commit, and run again",
+        ("\n".join(detail) or ANSI.sub("", baseline.output))[-4000:])
+
+
 def run_step(step_id: str, unvalidated: bool = False) -> int:
+    NOW["step"], NOW["attempt"] = step_id, None
     tasks = json.loads((PLAN / "tasks.json").read_text(encoding="utf-8"))
     load_settings(tasks)
     problems = validate_plan(tasks)
@@ -3781,6 +5920,11 @@ def run_step(step_id: str, unvalidated: bool = False) -> int:
     if touched_paths():
         raise Halt("PLAN_LOAD", "the working tree is dirty; refusing to start",
                    "\n".join(sorted(touched_paths())))
+
+    # try の外で確かめる。落ちているのはこの計画の前からあるテストで、プランナーに
+    # エスカレーションしても直せない。
+    if not green_steps():
+        check_baseline()
 
     attempt = 0
     last_run: TestRun | None = None
@@ -3808,9 +5952,12 @@ def run_step(step_id: str, unvalidated: bool = False) -> int:
 
             # --- STUB ---------------------------------------------------
             set_writable(tests=False, src=True)
-            written = generate_stub(step, dep_contract_lines(step))
+            # 既存のファイルは、provides の名前だけを差し替える。丸ごと書き直すと、
+            # ステップに関係の無い関数まで消える。
+            originals = head_sources(step["files_write"])
+            written = generate_stub(step, dep_contract_lines(step), originals)
             if written is None:
-                call_solver("STUB", brief_stub(step))
+                call_solver("STUB", brief_stub(step, sorted(originals)))
                 ledger("STUB", step=step_id, ok=True, by="solver")
             else:
                 for rel, text in written.items():
@@ -3821,6 +5968,11 @@ def run_step(step_id: str, unvalidated: bool = False) -> int:
                        files=sorted(written))
             assert_touched("STUB", step["files_test"] + step["files_write"])
             assert_written("STUB", step["files_write"])
+            changed = stub_kept_the_rest(step, originals)
+            if changed:
+                raise Halt("STUB",
+                           "the stub changed existing code outside the names this "
+                           "step provides", "\n".join(changed))
 
             red = pytest_run(f"red-{write_attempt}", step["files_test"])
             broken = chr(10).join(k for k in red.failure_kinds
@@ -3874,7 +6026,7 @@ def run_step(step_id: str, unvalidated: bool = False) -> int:
                 "R4: some tests already pass against the stub, so they never "
                 "demonstrated the behaviour they claim to check",
                 "passing: " + ", ".join(red.passed_names))
-        bad = sorted({k for k in red.failure_kinds if not RED_KINDS.match(k)})
+        bad = sorted({k for k in red.failure_kinds if not LANGUAGE["red_kinds"].match(k)})
         if bad:                                                            # R5
             raise Halt("RED_GATE",
                        "R5: failures are not assertions -- the calls themselves are broken",
@@ -3906,14 +6058,20 @@ def run_step(step_id: str, unvalidated: bool = False) -> int:
         # ステップ「自身の」落ちたテストが一致せず、すべてソルバーに回帰として
         # 伝わる。「このステップの前に通っていたテストがいま落ちている」と、
         # 何も通っていなかった最初のステップで言われる。
+        #
+        # C# の classname は「名前空間.クラス」で、ファイルのパスを持たない。
+        # クラスの名前はファイル名と同じ決まりなので、ファイル名で突き合わせる
+        # （test_owner）。
         own_tests = {Path(p).with_suffix("").as_posix().replace("/", ".")
-                     for p in step["files_test"]} | set(step["files_test"])
+                     for p in step["files_test"]} | set(step["files_test"]) \
+            | set(csharp_test_classes(step["files_test"]))
 
         timeouts = 0
         while attempt < len(schedule):
             backend = schedule[attempt]
             handover = attempt > 0 and backend != schedule[attempt - 1]
             attempt += 1
+            NOW["attempt"] = attempt
             set_writable(tests=None, src=True)   # tests/ は凍結したまま。set_writable を参照
 
             # 修理ではない試行には、きれいな木を用意する。ここには2つの別のものが
@@ -3961,7 +6119,7 @@ def run_step(step_id: str, unvalidated: bool = False) -> int:
             # この設計で関門が訊いてよいのは、その種類の問いだけだ。
             green = pytest_run(f"verify-{attempt}", [TESTS.relative_to(PROJECT).as_posix()])
             last_run = green
-            regressions = [f for f in green.failed_files if f not in own_tests]
+            regressions = [f for f in green.failed_files if test_owner(f) not in own_tests]
             # skipped を記録に入れる。緑は後から台帳だけで証明できなければ
             # ならず、「失敗なし」はテストが走ったことを証明しないからだ。
             ledger("VERIFY", step=step_id, attempt=attempt, backend=backend,
@@ -3999,7 +6157,8 @@ def run_step(step_id: str, unvalidated: bool = False) -> int:
                       "implementation has to stop breaking them, while still "
                       "satisfying this step.\n\n" + last_failure)
         else:
-            broke = [f for f in last_run.failed_files if f not in own_tests] if last_run else []
+            broke = [f for f in last_run.failed_files
+                     if test_owner(f) not in own_tests] if last_run else []
             tried = ", ".join(dict.fromkeys(schedule))
             reason = (f"still failing after {attempt} attempts"
                       + (f" across {tried}" if len(SOLVER_TIERS) > 1 else ""))
@@ -4270,6 +6429,13 @@ def main() -> int:
 
     if fence_is_open():
         return 1
+
+    # どのコマンドの中の作業かを、いまの作業の説明に使う。終わるときは、どの
+    # 経路で終わっても「何もしていない」に戻す。
+    NOW["command"] = " ".join(v for v in (args.cmd, getattr(args, "plan_cmd", None),
+                                          "--all" if getattr(args, "all", False) else None)
+                              if v)
+    atexit.register(report_now, None)
 
     try:
         if args.cmd == "validate":

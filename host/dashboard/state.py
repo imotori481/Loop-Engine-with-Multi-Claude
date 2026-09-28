@@ -64,15 +64,124 @@ ESCALATION_FILES = {
 }
 
 
+# グラフに出す役。台帳の USAGE の who と同じ名前を使う。
+ROLES = ("planner", "critic", "solver")
+
+
+def usage_tokens(record: dict[str, Any]) -> int:
+    """USAGE 1件のトークン数。数え方はランナーの画面の in と out に合わせる。
+
+    入力は、キャッシュから読んだ分と書いた分を足す。
+    """
+    usage = record.get("usage")
+    if not isinstance(usage, dict):
+        return 0
+    total = 0
+    for key in ("input_tokens", "cache_creation_input_tokens",
+                "cache_read_input_tokens", "output_tokens"):
+        value = usage.get(key)
+        if isinstance(value, (int, float)):
+            total += int(value)
+    return total
+
+
+def token_runs(ledger: list[dict[str, Any]], source: str = "") -> list[dict[str, Any]]:
+    """1つの台帳を、loop go から完了までの回に分け、回ごと役ごとのトークン数を足す。
+
+    1回は PLAN_BOOTSTRAP から始まり、次の PLAN_BOOTSTRAP の手前で終わる。
+    計画づくりと批評は run --all より前に流れるので、RUN_ALL_START では区切らない。
+    PLAN_BOOTSTRAP より前に記録があれば、最初の記録から1回目を始める。
+    USAGE が1件も無い回は、消費を記録する前の台帳なので返さない。
+
+    結果は最後に起きたものを取る。ALL_GREEN なら完了、RUN_ALL_STOP なら停止。
+    次の PLAN_BOOTSTRAP が来た回は、完了していなければ中断とする。
+    """
+    runs: list[dict[str, Any]] = []
+    current: dict[str, Any] | None = None
+    for record in ledger:
+        event = record.get("event")
+        if event == "PLAN_BOOTSTRAP" or current is None:
+            if current is not None and current["outcome"] != "green":
+                current["outcome"] = "abandoned"
+            current = {"source": source, "started": record.get("ts", ""),
+                       "outcome": "running", "calls": 0,
+                       "tokens": dict.fromkeys(ROLES, 0)}
+            runs.append(current)
+        if event == "USAGE" and record.get("who") in ROLES:
+            current["tokens"][record["who"]] += usage_tokens(record)
+            current["calls"] += 1
+        elif event == "ALL_GREEN":
+            current["outcome"] = "green"
+        elif event == "RUN_ALL_STOP":
+            current["outcome"] = "stopped"
+        elif event == "RUN_ALL_START":
+            current["outcome"] = "running"
+    return [run for run in runs if run["calls"]]
+
+
+def ledger_files(root: Path) -> list[Path]:
+    """写しの置き場の下にある台帳。loop-pull の projects\\*、runs\\*、project を拾う。
+
+    同じ回が2か所にあるときは先に拾ったほうの名前が残る。project より
+    projects\\<name> のほうが、どのプロジェクトかが分かるので先に拾う。
+    """
+    return sorted(root.glob("*/*/plan/ledger.jsonl")) + sorted(root.glob("*/plan/ledger.jsonl"))
+
+
+def token_history(root: Path) -> list[dict[str, Any]]:
+    """写しの置き場にある全台帳の回を、開始時刻の順に並べて番号を振る。
+
+    1つのプロジェクトの台帳には、ふつう1回分しか入らない。bootstrap は緑の
+    ステップがあると断るからだ。だから回の履歴は、写しを横断して作る。
+    project は今のプロジェクトの写しで、projects の下と同じ回を持つ。
+    開始時刻とトークン数が同じ回は1つにまとめる。
+    """
+    seen = set()
+    runs = []
+    for path in ledger_files(root):
+        source = path.parent.parent.relative_to(root).as_posix()
+        for run in token_runs(read_jsonl(path), source):
+            key = (run["started"], tuple(run["tokens"].values()))
+            if key in seen:
+                continue
+            seen.add(key)
+            runs.append(run)
+    runs.sort(key=lambda run: run["started"])
+    for number, run in enumerate(runs, 1):
+        run["run"] = number
+    return runs
+
+
 def request_id(kind: str, value: Any) -> str:
     encoded = json.dumps(value, ensure_ascii=False, sort_keys=True).encode("utf-8")
     return hashlib.sha256(kind.encode("ascii") + b"\0" + encoded).hexdigest()[:16]
 
 
+def approved_review(ledger: list[dict[str, Any]],
+                    decisions: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """写しの最後の ALL_GREEN に対する承認。無ければ None。
+
+    PR に出してよいのは、承認した ALL_GREEN が写しの最後のものである間だけだ。
+    次の回が緑になれば、前の承認はその回について何も言っていない。
+    """
+    all_green = next(
+        (record for record in reversed(ledger) if record.get("event") == "ALL_GREEN"), None)
+    if all_green is None:
+        return None
+    review_id = request_id("review", all_green)
+    return next((item for item in reversed(decisions)
+                 if item.get("event") == "HUMAN_DECISION" and item.get("kind") == "review"
+                 and item.get("request_id") == review_id
+                 and item.get("decision") == "approve"), None)
+
+
 class DashboardState:
-    def __init__(self, project: Path, data_dir: Path):
+    def __init__(self, project: Path, data_dir: Path, mirrors: Path | None = None):
         self.project = project.resolve()
         self.data_dir = data_dir.resolve()
+        # トークンの履歴を読む写しの置き場。loop-pull は project と同じ場所に
+        # projects と runs を置く。
+        self.mirrors = mirrors.resolve() if mirrors is not None else self.project.parent
         self.decisions_file = self.data_dir / "decisions.jsonl"
         # サーバはスレッドで動くので、2つの判断が同時に届くことがある。
         # 要求がまだ保留中かを確かめることと、答えを記録することは、分けられ
@@ -121,6 +230,13 @@ class DashboardState:
                     "detail": "機械的な受け入れ条件は完了しました。成果物を起動し、承認または差し戻しを記録してください。",
                 }
 
+        pull_request = None
+        approved = approved_review(ledger, decisions)
+        if approved is not None:
+            pull_request = {"request_id": approved["request_id"], "result": next(
+                (item for item in reversed(decisions) if item.get("event") == "PULL_REQUEST"
+                 and item.get("request_id") == approved["request_id"]), None)}
+
         pending = stuck + ([review] if review is not None else [])
         last = ledger[-1] if ledger else None
         if any(item["kind"] == "planner" for item in stuck):
@@ -143,6 +259,8 @@ class DashboardState:
             "pending": pending,
             "last_event": last,
             "recent_events": ledger[-50:],
+            "token_runs": token_history(self.mirrors),
+            "pull_request": pull_request,
             "decisions": decisions[-50:],
         }
 
@@ -187,6 +305,23 @@ class DashboardState:
             "user": user,
         }
         self._append(record)
+        return record
+
+    def approved(self) -> dict[str, Any] | None:
+        """写しの最後の ALL_GREEN に対する承認と、その ALL_GREEN の記録。"""
+        ledger = read_jsonl(self.project / "plan" / "ledger.jsonl")
+        approval = approved_review(ledger, read_jsonl(self.decisions_file))
+        if approval is None:
+            return None
+        all_green = next(r for r in reversed(ledger) if r.get("event") == "ALL_GREEN")
+        return {**approval, "steps": all_green.get("steps") or []}
+
+    def record_pull_request(self, request: str, outcome: dict[str, Any]) -> dict[str, Any]:
+        """PR を出した結果を追記する。成功なら url、失敗なら error を持つ。"""
+        record = {"ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "event": "PULL_REQUEST",
+                  "request_id": request, **outcome}
+        with self._lock:
+            self._append(record)
         return record
 
     def _append(self, record: dict[str, Any]) -> None:

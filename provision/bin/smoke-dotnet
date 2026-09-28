@@ -1,0 +1,132 @@
+#!/usr/bin/env bash
+# 凍結したフィードだけで、C# のテストがビルドされ、走り、junit のレポートを出すか。
+#
+#     sudo -u runner -H /srv/loop/bin/smoke-dotnet
+#
+# 36-dotnet.sh がプロビジョニングのたびに流す。コードは netstandard2.1（Unity が
+# 読める形）、テストは net8.0 の NUnit 3 で、ランナーが使うのと同じ組み合わせ。
+# 通るテストと落ちるテストを1つずつ置き、2件走って1件落ちることを確かめる。
+# 落ちたテストの type と message をそのまま出す。ランナーは例外の型をそこから
+# 読むので、ロガーの版を変えたときに形が変わっていないかをここで見る。
+set -euo pipefail
+
+TOOLS="${LOOP_DOTNET_TOOLS:-/srv/loop/dotnet}"
+export DOTNET_CLI_TELEMETRY_OPTOUT=1 DOTNET_NOLOGO=1 DOTNET_SKIP_FIRST_TIME_EXPERIENCE=1
+
+[ -r "$TOOLS/nuget.config" ] || { echo "smoke-dotnet: no $TOOLS/nuget.config; run 36-dotnet.sh" >&2; exit 2; }
+versions="$(cat "$TOOLS/feed/.versions")"
+version_of() { tr ' ' '\n' <<<"$versions" | sed -n "s/^$1=//p"; }
+
+WORK="$(mktemp -d)"
+trap 'rm -rf "$WORK"' EXIT
+mkdir -p "$WORK/src" "$WORK/tests" "$WORK/code" "$WORK/test"
+
+cat > "$WORK/src/Calc.cs" <<'EOF'
+namespace Smoke
+{
+    public static class Calc
+    {
+        public static int Add(int a, int b) => a + b;
+    }
+}
+EOF
+cat > "$WORK/tests/CalcTests.cs" <<'EOF'
+using NUnit.Framework;
+
+namespace Smoke.Tests
+{
+    public class CalcTests
+    {
+        [Test]
+        public void AddsTwoNumbers() => Assert.AreEqual(5, Calc.Add(2, 3));
+
+        [Test]
+        public void FailsOnPurpose() => Assert.AreEqual(6, Calc.Add(2, 3));
+    }
+}
+EOF
+
+# 2つの csproj は別のディレクトリに置く。同じディレクトリだと obj/ を分け合い、
+# restore の結果が互いを上書きする。
+cat > "$WORK/code/Code.csproj" <<EOF
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>netstandard2.1</TargetFramework>
+    <LangVersion>9.0</LangVersion>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="$WORK/src/**/*.cs" />
+  </ItemGroup>
+</Project>
+EOF
+cat > "$WORK/test/Tests.csproj" <<EOF
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <LangVersion>9.0</LangVersion>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <IsPackable>false</IsPackable>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="$WORK/tests/**/*.cs" />
+    <ProjectReference Include="../code/Code.csproj" />
+    <PackageReference Include="NUnit" Version="$(version_of NUnit)" />
+    <PackageReference Include="NUnit3TestAdapter" Version="$(version_of NUnit3TestAdapter)" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="$(version_of Microsoft.NET.Test.Sdk)" />
+    <PackageReference Include="JunitXml.TestLogger" Version="$(version_of JunitXml.TestLogger)" />
+  </ItemGroup>
+</Project>
+EOF
+
+fail=0
+note() { echo "  $1"; }
+bad()  { echo "  FAIL: $1"; fail=1; }
+
+echo "dotnet: $(dotnet --version)"
+if dotnet restore "$WORK/test/Tests.csproj" --configfile "$TOOLS/nuget.config" >"$WORK/restore.log" 2>&1; then
+  note "ok: restored from $TOOLS/feed alone"
+else
+  cat "$WORK/restore.log"
+  bad "restore failed with only the frozen feed as a source"
+fi
+
+REPORT="$WORK/report.xml"
+if [ "$fail" -eq 0 ]; then
+  # 1件落とすので、終了コードは 0 にならない。判定はレポートから読む。
+  dotnet test "$WORK/test/Tests.csproj" --no-restore \
+    --logger "junit;LogFilePath=$REPORT" >"$WORK/test.log" 2>&1 || true
+  if [ ! -s "$REPORT" ]; then
+    cat "$WORK/test.log"
+    bad "no junit report at $REPORT"
+  else
+    counts="$(python3 - "$REPORT" <<'PY'
+import sys
+import xml.etree.ElementTree as ET
+root = ET.parse(sys.argv[1]).getroot()
+cases = root.iter("testcase")
+tests = failures = 0
+for case in cases:
+    tests += 1
+    for failure in case.findall("failure"):
+        failures += 1
+        print(f"    failure type={failure.get('type')!r} message={failure.get('message', '')[:120]!r}",
+              file=sys.stderr)
+print(tests, failures)
+PY
+)"
+    if [ "$counts" = "2 1" ]; then
+      note "ok: 2 tests ran and 1 failed, read from the junit report"
+    else
+      bad "expected '2 1' (tests failures), got '$counts'"
+    fi
+  fi
+fi
+
+if [ "$fail" -eq 0 ]; then
+  echo "smoke-dotnet: ok"
+else
+  echo "smoke-dotnet: 壊れている" >&2
+  exit 1
+fi

@@ -28,8 +28,8 @@ cd /tmp   # /home/<誰か> は 0700 で、sudo -u runner はそこに cd でき�
 # プロジェクトには計画が無く、下の各ケースは計画を読む時点で落ちる。検査が
 # 無いだけなのに、壊れているように見える。
 if ! sudo -u runner test -f "$TASKS"; then
-  echo "smoke-plan: cannot run -- there is no plan at $TASKS" >&2
-  echo '            run: plan bootstrap -- then re-run this.' >&2
+  echo "smoke-plan: 流せない。$TASKS に計画が無い" >&2
+  echo '            先に計画を作り（loop go など）、流し直す。' >&2
   exit 1
 fi
 

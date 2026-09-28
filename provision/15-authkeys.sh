@@ -25,7 +25,7 @@ if [ -f "$PUB" ]; then
 elif [ -s "$KEYS" ]; then
   note="no new key at $PUB; kept the one already installed"
 else
-  echo "FATAL: $PUB not found, and runner has no key yet" >&2
+  echo "FATAL: $PUB が無く、runner にもまだ鍵が無い（provision/README §2-7 で流し込む）" >&2
   exit 1
 fi
 

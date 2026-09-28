@@ -9,13 +9,72 @@ WSL2 では起動と生存管理がホスト側の責務になった（`RUNNER_S
 | ファイル | 置き場所 | 役割 |
 |---|---|---|
 | `loop-dev.cmd` | `C:\Users\<you>\bin\loop-dev.cmd`（PATH の通った場所） | ディストロ起動 → sshd 待機 → VS Code Remote-SSH 起動 |
+| `loop.cmd` | このリポジトリのまま（`host` を PATH に足す） | ディストロ起動 → sshd 待機 → 箱の `loop` コマンドを実行 |
+| `loop-import.cmd` | このリポジトリのまま（`host` を PATH に足す） | 既存リポジトリのブランチを箱のプロジェクトとして取り込む |
+| `loop-unity-refs.cmd` / `.ps1` | このリポジトリのまま（`host` を PATH に足す） | Unity のプロジェクトがコンパイルに使う参照アセンブリを箱へ送る |
 | `wsl-keepalive.vbs` | このリポジトリのまま（タスクが絶対パスで参照する） | VM を**窓を出さずに**生かし続ける。下の keepalive タスクの実体 |
-| `loop-pull.cmd` | このリポジトリのまま | **すべての** `repo*.git` を run ごとのミラーに引く。**VHDX を失っても残る唯一の複製** |
+| `loop-pull.cmd` | このリポジトリのまま | **すべての** `repo*.git` と `projects/*/repo.git` をホストのミラーに引く。**VHDX を失っても残る唯一の複製** |
 | `loop-dashboard.cmd` | このリポジトリのまま | 進捗、エスカレーション、予定レビューを扱うGUIを起動（`127.0.0.1:8443`） |
 
 **ASCII のみで書くこと。** PowerShell 5.1 と cmd.exe は BOM 無し UTF-8 を ANSI として
 読むため、日本語コメントを入れると行継続として誤解釈され、変数が黙って null になる
 （`provision/README.md` §3-6）。
+
+## 箱を操作する
+
+`loop.cmd` は、ディストロを起動して sshd を待ち、`ssh -t loop-dev loop <引数>` を流す。
+引数は箱の `loop` コマンドと同じ（`provision/README.md` §2-10）。
+
+`loop` だけで打てるよう、このリポジトリの `host` ディレクトリをユーザーの PATH に足す
+（手順は `docs/COMMANDS.md`）。コピーして置くと、pull しても更新が届かない。
+
+```cmd
+loop go C:\path\to\requirements.md
+loop status
+loop log
+```
+
+`go` に渡した要件がこの機械のファイルなら、先に保守ユーザーのホームへ
+`loop-requirements.md` として送る。走行は箱の中で続くので、窓を閉じてもよい。
+続きは `loop log` で追う。
+
+## 既存リポジトリを取り込む
+
+```cmd
+loop-import <project> <repo-url> <branch> [<base-branch>]
+```
+
+次の順に流す。どこかで失敗したら、その場で止まり、次に打つコマンドを出す。
+
+1. `<repo-url>` を `C:\dev\roop-engin\projects\<project>` にクローンする。もうあれば使い回す。そのときは、`origin` が `<repo-url>` であることと、未コミットの変更が無いことを確かめてから fetch する
+2. `<branch>` に切り替える。手元にも `origin` にも無ければ、`<base-branch>` から作る。`<base-branch>` を省くと、`origin` の既定のブランチから作る。作ったときは、親ブランチを `git config branch.<branch>.loopBase` に記録する。ダッシュボードが PR を出す先になる。`<branch>` がもうあるときは、`<base-branch>` を渡したときだけ記録する
+3. 箱で `loop project init <project> --branch <branch>` を流す
+4. `loop-runner` で `<branch>` を箱の bare に push する
+5. 箱で `loop project use <project>` を流す
+
+クローンの置き場は、冒頭の `set "WORKROOT=..."` で決まる。GitHub とやり取りするのはこのクローンだけだ。
+箱には GitHub の資格情報を置かない。
+
+## Unity の参照アセンブリを送る
+
+```cmd
+loop-unity-refs <project> <unity-project-dir>
+```
+
+箱には Unity が無い。Unity のプロジェクトの C# をコンパイルするには、Unity がコンパイルに使う
+DLL が要る。`<unity-project-dir>` の `Assembly-CSharp.csproj` から集めて送る。
+
+- `Assembly-CSharp.csproj` は Unity が外部のコードエディタのために書く。無ければ、Unity で
+  プロジェクトを開き、Preferences > External Tools で Visual Studio か Rider を選び、
+  Assets > Open C# Project を1回流す
+- 集めるのは、csproj の `HintPath` の DLL と、プロジェクト参照（パッケージ）の
+  `Library\ScriptAssemblies\<名前>.dll`。ネイティブの DLL、`NetStandard` の DLL、
+  `Assembly-CSharp*` は外す
+- 定義シンボルは `UNITY_EDITOR` の系統を外して送る。C# の版と Unity の版も送る
+- 箱では `loop project unity-refs` が root の所有で `/srv/loop/projects/<project>/unity-refs/` に置く
+- `-DryRun` を付けると、tar を作ったところで止まり、何も送らない
+
+Unity の版やパッケージを変えたら、もう一度送る。
 
 ## オペレーターGUI
 
@@ -149,21 +208,33 @@ git clone loop-runner:/srv/loop/repo.git <置き場所>
 | 段 | どこへ | 何から守るか |
 |---|---|---|
 | 1 | `project` → `/srv/loop/repo.git` | `reset` / `clean`。**同じ VHDX の中**なので、それ以上は守らない |
-| 2 | `repo.git` → `<MIRRORROOT>\project`、過去run → `runs\run-NNN` | **VHDX の消失**。ここで初めて別のディスクに乗る |
+| 2 | `repo.git` → `<MIRRORROOT>\project`、過去run → `runs\run-NNN`、プロジェクト → `projects\<名前>` | **VHDX の消失**。ここで初めて別のディスクに乗る |
 | 3 | ミラー → GitHub など | ホストの故障。やるなら**鍵はホストだけが持つ** |
 
 段1 はランナーが自動でやる（`loop.py` の `publish()`、GREEN と `plan apply` の直後）。
 段2 が `loop-pull.cmd`。**引数も事前のクローンも要らない** ── サンドボックスにある
-`repo*.git` を全部列挙し、無ければクローン、有れば fetch する。
+`repo*.git` と `projects/*/repo.git` を全部列挙し、無ければクローン、有れば fetch する。
 1件でも clone / fetch / reset / clean / fast-forward に失敗すれば、その場で非ゼロ終了する。
-不変アーカイブをすべて確認してから最後にライブミラーへ進むため、アーカイブ同期に失敗した
-状態でライブを作り直さない。成功済みの独立アーカイブは巻き戻さないが、部分成功を
+プロジェクト、不変アーカイブの順にすべて確認してから最後にライブミラーへ進むため、どちらかの
+同期に失敗した状態でライブを作り直さない。成功済みの独立アーカイブは巻き戻さないが、部分成功を
 「done」と表示してはならない。
 
 ```text
-/srv/loop/repo.runN.git  ->  <MIRRORROOT>\runs\run-NNN  （不変。ff のみ）
-/srv/loop/repo.git       ->  <MIRRORROOT>\project        （現行。毎回作り直す）
+/srv/loop/projects/<名前>/repo.git  ->  <MIRRORROOT>\projects\<名前>  （remote loop に fetch）
+/srv/loop/repo.runN.git             ->  <MIRRORROOT>\runs\run-NNN      （不変。ff のみ）
+/srv/loop/repo.<名前>.git            ->  <MIRRORROOT>\runs\<名前>        （不変。ff のみ）
+/srv/loop/repo.git                  ->  <MIRRORROOT>\project           （現行。毎回作り直す）
 ```
+
+プロジェクトの写しは `loop-import.cmd` のクローンと同じ場所で、`origin` は GitHub のままにする。
+箱のコミットは remote `loop` として入る。
+
+- 箱が作業するブランチは bare の HEAD から読む。手元のそのブランチは、早送りできるときだけ進める。早送りできないときと、手元の変更が邪魔をするときは `NOTE` を出して動かさない。写しは `loop/<ブランチ>` に入っているので、失敗とは数えない
+- ランナーのタグ（`step-S1` など）は `refs/loop-tags/` に入れる。`refs/tags/` に入れると、`git push --tags` で GitHub に届く
+- GitHub への push は、ダッシュボードで予定レビューを承認したときに PR として行う（`dashboard/README.md`）。手で出す手順は `docs/COMMANDS.md`
+
+`/srv/loop/repo.git` が今のプロジェクトへのリンクのときも、`project` は今のプロジェクトの写しになる。
+作り直す先は、bare の HEAD が指すブランチだ。
 
 `<MIRRORROOT>` は `loop-pull.cmd` 冒頭の `set "MIRRORROOT=..."` で決まる。使う前に自分の置き場所に書き換える。
 
@@ -193,4 +264,9 @@ git clone loop-runner:/srv/loop/repo.git <置き場所>
 
 ## 更新履歴
 
+- 2026/09/27: `loop-import.cmd` が親ブランチを `branch.<branch>.loopBase` に記録するように変更
+- 2026/09/27: Unity の参照アセンブリを箱へ送る `loop-unity-refs` を追加
+- 2026/09/27: `loop-pull.cmd` がプロジェクトごとの写しを引くように変更
+- 2026/09/27: 既存リポジトリを取り込む `loop-import.cmd` を追加
+- 2026/09/26: 箱の `loop` コマンドを呼ぶ `loop.cmd` を追加
 - 2026/09/26: `~/.ssh/config` の鍵の名前を `loop-dev` / `loop-runner` に、keepalive とミラーのパスを置き換え前提の書き方に変更

@@ -74,6 +74,13 @@ class WhatTheCriticIsTold(unittest.TestCase):
         self.assertIn("step ever writes", brief)
         self.assertIn("Report that.", brief)
 
+    def test_code_that_was_there_before_the_plan_is_not_a_read_nothing_writes(self):
+        # 取り込んだリポジトリの関数を呼ぶステップは、どのステップも書かない
+        # ものを読んでいるように見える。最初からあるものだと伝える。
+        brief = brief_critique_trace(TASKS)
+        self.assertIn('"What the code already declares" is not such a thing', brief)
+        self.assertIn("exists before the first step", brief)
+
 
 class ReadingTheAnswer(unittest.TestCase):
     """読めない批評は何も言っておらず、決して問題なしと読んではならない。"""

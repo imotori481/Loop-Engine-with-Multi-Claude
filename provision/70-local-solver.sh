@@ -36,10 +36,10 @@ install -o root -g root -m 755 bin/solver-local /srv/loop/bin/solver-local
 install -o root -g root -m 755 bin/smoke-local  /srv/loop/bin/smoke-local
 
 echo
-echo "installed:"
-echo "  /srv/loop/bin/llm-serve      (run as llm)"
-echo "  /srv/loop/bin/solver-local   (exec'd by solver-run when a plan names it)"
-echo "  /srv/loop/bin/smoke-local    (run as solver)"
+echo "置いたもの:"
+echo "  /srv/loop/bin/llm-serve      （llm として動かす）"
+echo "  /srv/loop/bin/solver-local   （計画が local を挙げたとき、solver-run が起動する）"
+echo "  /srv/loop/bin/smoke-local    （solver として流す）"
 
 # --------------------------------------------------------------------------
 # このスクリプトが確かめずには行わない唯一の手順。
@@ -47,42 +47,39 @@ echo "  /srv/loop/bin/smoke-local    (run as solver)"
 if ! command -v llama-server >/dev/null 2>&1; then
   cat <<'EOF'
 
-llama-server is not on PATH. It has to be BUILT, and that is not a preference:
-llama.cpp publishes no CUDA binary for Linux (only Windows), and the Vulkan
-Linux build finds nothing but llvmpipe under WSL -- measured on this box,
-2026-09-01 -- so it would run on the CPU while looking like it was not.
+llama-server が PATH に無い。ビルドする必要がある。好みの問題ではない。
+llama.cpp は Linux 向けの CUDA 版を配っていない（Windows 向けだけ）。Linux の
+Vulkan 版は、WSL では llvmpipe しか見つけない（2026-09-01 にこの箱で測った）。
+つまり、GPU で動いているように見えて CPU で動く。
 
-  sudo -u <you> bash ~/build-llama.sh      # see LOCAL_SOLVER.md 1-1
+  sudo -u <you> bash ~/build-llama.sh      # LOCAL_SOLVER.md 1-1 を参照
 
-  In short: cuda-keyring from the wsl-ubuntu repo, then cuda-nvcc +
-  cuda-cudart-dev + libcublas-dev, then
+  要点: wsl-ubuntu のリポジトリから cuda-keyring を入れ、cuda-nvcc、
+  cuda-cudart-dev、libcublas-dev を入れてから、
 
     cmake -B build -DCMAKE_BUILD_TYPE=Release -DGGML_CUDA=ON \
           -DCMAKE_CUDA_ARCHITECTURES=75 -DLLAMA_CURL=OFF
     cmake --build build -j"$(nproc)" --target llama-server
 
-  75 is Turing (RTX 2060). Naming one architecture rather than all of them is
-  most of the build time, and building only the llama-server target is most of
-  the rest.
+  75 は Turing（RTX 2060）。アーキテクチャを1つに絞るとビルド時間の大半が減り、
+  ターゲットを llama-server だけにすると残りの大半が減る。
 
-  No GPU?  /usr/lib/wsl/lib/nvidia-smi   answers that (it is not on PATH). With
-  no GPU this is a CPU inference of a 9B on six cores: single-digit tokens per
-  second, several hundred seconds per attempt. Read the timeout note in
-  LOCAL_SOLVER.md before running a plan -- the design does not change, but the
-  numbers do.
+  GPU があるかは /usr/lib/wsl/lib/nvidia-smi で分かる（PATH には無い）。GPU が
+  無ければ、9B のモデルを6コアの CPU で推論することになる。毎秒数トークン、
+  1回の試行に数百秒かかる。計画を走らせる前に LOCAL_SOLVER.md の時間切れの注意を
+  読む。設計は変わらないが、数字が変わる。
 EOF
 fi
 
 if [ ! -r /srv/loop/models/model.gguf ] && [ -z "${LOOP_LLM_WEIGHTS:-}" ]; then
   cat <<'EOF'
 
-No weights yet. Put the .gguf at /srv/loop/models/model.gguf:
+重みがまだ無い。.gguf を /srv/loop/models/model.gguf に置く:
 
-    install -o root -g llm -m 0440 <downloaded>.gguf /srv/loop/models/model.gguf
+    install -o root -g llm -m 0440 <ダウンロードしたもの>.gguf /srv/loop/models/model.gguf
 
-0440 root:llm on purpose -- the solver account has no reason to read the model
-it is being served by, and giving it the file back would be handing over
-something the design just took away.
+0440 root:llm は意図したものだ。solver のアカウントには、自分に答えを返している
+モデルを読む理由が無い。読ませれば、設計が取り上げたものを返すことになる。
 EOF
 fi
 
@@ -106,37 +103,37 @@ WantedBy=multi-user.target
 EOF
   systemctl daemon-reload
   echo
-  echo "systemd is present. Start it with:"
+  echo "systemd がある。次で起動する:"
   echo "    systemctl enable --now loop-llm"
   echo "    systemctl status loop-llm --no-pager"
 else
   cat <<'EOF'
 
-systemd is not running in this distro, so there is no unit to enable. Start the
-server detached and leave it:
+このディストロでは systemd が動いていないので、有効にするユニットが無い。
+サーバを切り離して起動し、そのまま置いておく:
 
     sudo -u llm setsid nohup /srv/loop/bin/llm-serve >/srv/loop/models/serve.out 2>&1 &
 
-It lives as long as the VM does. The VM lives as long as the keepalive task
-does -- so the rule from README 3-2 applies here too: do NOT `wsl --shutdown`.
+サーバは VM が生きているあいだ動く。VM は keepalive タスクが生きているあいだ動く。
+だから README 3-2 の決まりがここでも効く。`wsl --shutdown` は使わない。
 EOF
 fi
 
 cat <<'EOF'
 
-Next:
+次:
     sudo -u solver /srv/loop/bin/smoke-local
 
-Then, in plan/tasks.json:
+そのあと、plan/tasks.json に:
     "solver_tiers": ["local", "claude"],
     "policy": {"retry": "resample"},
     "limits": {"attempts": 8}
 
-solver_tiers is required: the default is ["claude"], and without it the local
-model is never called.
+solver_tiers は必須だ。既定は ["claude"] で、書かなければローカルモデルは一度も
+呼ばれない。
 
-WARNING about 60-egress.sh: with "claude" or "codex" still in solver_tiers the
-solver needs its outbound API host. Tightening egress to loopback-only breaks
-the fallback tier, and it breaks it as a timeout rather than as an error.
-Tighten only once the tier list is ["local"].
+60-egress.sh についての注意: solver_tiers に "claude" か "codex" が残っているなら、
+solver は外の API のホストに届く必要がある。外向きをループバックだけに絞ると、
+予備の段が壊れる。しかもエラーではなく時間切れとして壊れる。絞るのは、段の
+並びが ["local"] だけになってからにする。
 EOF

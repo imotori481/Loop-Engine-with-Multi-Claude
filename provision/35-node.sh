@@ -23,6 +23,7 @@ set -euo pipefail
 
 TOOLS=/srv/loop/node
 P=/srv/loop/project
+. "$(dirname "$0")/layout.sh"
 
 # 版を固定する。範囲で書くと、数か月後の `npm install` が、誰も選ばない
 # うちに関門の意味を変えてしまう。
@@ -92,8 +93,8 @@ fi
 # 書き込みとして報告する。
 IGNORE="$P/.gitignore"
 if grep -qx 'node_modules/\?' "$IGNORE" 2>/dev/null; then
-  echo "35-node: refusing: $IGNORE ignores node_modules at every depth" >&2
-  echo "  Change that line to /node_modules -- see the comment above." >&2
+  echo "35-node: 進まない。$IGNORE が node_modules をすべての深さで無視している" >&2
+  echo "  その行を /node_modules に変える。理由はこのスクリプトのコメントと provision/README §3-20。" >&2
   exit 1
 fi
 grep -qx '/node_modules' "$IGNORE" 2>/dev/null || \
@@ -109,13 +110,22 @@ grep -qx '/node_modules' "$IGNORE" 2>/dev/null || \
 # グループ solverw を継ぎ、runner の umask 002 で 664 になる。つまり solver が
 # 書ける。柵を閉じるのを後のスクリプトに任せて、開いたまま残ったことが
 # 一度ある（20-layout.sh を参照）。
-sudo -u runner tee "$P/vitest.config.mjs" >/dev/null <<'EOF'
+#
+# 取り込んだリポジトリが同じ名前のファイルを持っていれば、上書きせずに止まる。
+# runner 以外がコミットしたことのあるファイルは、そのリポジトリの持ち物だ。
+for f in vitest.config.mjs index.html; do
+  if sudo -u runner git -C "$P" log --format=%an -- "$f" 2>/dev/null | grep -qvx 'loop runner'; then
+    echo "35-node: リポジトリが自分の $f を持っている。上書きしない" >&2
+    exit 1
+  fi
+done
+sudo -u runner tee "$P/vitest.config.mjs" >/dev/null <<EOF
 // happy-dom gives every test file a document without a display. This is the
 // whole reason the Node track exists: a UI that can be clicked by a machine.
 export default {
   test: {
     environment: "happy-dom",
-    include: ["tests/**/*.test.{js,mjs,ts}"],
+    include: ["$LAYOUT_TESTS/**/*.test.{js,mjs,ts}"],
     root: ".",
   },
 };
@@ -135,15 +145,15 @@ chmod 644 "$P/vitest.config.mjs"
 # だった。テストがそこを作り話で迂回した唯一の経路だったからだ。ここでは
 # それが箱の事実になる。常に存在し、常に同じ export された関数を呼ぶ。
 # 残るのは `src/main.ts` で、これは柵の内側にあり、確かめられ、計画が書く。
-sudo -u runner tee "$P/index.html" >/dev/null <<'EOF'
+sudo -u runner tee "$P/index.html" >/dev/null <<EOF
 <!doctype html>
 <meta charset="utf-8">
 <title>loop artifact</title>
 <div id="app"></div>
 <script type="module">
-  // The whole of the shell. Everything else is under src/, where the runner
+  // The whole of the shell. Everything else is under $LAYOUT_SRC/, where the runner
   // can fence it and the tests can reach it.
-  import { start } from "/src/main.ts";
+  import { start } from "/$LAYOUT_SRC/main.ts";
   start(document.getElementById("app"));
 </script>
 EOF
@@ -162,7 +172,7 @@ sudo -u runner git -C "$P" add -- "${ENV_FILES[@]}"
 if ! sudo -u runner git -C "$P" diff --cached --quiet -- "${ENV_FILES[@]}"; then
   sudo -u runner git -C "$P" commit -q -m "chore: environment files from 35-node.sh" \
     -- "${ENV_FILES[@]}"
-  sudo -u runner git -C "$P" push -q origin main
+  sudo -u runner git -C "$P" push -q origin HEAD
 fi
 
 # ---- 検査。solver の視点で確かめる ------------------------------------
@@ -187,7 +197,7 @@ chk_cannot rm -f "$P/node_modules"
 # 確かめる条件を書かせないので（loop.py の environment_facts）、要件の「開発
 # サーバで開ける」はここで確かめる。
 if ! sudo -u runner /srv/loop/bin/smoke-page; then
-  echo "FAIL: the dev server does not reach start in src/main.ts"; fail=1
+  echo "FAIL: 開発サーバで開いたページが $LAYOUT_SRC/main.ts の start に届かない"; fail=1
 fi
 
 if [ "$fail" -eq 0 ]; then

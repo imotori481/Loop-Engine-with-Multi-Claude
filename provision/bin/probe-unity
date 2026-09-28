@@ -1,0 +1,165 @@
+#!/usr/bin/env bash
+# Unity の参照アセンブリで、箱に何ができるかを測る。関門ではなく測定なので、
+# 結果が悪くても落ちない。落ちるのは、測る道具がそろっていないときだけ。
+#
+#     sudo -u runner -H /srv/loop/bin/probe-unity
+#
+# 測るのは2つ。
+#
+#   1. 今のプロジェクトの柵の中のコード（thm なら Assets/Source）が、ホストの
+#      loop-unity-refs が送った参照と定義シンボルで、そのままコンパイルできるか。
+#      できなければ、どのエラーが何件かを出す
+#   2. エンジン本体の無い .NET 8 の上で、Unity の API のどれが動くか。Vector3 の
+#      ような計算は C# だけで書かれているはずで、Debug.Log のようにエンジンの
+#      ネイティブに降りるものは動かないはずだ。MonoBehaviour を new できるかで、
+#      既存のクラスをテストで作れるかが決まる
+#
+# 結果はブリーフに書く（テストで確かめられない振る舞いの条件を書かせない）。
+# 全文は /srv/loop/logs/probe-unity-<日時>.log に残す。
+set -euo pipefail
+
+TOOLS="${LOOP_DOTNET_TOOLS:-/srv/loop/dotnet}"
+REFS="${LOOP_UNITY_REFS:-/srv/loop/unity-refs}"
+PROJECT="${LOOP_PROJECT:-/srv/loop/project}"
+export DOTNET_CLI_TELEMETRY_OPTOUT=1 DOTNET_NOLOGO=1 DOTNET_SKIP_FIRST_TIME_EXPERIENCE=1
+
+[ -r "$TOOLS/nuget.config" ] || { echo "probe-unity: no $TOOLS/nuget.config; run 36-dotnet.sh" >&2; exit 2; }
+[ -d "$REFS/refs" ] || { echo "probe-unity: no $REFS; send them with loop-unity-refs from the host" >&2; exit 2; }
+# 柵の場所。規則は loop.py の LAYOUT にしか書かないので、そこから読む。
+SRC="${LOOP_SRC:-$(python3 -B -c "import sys; sys.path.insert(0, '/srv/loop/runner'); import loop; print(loop.LAYOUT['src'])")}"
+
+versions="$(cat "$TOOLS/feed/.versions")"
+version_of() { tr ' ' '\n' <<<"$versions" | sed -n "s/^$1=//p"; }
+defines="$(paste -sd ';' "$REFS/defines.txt")"
+langversion="$(head -n1 "$REFS/langversion.txt")"
+
+WORK="$(mktemp -d)"
+trap 'rm -rf "$WORK"' EXIT
+LOG="/srv/loop/logs/probe-unity-$(date +%Y%m%d-%H%M%S).log"
+: > "$LOG" 2>/dev/null || LOG="$WORK/probe.log"
+
+# 参照の一覧。Private=false はコンパイルにだけ使い、出力に写さない。実行の測定
+# （2）では写す。エンジン本体の代わりに、この DLL が読み込まれるからだ。
+references() {
+  local private="$1" dll
+  for dll in "$REFS"/refs/*.dll; do
+    printf '    <Reference Include="%s"><HintPath>%s</HintPath><Private>%s</Private></Reference>\n' \
+      "$(basename "$dll" .dll)" "$dll" "$private"
+  done
+}
+
+echo "Unity $(cat "$REFS/version.txt"), C# $langversion, $(ls "$REFS"/refs/*.dll | wc -l) assemblies, code under $SRC/"
+
+# ---- 1. 既存のコードのコンパイル --------------------------------------------
+mkdir -p "$WORK/code"
+cat > "$WORK/code/Code.csproj" <<EOF
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>netstandard2.1</TargetFramework>
+    <LangVersion>$langversion</LangVersion>
+    <DefineConstants>$defines</DefineConstants>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <Nullable>disable</Nullable>
+    <NoWarn>\$(NoWarn);CS0414;CS0649;CS0169</NoWarn>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="$PROJECT/$SRC/**/*.cs" />
+  </ItemGroup>
+  <ItemGroup>
+$(references false)
+  </ItemGroup>
+</Project>
+EOF
+echo
+echo "== 1. $SRC/ を送った参照でコンパイルする"
+{ dotnet restore "$WORK/code/Code.csproj" --configfile "$TOOLS/nuget.config" \
+    && dotnet build "$WORK/code/Code.csproj" --no-restore -nologo -clp:NoSummary; } \
+  >"$WORK/code.log" 2>&1 && built=1 || built=0
+cat "$WORK/code.log" >>"$LOG"
+files="$(find "$PROJECT/$SRC" -name '*.cs' | wc -l)"
+if [ "$built" -eq 1 ]; then
+  echo "  ok: $files files compiled"
+else
+  # 同じエラーはファイルごとに出るので、行の重複を除いてから数える。
+  errors="$(grep -oE 'error CS[0-9]+: .*' "$WORK/code.log" | sed 's/ \[.*\]$//' | sort -u)"
+  echo "  FAILED: $(grep -c . <<<"$errors") distinct errors in $files files"
+  echo "  errors by code:"
+  grep -oE 'error CS[0-9]+' <<<"$errors" | sort | uniq -c | sort -rn | sed 's/^/    /'
+  echo "  first files and errors:"
+  grep -E 'error CS[0-9]+' "$WORK/code.log" | sed "s|$PROJECT/||; s/ \[.*\]$//" | sort -u | head -40 | sed 's/^/    /'
+fi
+
+# ---- 2. エンジン本体の無い .NET で動く API ----------------------------------
+mkdir -p "$WORK/probe"
+cat > "$WORK/probe/Probe.cs" <<'EOF'
+using NUnit.Framework;
+using UnityEngine;
+
+namespace Probe
+{
+    public class ProbeBehaviour : MonoBehaviour { public int Value = 7; }
+    public class ProbeAsset : ScriptableObject { public int Value = 7; }
+
+    public class UnityApi
+    {
+        [Test] public void Vector3Math() => Assert.AreEqual(2f, (new Vector3(1, 2, 3) + Vector3.one).x);
+        [Test] public void MathfClamp() => Assert.AreEqual(3f, Mathf.Clamp(5f, 0f, 3f));
+        [Test] public void QuaternionRotate() => Assert.AreEqual(1f, (Quaternion.Euler(0, 90, 0) * Vector3.forward).x, 1e-4f);
+        [Test] public void ColorLerp() => Assert.AreEqual(0.5f, Color.Lerp(Color.black, Color.white, 0.5f).r, 1e-4f);
+        [Test] public void DebugLog() => Debug.Log("probe");
+        [Test] public void RandomRange() => Assert.That(Random.Range(0, 10), Is.InRange(0, 9));
+        [Test] public void TimeTime() => Assert.That(Time.time, Is.GreaterThanOrEqualTo(0f));
+        [Test] public void JsonUtilityToJson() => StringAssert.Contains("7", JsonUtility.ToJson(new Vector2Int(7, 7)));
+        [Test] public void NewGameObject() => Assert.AreEqual("probe", new GameObject("probe").name);
+        [Test] public void NewMonoBehaviour() => Assert.AreEqual(7, new ProbeBehaviour().Value);
+        [Test] public void CreateScriptableObject() => Assert.AreEqual(7, ScriptableObject.CreateInstance<ProbeAsset>().Value);
+    }
+}
+EOF
+cat > "$WORK/probe/Probe.csproj" <<EOF
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <LangVersion>$langversion</LangVersion>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <IsPackable>false</IsPackable>
+    <NoWarn>\$(NoWarn);CS0436;MSB3277</NoWarn>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="NUnit" Version="$(version_of NUnit)" />
+    <PackageReference Include="NUnit3TestAdapter" Version="$(version_of NUnit3TestAdapter)" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="$(version_of Microsoft.NET.Test.Sdk)" />
+    <PackageReference Include="JunitXml.TestLogger" Version="$(version_of JunitXml.TestLogger)" />
+  </ItemGroup>
+  <ItemGroup>
+$(references true)
+  </ItemGroup>
+</Project>
+EOF
+echo
+echo "== 2. エンジン本体の無い .NET 8 で Unity の API を呼ぶ"
+REPORT="$WORK/probe.xml"
+{ dotnet restore "$WORK/probe/Probe.csproj" --configfile "$TOOLS/nuget.config" \
+    && dotnet test "$WORK/probe/Probe.csproj" --no-restore --logger "junit;LogFilePath=$REPORT"; } \
+  >"$WORK/probe.log" 2>&1 || true
+cat "$WORK/probe.log" >>"$LOG"
+if [ ! -s "$REPORT" ]; then
+  echo "  FAILED: the probe did not run; see $LOG"
+  grep -E 'error' "$WORK/probe.log" | sort -u | head -20 | sed 's/^/    /'
+else
+  python3 - "$REPORT" <<'PY'
+import sys
+import xml.etree.ElementTree as ET
+for case in ET.parse(sys.argv[1]).getroot().iter("testcase"):
+    name = case.get("name", "?").split(".")[-1]
+    failure = case.find("failure")
+    if failure is None:
+        print(f"  works    {name}")
+    else:
+        first = (failure.get("message") or "").strip().splitlines()
+        print(f"  FAILS    {name}: {first[0][:150] if first else '(no message)'}")
+PY
+fi
+
+echo
+echo "full log: $LOG"
