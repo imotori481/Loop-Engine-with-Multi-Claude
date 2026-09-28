@@ -67,7 +67,13 @@ trap 'rm -rf "$HOME"' EXIT
 
 cd "$OUT"
 
-# --safe-mode            CLAUDE.md、スキル、プラグイン、フック、MCP サーバ、
+# 既定のシステムプロンプトとツールの定義は、1ターンごとに約1.7万トークンになる。
+# 役に要るのは、ブリーフが唯一の入力であることと、作業ディレクトリの場所だけ。
+# ブリーフは「the current directory」に書かせるので、その絶対パスをここで渡す。
+# ツールは絶対パスを取る。
+SYSTEM_PROMPT="You are the planner in an automated build loop. The user message is your brief and your only input. Your working directory is $OUT; a relative path in the brief is relative to it. Use the Read, Write and Edit tools with absolute paths. Write only the files the brief asks for. No one will answer questions, so do not ask any. When done, reply as the brief says."
+
+# --safe-mode           CLAUDE.md、スキル、プラグイン、フック、MCP サーバ、
 #                        独自コマンドをすべて切る。認証、モデル、組み込みの
 #                        ツールは動く。これでブリーフがプランナーの唯一の
 #                        入力になる（RUNNER_SPEC 5 章）。
@@ -79,6 +85,9 @@ cd "$OUT"
 #                        消費量を台帳に残し、結果の文だけを取り出す。
 # --allowedTools         標準入力でブリーフを読み、ここに提案を1つ書く。
 #                        ほかに前もって許すものは無い。
+# --tools                使えるツールそのものを同じ3つに絞る。--allowedTools は
+#                        許可だけで、ほかのツールの定義は文脈に残る。
+# --system-prompt        既定のシステムプロンプトを上の短いものに置き換える。
 #
 # 上限時間はランナーではなくここで掛ける。ランナーは別の uid で、このプロセスに
 # 信号を送れない。`timeout` は 124 で終わる。
@@ -90,6 +99,8 @@ timeout --kill-after=30 "$LIMIT" claude -p \
   --setting-sources "" \
   --no-session-persistence \
   --allowedTools "Read Write Edit" \
+  --tools "Read,Write,Edit" \
+  --system-prompt "$SYSTEM_PROMPT" \
   < "$BRIEF"
 rc=$?
 set -e

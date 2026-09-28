@@ -350,6 +350,16 @@ sudo -u runner /srv/loop/bin/smoke-critic
 
 `smoke-pytest` は、ソルバーが pytest を実行**できない**ことを確かめる。
 
+3役の `claude -p` は、`--tools` で使えるツールそのものを許可するものだけに絞り、
+`--system-prompt` で既定のシステムプロンプトを役ごとの短いものに置き換える。
+どちらも1ターンごとに送る固定の文脈を減らすためのもの。効き目は、`smoke-planner` と
+`smoke-solver` が端末に出す JSON の `usage` で見る。
+
+| 項目 | 意味 |
+|---|---|
+| `cache_creation_input_tokens` | キャッシュ書き込み。固定の文脈が減れば下がる |
+| `cache_read_input_tokens` | キャッシュ読み取り。ターンごとに固定の文脈を読み直す分 |
+
 ### 2-10. 走らせる（箱）
 
 保守ユーザーが `loop` コマンドで操作する。`25-runner.sh` が `/usr/local/bin/loop` に置く。
@@ -911,6 +921,7 @@ VirtualBox 構成の手順は `c4374f4` から拾える。
 
 ## 更新履歴
 
+- 2026/09/28: 3役の起動でツールとシステムプロンプトを絞ることと、その確かめ方を §2-9 に追加
 - 2026/09/27: Unity の参照アセンブリの置き場（§2-11）と、それで測る `probe-unity`（§2-8）を追加
 - 2026/09/27: .NET を凍結する `36-dotnet.sh` と `smoke-dotnet` を §2-8 に追加
 - 2026/09/26: §2-10 を `loop` コマンドで走らせる手順に置き換え
