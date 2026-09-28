@@ -3592,6 +3592,12 @@ def ts_declarations(text: str, path: str) -> list[str]:
 def existing_contracts() -> list[str]:
     """最後のコミットの柵の中（LAYOUT["src"]）にある公開の宣言。計画の言語の
     ファイルだけを読む。
+    """
+    return [line for lines in existing_declarations().values() for line in lines]
+
+
+def existing_declarations() -> dict[str, list[str]]:
+    """existing_contracts の宣言を、それを持つファイルのパスごとに分けたもの。
 
     作業ツリーではなく HEAD から読む。ステップの途中の書きかけやスタブを、
     すでにあるコードとして見せないためだ。
@@ -3600,26 +3606,66 @@ def existing_contracts() -> list[str]:
         listing = run(["git", "ls-tree", "-r", "-z", "--name-only", "HEAD", "--",
                        LAYOUT["src"]])
     except OSError:
-        return []   # 作業ツリーがまだ無い
+        return {}   # 作業ツリーがまだ無い
     if listing.returncode != 0:
-        return []   # コミットがまだ無い
+        return {}   # コミットがまだ無い
     suffix = LANGUAGE["source_suffix"]
-    lines: list[str] = []
+    by_file: dict[str, list[str]] = {}
     for path in listing.stdout.split("\0"):
         if not in_layout(path, "src") or not path.endswith(suffix):
             continue
         shown = run(["git", "show", f"HEAD:{path}"])
         if shown.returncode != 0:
             continue
+        lines: list[str] = []
         if LANGUAGE["name"] == "typescript":
-            lines += ts_declarations(shown.stdout, path)
+            lines = ts_declarations(shown.stdout, path)
         elif LANGUAGE["name"] == "python":
             modules = modules_of([path])
             if modules:
-                lines += python_declarations(shown.stdout, modules[0])
+                lines = python_declarations(shown.stdout, modules[0])
         elif LANGUAGE["name"] == "csharp":
-            lines += csharp_declarations(shown.stdout, path)
-    return lines
+            lines = csharp_declarations(shown.stdout, path)
+        if lines:
+            by_file[path] = lines
+    return by_file
+
+
+def declarations_for_plan(by_file: dict[str, list[str]],
+                          plan: dict) -> tuple[list[str], list[str]]:
+    """計画が触れる宣言だけを行で残し、ほかはファイル名だけにする。
+
+    返すのは (残す行, 行を外したファイル)。残すのは、どこかのステップの
+    `requires` か `provides` に出る名前の宣言と、どこかの `files_write` にある
+    ファイルの宣言。C# のメンバー（`Board.Score`）が出れば、その型の頭（`Board`）
+    も残す。クリティックがこの一覧を使うのは、既にあるものを「どのステップも
+    書いていない」と指摘しないためだけで、計画が口にしない宣言は要らない。
+    取り込んだ Unity のプロジェクトでは、この一覧がブリーフの3分の2を占めていた。
+    """
+    names: set[str] = set()
+    files: set[str] = set()
+    for step in plan.get("steps") or []:
+        if not isinstance(step, dict):
+            continue
+        contracts = step.get("contracts") or {}
+        for line in (contracts.get("requires") or []) + (contracts.get("provides") or []):
+            if isinstance(line, str):
+                name = declared_name(line)
+                names.add(name)
+                if "." in name:
+                    names.add(name.split(".")[0])
+        files |= {f for f in step.get("files_write") or [] if isinstance(f, str)}
+    kept: list[str] = []
+    dropped: list[str] = []
+    for path, lines in by_file.items():
+        if path in files:
+            kept += lines
+            continue
+        chosen = [line for line in lines if declared_name(line) in names]
+        kept += chosen
+        if len(chosen) < len(lines):
+            dropped.append(path)
+    return kept, dropped
 
 
 def head_sources(paths: list[str]) -> dict[str, str]:
@@ -4564,8 +4610,11 @@ Unity afterwards.
 """)
 
 
-def environment_facts() -> str:
+def environment_facts(plan: dict | None = None) -> str:
     """プロジェクトが実際にどうなっているかを、機械から読み取る。
+
+    `plan` を渡すと、既存の宣言を、その計画が触れるものだけに絞る
+    （declarations_for_plan）。クリティックのブリーフが使う。
 
     BOOTSTRAP_RULES の規則は、ランナーが強制するものの書き写しだ。つまり、書いた
     者が覚えていた分しか揃わない。最初の版には L12 が無く、その隙間に向けて
@@ -4639,9 +4688,13 @@ write a criterion about the text of index.html.
     # 取り込んだリポジトリには、最初のステップより前からコードがある。プランナーは
     # コードを読めない（BOOTSTRAP 1-1）ので、ここに無ければ、そこにある関数も型も
     # 知らずに計画を書く。署名だけを渡し、本体は渡さない。
-    existing = existing_contracts()
+    by_file = existing_declarations()
+    existing = [line for lines in by_file.values() for line in lines]
+    others: list[str] = []
+    if plan is not None:
+        existing, others = declarations_for_plan(by_file, plan)
     existing_text = ""
-    if existing:
+    if existing or others:
         existing_text = layout_text("""
 # What the code already declares
 
@@ -4671,6 +4724,13 @@ the repository run on every step, and a step that breaks one of them is not
 green. That is how unchanged behaviour is kept.
 
 """) + "\n".join(f"    {line}" for line in existing) + "\n"
+        if others:
+            existing_text += layout_text("""
+Only the declarations this plan names in `requires` or `provides`, and those in
+a file some step writes, are shown above. These files under {SRC}/ declare
+more, not shown line by line. They also exist before the first step runs:
+
+""") + "\n".join(f"    {path}" for path in others) + "\n"
 
     # テストが何に届くかを決めるファイル。言語ごとに名前は違うが仕事は同じで、
     # どちらでもプランナーに見せる必要がある。import のパスに逆らう計画は負ける。
@@ -5046,6 +5106,18 @@ def stamp_language(name: str) -> None:
 CRITIQUE_MODES = ("coverage", "trace")
 
 
+def critic_environment(tasks: str) -> str:
+    """クリティックに見せる環境。既存の宣言は、計画が触れるものだけにする。
+
+    計画が読めなければ絞らない。読めない計画にも、全部を見せるのは損ではない。
+    """
+    try:
+        plan = json.loads(tasks)
+    except ValueError:
+        plan = None
+    return environment_facts(plan if isinstance(plan, dict) else None)
+
+
 def brief_critique_coverage(requirements: str, tasks: str) -> str:
     """この計画を完全に満たしたとき、人間が求めたものが手に入るか。"""
     return f"""You are the critic. Your only job is to answer one question about
@@ -5068,7 +5140,7 @@ requirements be satisfied?**
 
 {tasks}
 
-{environment_facts()}
+{critic_environment(tasks)}
 
 # How to read the plan
 
@@ -5115,7 +5187,7 @@ actually be able to do.
 
 {tasks}
 
-{environment_facts()}
+{critic_environment(tasks)}
 
 # How to read it
 
@@ -5170,7 +5242,8 @@ Then say plainly:
   artifact's own logic: the read path is reachable, and what it finds is
   always nothing. Report that.
 
-  Code listed under "What the code already declares" is not such a thing. It
+  Code listed under "What the code already declares" is not such a thing,
+  whether it is shown line by line or only by its file. It
   exists before the first step, so a step that calls it or reads what it
   provides is using something that is already there. Do not report it as
   something no step writes.

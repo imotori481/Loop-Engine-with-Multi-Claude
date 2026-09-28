@@ -624,7 +624,7 @@ class WhatThePlannerIsTold(CSharp):
              mock.patch.object(loop, "SRC", project / "Assets" / "Source"), \
              mock.patch.object(loop, "TESTS", project / "Assets" / "Tests"), \
              mock.patch.dict(loop.LAYOUT, {"src": "Assets/Source", "tests": "Assets/Tests"}), \
-             mock.patch.object(loop, "existing_contracts", return_value=[]), \
+             mock.patch.object(loop, "existing_declarations", return_value={}), \
              mock.patch.object(loop, "dotnet_projects", side_effect=OSError("no feed")), \
              mock.patch.dict(os.environ, {"DISPLAY": ""}), \
              mock.patch("loop.run", return_value=SimpleNamespace(

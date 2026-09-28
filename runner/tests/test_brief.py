@@ -301,7 +301,8 @@ class WhatTheCodeAlreadyDeclares(unittest.TestCase):
             self.assertEqual(loop.existing_contracts(), [])
 
     def facts(self, existing: list[str]) -> str:
-        with patch.object(loop, "existing_contracts", return_value=existing), \
+        by_file = {"src/pkg/mod.py": existing} if existing else {}
+        with patch.object(loop, "existing_declarations", return_value=by_file), \
              patch.dict(os.environ, {"DISPLAY": ""}), \
              patch("loop.run") as run:
             run.return_value = SimpleNamespace(
