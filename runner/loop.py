@@ -3336,7 +3336,7 @@ making a plan this machine accepts is your problem, not the author's.
 
 # The requirements, written by the human
 {requirements}
-{environment_facts()}
+{environment_facts(short=True)}
 {layout_text(BOOTSTRAP_RULES.replace('{LAYOUT_NOTE}', LANGUAGE['layout_note']))}
 {BOOTSTRAP_ESCALATE}
 {feedback_section(feedback)}
@@ -4371,6 +4371,74 @@ def csharp_declarations(text: str, path: str) -> list[str]:
     return lines
 
 
+# 短くした行に残す修飾子。呼び方（型から呼ぶか、値を書けるか）を決めるものだけ。
+CSHARP_SHORT_MODIFIERS = {"static", "const", "readonly", "abstract", "virtual", "override"}
+CSHARP_PARAMETER_MODIFIERS = {"this", "ref", "out", "in", "params"}
+
+
+def csharp_short_declaration(line: str) -> str:
+    """csharp_declarations のメンバーの行から、引数と戻り値の型を外す。
+
+    `static int Board.Score(Board board, int bonus = 0)` は `static Board.Score(board, bonus)`
+    になる。型の頭、enum、interface はそのまま返す。declared_name は元の行と同じ
+    名前を返すので、この行を requires に写しても L3 を通り、ソルバーには
+    existing_requirements が HEAD の署名を渡す。取り込んだ Unity のプロジェクトでは、
+    bootstrap のブリーフの大半がこの一覧で、呼び出しのたびにそれを読み直していた。
+    """
+    name = declared_name(line)
+    if "." not in name:
+        return line
+    path, sep, rest = line.partition(": ")
+    if not sep:
+        path, rest = "", line
+    body, dash, where = rest.partition(" -- ")
+    found = re.search(re.escape(name) + r"(?=\s*(?:\(|\{|;|=|<|$))", body)
+    if not found:
+        return line
+    mods = [w for w in body[:found.start()].split() if w in CSHARP_SHORT_MODIFIERS]
+    after = body[found.end():].lstrip()
+
+    def closing(text: str, open_: str, close: str) -> int:
+        depth = 0
+        for i, c in enumerate(text):
+            if c == open_:
+                depth += 1
+            elif c == close:
+                depth -= 1
+                if depth == 0:
+                    return i
+        return len(text)
+
+    tail = ""
+    if after.startswith("<"):
+        stop = closing(after, "<", ">") + 1
+        tail, after = after[:stop], after[stop:].lstrip()
+    if after.startswith("("):
+        inner = after[1:closing(after, "(", ")")]
+        params, depth, start, quote = [], 0, 0, ""
+        for i, c in enumerate(inner + ","):
+            if quote:
+                if c == quote and inner[i - 1] != "\\":
+                    quote = ""
+            elif c in "\"'":
+                quote = c
+            elif c in "<([":
+                depth += 1
+            elif c in ">)]":
+                depth -= 1
+            elif c == "," and depth == 0:
+                param = inner[start:i].split("=")[0].split()
+                if param:
+                    params.append(" ".join([w for w in param[:-1]
+                                            if w in CSHARP_PARAMETER_MODIFIERS] + [param[-1]]))
+                start = i + 1
+        tail += f"({', '.join(params)})"
+    elif after.startswith("{"):
+        tail += " " + after[:closing(after, "{", "}") + 1]
+    short = " ".join(mods + [name + tail])
+    return (f"{path}: " if path else "") + short + (f" -- {where}" if dash else "")
+
+
 def csharp_balanced(text: str) -> bool:
     """差し替える範囲の中で、`#if` と `#endif` の数が合うか。"""
     return (len(re.findall(r"(?m)^[ \t]*#[ \t]*if\b", text))
@@ -4610,11 +4678,13 @@ Unity afterwards.
 """)
 
 
-def environment_facts(plan: dict | None = None) -> str:
+def environment_facts(plan: dict | None = None, short: bool = False) -> str:
     """プロジェクトが実際にどうなっているかを、機械から読み取る。
 
     `plan` を渡すと、既存の宣言を、その計画が触れるものだけに絞る
-    （declarations_for_plan）。クリティックのブリーフが使う。
+    （declarations_for_plan）。クリティックのブリーフが使う。`short` なら、C# の
+    メンバーの行から引数と戻り値の型を外す（csharp_short_declaration）。bootstrap の
+    ブリーフが使う。
 
     BOOTSTRAP_RULES の規則は、ランナーが強制するものの書き写しだ。つまり、書いた
     者が覚えていた分しか揃わない。最初の版には L12 が無く、その隙間に向けて
@@ -4693,6 +4763,9 @@ write a criterion about the text of index.html.
     others: list[str] = []
     if plan is not None:
         existing, others = declarations_for_plan(by_file, plan)
+    shortened = short and LANGUAGE["name"] == "csharp"
+    if shortened:
+        existing = [csharp_short_declaration(line) for line in existing]
     existing_text = ""
     if existing or others:
         existing_text = layout_text("""
@@ -4723,7 +4796,16 @@ Do not write criteria to show that the rest still works. The tests already in
 the repository run on every step, and a step that breaks one of them is not
 green. That is how unchanged behaviour is kept.
 
-""") + "\n".join(f"    {line}" for line in existing) + "\n"
+""")
+        if shortened:
+            existing_text += """Members are shown without their parameter and return types:
+`static Board.Score(board)` is a static method that takes one argument. Copy
+such a line into `contracts.requires` as it stands; the runner hands the solver
+the full signature from the code. A step that changes a member writes the full
+signature it wants in `contracts.provides`.
+
+"""
+        existing_text += "\n".join(f"    {line}" for line in existing) + "\n"
         if others:
             existing_text += layout_text("""
 Only the declarations this plan names in `requires` or `provides`, and those in
