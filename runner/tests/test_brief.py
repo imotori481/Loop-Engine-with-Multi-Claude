@@ -389,5 +389,40 @@ class TheSolverIsShownTheFilesItWillEdit(unittest.TestCase):
         self.assertLess(brief.index("CURRENT"), brief.index("FAILURE"))
 
 
+class TheSolverBriefsShareTheirOpening(unittest.TestCase):
+    """TEST_WRITE と IMPL は、CONTEXT.md、契約、不変条件、署名を共有する。先頭を
+    そろえれば、後の呼び出しはそこをプロンプトキャッシュから読む。
+    """
+
+    STEP = {"id": "S1", "goal": "GOAL-TEXT", "expected_tests": 1,
+            "files_write": ["src/a.py"], "files_test": ["tests/test_a.py"],
+            "acceptance": [{"case": "c", "given": "g", "then": "t"}],
+            "contracts": {"provides": ["def f(x: int) -> int"], "requires": [],
+                          "invariants": ["f is pure"]}}
+
+    def briefs(self) -> tuple[str, str, str]:
+        with tempfile.TemporaryDirectory() as temp, \
+             patch.object(loop, "PROJECT", Path(temp)), \
+             patch("loop.dep_contracts", return_value="DEPS"):
+            return (loop.solver_material(self.STEP, "CONTEXT"),
+                    loop.brief_test_write(self.STEP, "CONTEXT"),
+                    loop.brief_impl(self.STEP, "CONTEXT", "TESTS", "FAILURE"))
+
+    def test_both_phases_open_with_the_same_material(self):
+        shared, test_write, impl = self.briefs()
+        self.assertTrue(test_write.startswith(shared))
+        self.assertTrue(impl.startswith(shared))
+        for part in ("CONTEXT", "DEPS", "f is pure", "def f(x: int) -> int"):
+            self.assertIn(part, shared)
+
+    def test_the_goal_stays_out_of_the_tests_brief(self):
+        # テストは受け入れ条件から作る。goal を共通の部分に入れると、TEST_WRITE
+        # にも届く。
+        shared, test_write, impl = self.briefs()
+        self.assertNotIn("GOAL-TEXT", shared)
+        self.assertNotIn("GOAL-TEXT", test_write)
+        self.assertIn("GOAL-TEXT", impl)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -56,6 +56,8 @@ flowchart LR
 | coverage | `brief_critique_coverage` | 要件、tasks.json の全文、`environment_facts()` |
 | trace | `brief_critique_trace` | tasks.json の全文、`environment_facts()`。要件は渡さない |
 
+どちらのブリーフも `critic_material`（tasks.json の全文と `environment_facts()`）で始まり、役の説明、問い、要件はその後ろに置く。モードは続けて呼ぶので、2つ目の呼び出しは共通の部分をプロンプトキャッシュから読む。
+
 出力は `FINDINGS.json` の1つ。ファイルが無いか読めなければ、ランナーは批評が起きなかったものとして止まる。
 
 `cmd_plan_refine` は、批評と planner の改訂を交互に回す。批評は最大 `LIMITS["critiques"] + 1` 周で、1周ごとにモードの数だけ critic を呼ぶ。
@@ -78,9 +80,11 @@ planner の bootstrap と critic の両方に入る。中身は次のとおり�
 
 `run_step` が、1ステップにつき次の順で呼ぶ。
 
-1. TEST_WRITE（`brief_test_write`）: CONTEXT.md、依存先の契約、不変条件、受け入れ条件、署名、書いてよいファイル。goal は渡さない。テストがコンパイルできなければ、コンパイラの出力を足して最大 `LIMITS["test_writes"]` 回まで呼び直す
+1. TEST_WRITE（`brief_test_write`）: 共通の部分、受け入れ条件、書いてよいファイル。goal は渡さない。テストがコンパイルできなければ、コンパイラの出力を足して最大 `LIMITS["test_writes"]` 回まで呼び直す
 2. STUB: ランナーが契約からスタブを書く。書けないときだけ `brief_stub` で solver に頼む。渡すのは署名と書いてよいファイルだけ
-3. IMPL（`brief_impl`）: CONTEXT.md、goal、署名、不変条件、依存先の契約、凍結したテストの全文、書いてよいファイルの今の中身、直前の失敗、書いてよいファイル。緑になるか試行を使い切るまで、ステップの試行の数だけ呼ぶ
+3. IMPL（`brief_impl`）: 共通の部分、goal、凍結したテストの全文、書いてよいファイルの今の中身、直前の失敗、書いてよいファイル。緑になるか試行を使い切るまで、ステップの試行の数だけ呼ぶ
+
+TEST_WRITE と IMPL のブリーフは、同じ `solver_material`（CONTEXT.md、依存先の契約、不変条件、署名）で始まる。CONTEXT.md はステップをまたいで、残りは同じステップの位相をまたいで同じなので、後の呼び出しはそこをプロンプトキャッシュから読む。IMPL では、試行ごとに変わる今の中身と直前の失敗を後ろに置く。
 
 solver は `plan/` を読めない。受け入れ条件はブリーフに書かれた分しか届かない。
 
@@ -155,3 +159,4 @@ C# で10ステップを全部緑にした回の、台帳とブリーフの実測
 
 - 2026/09/28: 役どうしの受け渡しと、2026/09/27 の回の計測を追加
 - 2026/09/28: IMPL のブリーフに載せるファイルの今の中身を追加
+- 2026/09/28: critic と solver のブリーフの共通の先頭を追加

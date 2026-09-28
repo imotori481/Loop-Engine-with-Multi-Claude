@@ -1522,11 +1522,16 @@ def render_invariants(step: dict) -> str:
     return "\n".join(f"- {i}" for i in inv) if inv else "(none stated)"
 
 
-def brief_test_write(step: dict, context: str, broken: str = "") -> str:
-    # goal は渡さない。テストは受け入れ条件から作るもので、これからソルバーに
-    # 頼む実装の説明から作るものではない。
-    acceptance = render_acceptance(step)
-    return f"""Write tests. Do not write an implementation.
+def solver_material(step: dict, context: str) -> str:
+    """TEST_WRITE と IMPL のブリーフを、この同じ本文で始める。
+
+    CONTEXT.md はステップをまたいで同じで、契約、不変条件、署名は同じステップの
+    位相をまたいで同じだ。先頭がそろっていれば、後の呼び出しはこの部分を
+    プロンプトキャッシュから読む。位相ごとの指示は、この後に置く。goal は
+    TEST_WRITE に渡さないので、ここには入れない。
+    """
+    return f"""Below is the context for one step of a build. Your task follows
+after it.
 
 # Project context
 {context}
@@ -1537,11 +1542,22 @@ def brief_test_write(step: dict, context: str, broken: str = "") -> str:
 # Invariants that must hold
 {render_invariants(step)}
 
+# Signatures this step provides
+{render_provides(step)}
+"""
+
+
+def brief_test_write(step: dict, context: str, broken: str = "") -> str:
+    # goal は渡さない。テストは受け入れ条件から作るもので、これからソルバーに
+    # 頼む実装の説明から作るものではない。
+    acceptance = render_acceptance(step)
+    return f"""{solver_material(step, context)}
+# Your task
+
+Write tests for the signatures above. Do not write an implementation.
+
 # Acceptance criteria -- write exactly {step["expected_tests"]} tests, at least one per criterion
 {acceptance}
-
-# Signatures under test
-{render_provides(step)}
 
 # Files you may create or modify
 {chr(10).join(step["files_test"])}
@@ -2300,22 +2316,13 @@ editing tool refuses a file you have not read, read only its first line
 
 
 def brief_impl(step: dict, context: str, tests_text: str, last_failure: str) -> str:
-    return f"""Make the tests pass.
+    return f"""{solver_material(step, context)}
+# Your task
 
-# Project context
-{context}
+Make the tests pass by implementing the signatures above.
 
 # Goal
 {step["goal"]}
-
-# Signatures you must provide
-{render_provides(step)}
-
-# Invariants that must hold
-{render_invariants(step)}
-
-# Contracts you may rely on
-{dep_contracts(step)}
 
 # The tests (frozen -- read-only, and they will not be accepted if modified)
 {tests_text}
