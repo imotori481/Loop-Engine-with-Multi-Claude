@@ -21,6 +21,17 @@ install -o root -g root -m 644 "$SRC" "$DEST/loop.py"
 # 保守ユーザーが打つ `loop` コマンド。PATH の通った場所に置く。
 install -o root -g root -m 755 bin/loop /usr/local/bin/loop
 
+# ホストのダッシュボードは、クリティックの指摘を直したあと `loop continue` を SSH で
+# 流す。端末の無い SSH ではパスワードを訊けないので、保守ユーザーにこの1つだけを
+# パスワード無しで許す。引数まで固定するので、ほかのコマンドには効かない。
+ADMIN_USER="${ADMIN_USER:-maint}"
+SUDOERS=/etc/sudoers.d/loop-continue
+tmp="$(mktemp)"
+echo "$ADMIN_USER ALL=(root) NOPASSWD: /usr/local/bin/loop continue" > "$tmp"
+visudo -cqf "$tmp" || { rm -f "$tmp"; echo "25-runner: sudoers rule does not parse" >&2; exit 1; }
+install -o root -g root -m 440 "$tmp" "$SUDOERS"
+rm -f "$tmp"
+
 # ---- 検査。runner の視点で確かめる ------------------------------------
 fail=0
 if ! sudo -u runner test -r "$DEST/loop.py"; then
@@ -39,6 +50,13 @@ if sudo -u runner test -w /usr/local/bin/loop; then
 fi
 if ! bash -n /usr/local/bin/loop; then
   echo "FAIL: /usr/local/bin/loop does not parse"; fail=1
+fi
+# パスワード無しで許すのは `loop continue` だけ。runner には許さない。
+if ! sudo -l -U "$ADMIN_USER" | grep -q "NOPASSWD: /usr/local/bin/loop continue"; then
+  echo "FAIL: $ADMIN_USER should be able to: sudo -n /usr/local/bin/loop continue"; fail=1
+fi
+if sudo -l -U runner 2>/dev/null | grep -q "/usr/local/bin/loop"; then
+  echo "FAIL: runner should NOT be able to: sudo /usr/local/bin/loop"; fail=1
 fi
 # 構文が壊れたファイルを置いたまま ok と言わない。py_compile ではなく ast で
 # 確かめる。py_compile は __pycache__ を書こうとし、$DEST は runner から書けない。

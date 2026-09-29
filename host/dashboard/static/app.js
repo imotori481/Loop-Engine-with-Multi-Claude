@@ -175,11 +175,90 @@ function toggle(selector, onChange) {
   }
 }
 
-function renderCritique(critique) {
+const CRITIQUE_MODE = {
+  coverage: {label: "要件を満たすか", why: "計画をやり遂げたとき、要件が満たされるか"},
+  trace: {label: "使う人の操作で届くか", why: "計画に、使う人の操作では届かない部分が無いか"},
+};
+// 5秒ごとの更新で、書きかけの入力を消さない。中身が変わったときだけ描き直す。
+let drawnCritique = "", editingFinding = false;
+
+// クリティックの指摘。箱の CRITIQUE.json があれば指摘ごとに出し、無ければログの段落を出す。
+function renderCritique(value) {
+  const findings = value.findings;
+  const key = JSON.stringify([findings, value.running, findings ? null : value.loop?.critique]);
+  if (editingFinding || key === drawnCritique) return;
+  drawnCritique = key;
   const box = document.querySelector("#critique"); box.replaceChildren();
-  document.querySelector("#critique-at").textContent = critique?.at || "";
-  if (!critique) { box.append(text("p", "今の回にクリティックの指摘はありません。", "why")); return; }
-  box.append(text("pre", critique.text));
+  const at = document.querySelector("#critique-at");
+  if (!findings) {
+    const critique = value.loop?.critique;
+    at.textContent = critique?.at || "";
+    box.append(critique ? text("pre", critique.text)
+                        : text("p", "今の回にクリティックの指摘はありません。", "why"));
+    return;
+  }
+  at.textContent = `${findings.round}回目の批評 / ${findings.at}`;
+  const editable = findings.waiting && !value.running;
+  if (editable) {
+    box.append(text("p", "改訂の上限まで回しても残った指摘です。的外れなものは書き換えてください。"
+      + "「続ける」を押すと、書き換えた指摘でプランナーが1回だけ計画を直し、適用して走らせます。"
+      + "何も書き換えずに押すと、今の計画をそのまま適用します。", "why"));
+  }
+  for (const [mode, items] of Object.entries(findings.modes)) {
+    const group = document.createElement("div"); group.className = "finding-group";
+    group.append(text("h3", CRITIQUE_MODE[mode]?.label || mode),
+                 text("p", CRITIQUE_MODE[mode]?.why || "", "why"));
+    if (!items.length) group.append(text("p", "指摘なし", "why"));
+    items.forEach((item, index) => group.append(findingCard(mode, index, item, editable)));
+    box.append(group);
+  }
+  if (editable) box.append(continueButton());
+}
+
+function findingCard(mode, index, item, editable) {
+  const card = document.createElement("article"); card.className = "finding";
+  const head = document.createElement("div"); head.className = "finding-head";
+  head.append(text("strong", `${index + 1}. ${item.title}`));
+  if (item.machine_would_notice === false) head.append(text("span", "どの関門も気づかない", "badge warn"));
+  card.append(head, text("p", item.evidence, "evidence"));
+  if (!editable) return card;
+  const edit = document.createElement("button"); edit.textContent = "書き換える";
+  edit.onclick = () => { editingFinding = true; card.replaceWith(findingEditor(mode, index, item)); };
+  card.append(edit);
+  return card;
+}
+
+function findingEditor(mode, index, item) {
+  const card = document.createElement("article"); card.className = "finding editing";
+  const title = document.createElement("input"); title.value = item.title; title.maxLength = 4000;
+  const evidence = document.createElement("textarea"); evidence.value = item.evidence; evidence.maxLength = 4000;
+  const save = document.createElement("button"); save.textContent = "保存";
+  const cancel = document.createElement("button"); cancel.textContent = "取り消す"; cancel.className = "quiet";
+  const done = () => { editingFinding = false; drawnCritique = ""; refreshLive(); };
+  save.onclick = async () => {
+    save.disabled = true;
+    try {
+      await api("/api/findings", {method: "POST", body: JSON.stringify(
+        {mode, index, title: title.value, evidence: evidence.value})});
+      done();
+    } catch (error) { alert(error.message); save.disabled = false; }
+  };
+  cancel.onclick = done;
+  const actions = document.createElement("div"); actions.className = "request-actions";
+  actions.append(cancel, save);
+  card.append(text("span", "題"), title, text("span", "根拠"), evidence, actions);
+  return card;
+}
+
+function continueButton() {
+  const element = document.createElement("button"); element.textContent = "続ける（loop continue）";
+  element.onclick = async () => {
+    if (!confirm("書き換えた指摘で計画を直し、適用して走らせます。よいですか？")) return;
+    element.disabled = true;
+    try { await api("/api/continue", {method: "POST", body: "{}"}); drawnCritique = ""; await refreshLive(); }
+    catch (error) { alert(error.message); element.disabled = false; }
+  };
+  return element;
 }
 
 const CHART = {width: 800, height: 280, top: 12, bottom: 30, left: 56};
@@ -402,7 +481,7 @@ function renderLive(value) {
     live.append(text("strong", "箱に届きません"), text("p", value.error, "why"));
     return;
   }
-  renderCritique(value.loop?.critique);
+  renderCritique(value);
   const activity = value.now?.activity;
   if (value.running && activity) {
     const minutes = minutesSince(activity.since);

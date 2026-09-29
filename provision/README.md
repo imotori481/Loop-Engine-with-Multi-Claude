@@ -372,6 +372,8 @@ loop now                             # いまの作業を JSON で出す（ダ�
 loop log                             # 走行ログを追う。Ctrl-C で抜けても走行は続く
 loop continue                        # 止まったところから続ける
 loop stop                            # 走行を止める
+loop findings                        # クリティックの指摘を出す
+loop findings set                    # 指摘1件を書き換える。標準入力に JSON を渡す
 ```
 
 `loop go` は要件を `/srv/loop/human/in/REQUIREMENTS.md` に置き、次を順に裏で流す。
@@ -391,13 +393,26 @@ loop stop                            # 走行を止める
 |---|---|
 | 途中まで緑の計画がある | `loop continue` で終えてから `loop go` |
 | プランナーが計画を書かずにエスカレーションした | 書かれた問いを読み、要件を直して `loop go` |
-| `plan refine` のあとも critic の指摘が残った | 指摘を読む。そのまま適用するなら `loop continue` |
+| `plan refine` のあとも critic の指摘が残った | 指摘を読み、的外れなものを書き換えてから `loop continue`。そのまま適用するなら何も書き換えずに `loop continue` |
 | `plan apply` が提案を拒んだ | 違反を読み、要件を直して `loop go` |
 | `run --all` が止まった | `loop status` のエスカレーションを読む |
 | 利用枠が尽きた | 枠が戻ってから `loop continue`。途中のステップがあれば先に `loop raw reset <ステップ>` |
 
-`loop continue` は、適用待ちの提案があれば `plan apply` を流してから `run --all` を流す。
-提案が無ければ `run --all` だけを流す。
+`loop continue` は、適用待ちの提案があれば `plan refine --resume` と `plan apply` を流してから
+`run --all` を流す。提案が無ければ `run --all` だけを流す。`--resume` は、人が書き換えた指摘が
+あれば、プランナーに1回だけ改訂させる。クリティックはもう呼ばない。書き換えが無ければ何もしない。
+
+クリティックの指摘は `/srv/loop/human/in/CRITIQUE.json` にある。`title` と `evidence` は日本語で、
+書き換えられるのは、上限の後も指摘が残って止まっているあいだだけだ。ダッシュボードからも直せる。
+端末では `loop findings` で番号を見て、`loop findings set` に1件ずつ渡す。番号は0から数える。
+
+```bash
+echo '{"mode": "trace", "index": 0, "title": "<題>", "evidence": "<根拠>"}' | loop findings set
+```
+
+ダッシュボードは SSH で `sudo -n /usr/local/bin/loop continue` を流す。端末の無い SSH ではパスワードを
+訊けないので、`25-runner.sh` が `/etc/sudoers.d/loop-continue` に、保守ユーザーがこの1つだけを
+パスワード無しで流せる規則を置く。引数まで固定するので、ほかのコマンドには効かない。
 
 走行は systemd の一時ユニット `loop-run` として runner で動く。SSH が切れても止まらず、
 二重には起動できない。`loop stop` は3役の呼び出しも含めてまとめて止める。

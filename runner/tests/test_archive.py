@@ -142,6 +142,8 @@ class BootstrapOverAPlan(unittest.TestCase):
         self.planner = mock.Mock(return_value=0)
         for name, value in {
             "PLAN": root / "plan",
+            "REFINE_STATE": root / "refine.json",
+            "CRITIQUE_FOR_HUMAN": root / "CRITIQUE.json",
             "ledger": lambda event, **f: None,
             "plan_with_retry": self.planner,
             "read_proposal": lambda: {},

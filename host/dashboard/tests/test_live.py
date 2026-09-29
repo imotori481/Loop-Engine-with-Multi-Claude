@@ -75,5 +75,41 @@ class LiveView(unittest.TestCase):
         self.assertEqual(run.call_count, 1)
 
 
+class ActOnTheSandbox(LiveView):
+    @patch("host.dashboard.live.subprocess.run")
+    def test_a_rewrite_goes_through_stdin_and_never_into_the_command(self, run):
+        run.return_value = answered("直した")
+        title = "; rm -rf / #"
+        self.assertEqual(self.live.rewrite_finding("trace", 1, title, "S3"), "直した")
+        argv = run.call_args.args[0]
+        self.assertEqual(argv[-4:], ["loop-dev", "loop", "findings", "set"])
+        self.assertNotIn(title, " ".join(argv))
+        self.assertEqual(json.loads(run.call_args.kwargs["input"]),
+                         {"mode": "trace", "index": 1, "title": title, "evidence": "S3"})
+        self.assertIs(run.call_args.kwargs["shell"], False)
+
+    @patch("host.dashboard.live.subprocess.run")
+    def test_a_refusal_carries_the_sandbox_reason(self, run):
+        run.return_value = answered(returncode=1, stderr="loop findings: title が空")
+        with self.assertRaisesRegex(ValueError, "title が空"):
+            self.live.rewrite_finding("trace", 0, "", "")
+
+    @patch("host.dashboard.live.subprocess.run")
+    def test_continue_runs_only_the_command_sudoers_allows(self, run):
+        run.return_value = answered("裏で走らせた")
+        self.live.continue_loop()
+        self.assertEqual(run.call_args.args[0][-4:],
+                         ["sudo", "-n", "/usr/local/bin/loop", "continue"])
+
+    @patch("host.dashboard.live.subprocess.run")
+    def test_an_action_drops_the_cached_view(self, run):
+        run.return_value = answered("{}")
+        self.live.fetch()
+        self.live.continue_loop()
+        self.live.fetch()
+        self.assertEqual([call.args[0][-1] for call in run.call_args_list],
+                         ["now", "continue", "now"])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -12,6 +12,16 @@ section { margin-top: 30px; } article, .table-wrap { background: #101b18dd; bord
 .why { margin: 0; color: #9bb7a8; font-size: .88rem; }
 pre { white-space: pre-wrap; max-height: 300px; overflow: auto; color: #cbd9d0; }
 #critique pre { margin: 0; max-height: 480px; font-size: .86rem; line-height: 1.6; }
+#critique { display: grid; gap: 18px; } #critique > button { justify-self: end; }
+.finding-group { display: grid; gap: 10px; } .finding-group h3 { margin: 0; }
+.finding { display: grid; gap: 8px; padding: 14px 16px; background: #0c1513; border-color: #223a31; }
+.finding-head { display: flex; gap: 10px; align-items: baseline; justify-content: space-between; flex-wrap: wrap; }
+.finding-head strong { line-height: 1.5; } .finding > button { justify-self: end; padding: 5px 10px; font-size: .82rem; }
+.finding .evidence { margin: 0; white-space: pre-wrap; color: #cbd9d0; line-height: 1.7; font-size: .92rem; }
+.finding input { width: 100%; padding: 10px 12px; color: inherit; background: #09110f; border: 1px solid #3d5d51; border-radius: 8px; font: inherit; }
+.finding.editing textarea { min-height: 160px; }
+.badge.warn { background: #5a3a1c; color: #f0b37e; letter-spacing: 0; text-transform: none; white-space: nowrap; }
+button.quiet { background: transparent; border-color: #3d5d51; color: #9bb7a8; }
 textarea { width: 100%; min-height: 90px; resize: vertical; padding: 12px; color: inherit; background: #09110f; border: 1px solid #3d5d51; border-radius: 8px; }
 button { cursor: pointer; border: 1px solid #75c49d; color: #effff4; background: #176746; border-radius: 8px; padding: 9px 14px; font-weight: 700; }
 button:hover { background: #22865d; } button:disabled { opacity: .5; }

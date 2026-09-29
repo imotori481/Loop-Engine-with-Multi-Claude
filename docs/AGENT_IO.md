@@ -40,7 +40,7 @@ flowchart LR
 | 場面 | 関数 | ブリーフの中身 |
 |---|---|---|
 | bootstrap | `brief_plan_bootstrap` | 要件、`environment_facts()`、`BOOTSTRAP_RULES`、`BOOTSTRAP_ESCALATE` |
-| refine | `brief_plan_refine` | 要件、tasks.json の全文、critic の指摘の全文 |
+| refine | `brief_plan_refine` | 要件、tasks.json の全文、critic の指摘の全文（上限の後は人が書き換えたもの） |
 | 詰まった後の改訂 | `brief_plan_revise` | 計画より前からあるテストの名前（`preplan_tests_section`）、SYSTEM_SPEC.md、CONTEXT.md、tasks.json の全文、止まった理由、緑のステップ |
 
 出力は `tasks.json`、`CONTEXT.md`、`SYSTEM_SPEC.md` の3つか、`ESCALATE.md` の1つ。ほかの名前のファイルは、ランナーが読まずに消す。
@@ -58,9 +58,11 @@ flowchart LR
 
 どちらのブリーフも `critic_material`（tasks.json の全文と `environment_facts()`）で始まり、役の説明、問い、要件はその後ろに置く。モードは続けて呼ぶので、2つ目の呼び出しは共通の部分をプロンプトキャッシュから読む。
 
-出力は `FINDINGS.json` の1つ。ファイルが無いか読めなければ、ランナーは批評が起きなかったものとして止まる。
+出力は `FINDINGS.json` の1つ。ファイルが無いか読めなければ、ランナーは批評が起きなかったものとして止まる。指摘の `title` と `evidence` は日本語で書かせる。人が読んで書き換えるからだ。計画の条件や名前は、元の言語のまま引かせる。
 
-`cmd_plan_refine` は、批評と planner の改訂を交互に回す。批評は最大 `LIMITS["critiques"] + 1` 周で、1周ごとにモードの数だけ critic を呼ぶ。
+`cmd_plan_refine` は、批評と planner の改訂を交互に回す。批評は最大 `LIMITS["critiques"] + 1` 周で、1周ごとにモードの数だけ critic を呼ぶ。周ごとの指摘は `human/in/CRITIQUE.json` に書く。
+
+上限の周のあとも指摘が残れば、`CRITIQUE.json` を人が直せる状態（`waiting`）にして止まる。人は指摘の `title` と `evidence` だけを書き換えられる。消すことも足すこともできない。`plan refine --resume`（`resume_refine`）は、書き換えがあれば planner に1回だけ改訂させ、critic はもう呼ばない。書き換えた指摘には、refine のブリーフで `REWRITTEN BY THE HUMAN` の印が付く。書き換えが無ければ何もしない。
 
 ### environment_facts()
 

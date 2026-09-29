@@ -1,4 +1,5 @@
-"""plan refine が、改訂に失敗しても改訂前の提案を失わないこと。
+"""plan refine が、上限の後に残った指摘を人に直させ、直した指摘で1回だけ改訂させること。
+改訂に失敗しても改訂前の提案を失わないこと。
 
 改訂を頼む前に out/ は空になる。プランナーがエスカレーションしたとき、または
 改訂がリンタを通らなかったとき、リンタを通っていた改訂前の提案が消えていた。
@@ -6,6 +7,7 @@
     python3 -m unittest discover -s runner/tests
 """
 
+import json
 import sys
 import tempfile
 import unittest
@@ -17,6 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import loop  # noqa: E402
 
 RUN_CRITIQUE = loop.run_critique
+RENDER_FINDINGS = loop.render_findings
 
 DRAFT = {
     "tasks.json": '{"steps": [], "language": "python"}',
@@ -36,10 +39,14 @@ class PendingDraft(unittest.TestCase):
         for name, text in DRAFT.items():
             (self.out / name).write_text(text, encoding="utf-8")
         self.escalation = root / "refine-escalation.md"
+        self.state = root / "refine.json"
+        self.critique = root / "CRITIQUE.json"
 
         patches = [
             mock.patch.object(loop, "PLANNER_OUT", self.out),
             mock.patch.object(loop, "REFINE_ESCALATION", self.escalation),
+            mock.patch.object(loop, "REFINE_STATE", self.state),
+            mock.patch.object(loop, "CRITIQUE_FOR_HUMAN", self.critique),
             mock.patch.object(loop, "REQUIREMENTS", root / "missing.md"),
             mock.patch.object(loop, "load_settings", lambda _: None),
             mock.patch.object(loop, "run_critique",
@@ -78,6 +85,144 @@ class RefineKeepsTheDraft(PendingDraft):
         with mock.patch.object(loop, "plan_with_retry", fail):
             self.assertEqual(loop.cmd_plan_refine(["trace"]), 4)
         self.assertEqual(self.contents(), DRAFT)
+
+
+FINDINGS = [{"title": "条件が要件に逆らう", "evidence": "S2 の条件", "machine_would_notice": False},
+            {"title": "画面から届かない", "evidence": "S3", "machine_would_notice": True}]
+
+
+class TheHumanRewritesWhatIsLeftAfterTheCap(PendingDraft):
+    """上限まで自動で回し、残った指摘だけを人が直す。直した指摘で1回だけ改訂する。"""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.critiques = 0
+        for p in (mock.patch.object(loop, "render_findings", RENDER_FINDINGS),
+                  mock.patch.object(loop, "run_critique", self.critic),
+                  mock.patch.dict(loop.LIMITS, {"critiques": 1})):
+            p.start()
+            self.addCleanup(p.stop)
+        self.briefs: list[str] = []
+
+    def critic(self, modes, tasks):
+        self.critiques += 1
+        return {"trace": [dict(f) for f in FINDINGS]}
+
+    def planner(self, brief_for, tag, keep=None):
+        self.briefs.append(brief_for(""))
+        (self.out / "tasks.json").write_text(
+            json.dumps({"steps": [f"revised {len(self.briefs)}"]}), encoding="utf-8")
+        return 0
+
+    def reach_the_cap(self) -> None:
+        with mock.patch.object(loop, "plan_with_retry", self.planner):
+            self.assertEqual(loop.cmd_plan_refine(["trace"]), 4)
+        self.briefs.clear()
+        self.critiques = 0
+
+    def shown(self) -> dict:
+        return json.loads(self.critique.read_text(encoding="utf-8"))
+
+    def rewrite(self, mode: str, index: int, **fields) -> None:
+        value = self.shown()
+        value["modes"][mode][index].update(fields)
+        self.critique.write_text(json.dumps(value, ensure_ascii=False), encoding="utf-8")
+
+    def resume(self) -> int:
+        with mock.patch.object(loop, "plan_with_retry", self.planner):
+            return loop.cmd_plan_refine(["trace"], resume=True)
+
+    def test_rounds_before_the_cap_revise_without_waiting(self) -> None:
+        with mock.patch.object(loop, "plan_with_retry", self.planner):
+            self.assertEqual(loop.cmd_plan_refine(["trace"]), 4)
+        # 1回目の指摘で自動で改訂し、2回目の指摘で止まる。
+        self.assertEqual(self.critiques, 2)
+        self.assertEqual(len(self.briefs), 1)
+        self.assertNotIn("REWRITTEN BY THE HUMAN\n", self.briefs[0].split("# What the critic found")[1])
+        shown = self.shown()
+        self.assertTrue(shown["waiting"])
+        self.assertEqual(shown["round"], 2)
+        self.assertEqual(shown["modes"]["trace"][0]["title"], "条件が要件に逆らう")
+
+    def test_the_rewritten_findings_are_revised_once_without_another_critique(self) -> None:
+        self.reach_the_cap()
+        self.rewrite("trace", 0, title="条件は正しい。S2 の説明だけ直す", evidence="要件の3行目")
+        self.assertEqual(self.resume(), 0)
+
+        self.assertEqual(self.critiques, 0)
+        self.assertEqual(len(self.briefs), 1)
+        brief = self.briefs[0]
+        self.assertIn("1. 条件は正しい。S2 の説明だけ直す\n   REWRITTEN BY THE HUMAN", brief)
+        self.assertIn("要件の3行目", brief)
+        self.assertIn("2. 画面から届かない\n   S3", brief)
+        self.assertFalse(self.state.exists())
+        self.assertFalse(self.shown()["waiting"])
+
+    def test_nothing_rewritten_leaves_the_proposal_as_it_is(self) -> None:
+        self.reach_the_cap()
+        before = self.contents()
+        self.assertEqual(self.resume(), 0)
+        self.assertEqual(self.briefs, [])
+        self.assertEqual(self.contents(), before)
+        self.assertFalse(self.state.exists())
+
+    def test_a_failed_revision_after_the_rewrite_puts_the_draft_back(self) -> None:
+        self.reach_the_cap()
+        before = self.contents()
+        self.rewrite("trace", 1, title="画面の遷移を足す")
+
+        def fail(brief_for, tag, keep=None):
+            loop.clear_proposal()
+            return 2
+
+        with mock.patch.object(loop, "plan_with_retry", fail):
+            self.assertEqual(loop.cmd_plan_refine(["trace"], resume=True), 2)
+        self.assertEqual(self.contents(), before)
+        # 次の `loop continue` は、同じ指摘で改訂し直さずに下書きを適用する。
+        self.assertFalse(self.state.exists())
+
+    def test_a_finding_cannot_be_removed(self) -> None:
+        self.reach_the_cap()
+        value = self.shown()
+        value["modes"]["trace"].pop()
+        self.critique.write_text(json.dumps(value, ensure_ascii=False), encoding="utf-8")
+        with self.assertRaises(loop.Halt) as caught:
+            self.resume()
+        self.assertIn("different number of findings", caught.exception.reason)
+        # 直してから流し直せるよう、控えは残す。
+        self.assertTrue(self.state.exists())
+        self.assertEqual(self.briefs, [])
+
+    def test_an_empty_title_is_refused(self) -> None:
+        self.reach_the_cap()
+        self.rewrite("trace", 1, title="  ")
+        with self.assertRaises(loop.Halt):
+            self.resume()
+
+    def test_a_proposal_changed_after_the_critique_is_refused(self) -> None:
+        self.reach_the_cap()
+        (self.out / "tasks.json").write_text('{"steps": ["by hand"]}', encoding="utf-8")
+        with self.assertRaises(loop.Halt) as caught:
+            self.resume()
+        self.assertIn("changed after it was critiqued", caught.exception.reason)
+
+    def test_resuming_with_nothing_waiting_does_nothing(self) -> None:
+        self.assertEqual(self.resume(), 0)
+        self.assertEqual(self.briefs, [])
+        self.assertEqual(self.critiques, 0)
+
+    def test_a_clean_critique_does_not_wait(self) -> None:
+        with mock.patch.object(loop, "run_critique", lambda modes, tasks: {"trace": []}):
+            self.assertEqual(loop.cmd_plan_refine(["trace"]), 0)
+        self.assertFalse(self.shown()["waiting"])
+        self.assertFalse(self.state.exists())
+
+    def test_applying_the_plan_closes_the_waiting_critique(self) -> None:
+        self.reach_the_cap()
+        loop.settle_critique()
+        shown = self.shown()
+        self.assertFalse(shown["waiting"])
+        self.assertEqual(shown["modes"]["trace"][0]["title"], "条件が要件に逆らう")
 
 
 class NoCritiqueIsNotClean(PendingDraft):

@@ -154,6 +154,25 @@ def handler_for(state: DashboardState, launchers: Launchers, reach: Reach, token
                             "a pull request can only be sent from the machine itself")
                     self._json(send_pull_request(state, pulls), HTTPStatus.CREATED)
                     return
+                if path == "/api/findings":
+                    # クリティックの指摘の書き換え。人がプランナーに渡す言葉を決める
+                    # ことで、エスカレーションへの回答と同じく、どこからでもよい。
+                    if live is None:
+                        raise ValueError("live view is not configured")
+                    index = body.get("index")
+                    if not isinstance(index, int) or isinstance(index, bool):
+                        raise ValueError("index must be an integer")
+                    message = live.rewrite_finding(
+                        str(body.get("mode", "")), index,
+                        str(body.get("title", "")), str(body.get("evidence", "")))
+                    self._json({"message": message}, HTTPStatus.OK)
+                    return
+                if path == "/api/continue":
+                    # `loop continue`。止まった走行を、人が読んだ指摘で続ける。
+                    if live is None:
+                        raise ValueError("live view is not configured")
+                    self._json({"message": live.continue_loop()}, HTTPStatus.ACCEPTED)
+                    return
                 if path == "/api/launch":
                     # プログラムの起動だけは、画面のある場所でしか意味が無い。
                     # スマホから起動すれば、誰も見ていない窓が開くだけだ。

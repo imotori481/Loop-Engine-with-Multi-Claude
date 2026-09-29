@@ -141,6 +141,16 @@ def outcome(running: bool, last: str | None) -> str:
     return "green" if last and ALL_GREEN in last else "stopped"
 
 
+def findings(logs: str) -> dict | None:
+    """plan refine が書いた、人が直す指摘の写し。human/in は humanw で読める。
+
+    bootstrap が消すので、あれば今の計画への批評だ。waiting なら人が直してよい。
+    """
+    path = os.path.join(os.path.dirname(logs), "human", "in", "CRITIQUE.json")
+    value = read(path, json.load)
+    return value if isinstance(value, dict) and isinstance(value.get("modes"), dict) else None
+
+
 def main(argv: list[str]) -> int:
     project, active, logs = argv[1:4]
     running = active == "true"
@@ -150,7 +160,8 @@ def main(argv: list[str]) -> int:
         loop["outcome"] = outcome(running, last)
     print(json.dumps({"project": project, "running": running,
                       "now": read(os.path.join(logs, "now.json"), json.load),
-                      "last": last, "loop": loop}, ensure_ascii=False))
+                      "last": last, "loop": loop, "findings": findings(logs)},
+                     ensure_ascii=False))
     return 0
 
 

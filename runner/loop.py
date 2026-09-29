@@ -135,6 +135,10 @@ FINDINGS_NAME = "FINDINGS.json"
 # /srv/loop/planner/out と対になっていて、形は同じ、向きは逆、グループは別。
 HUMAN_IN = LOOP / "human" / "in"
 REQUIREMENTS = HUMAN_IN / "REQUIREMENTS.md"
+# クリティックの指摘の、人が読んで書き換える写し。plan refine が批評のたびに
+# 書いて止まり、再開したときに読み戻してプランナーへ渡す。human/in は humanw の
+# 保守ユーザーが書け、プランナーとクリティックは読めない。
+CRITIQUE_FOR_HUMAN = HUMAN_IN / "CRITIQUE.json"
 
 # プランナーが書いてよい3つのファイル（BOOTSTRAP「書いてよいのは次の3つだけ」）。
 # out/ に書く名前から、プロジェクトの中の置き場への対応表にしてある。この表が
@@ -167,6 +171,9 @@ PLANNER_ESCALATION = PLAN / "PLANNER_ESCALATION.md"
 # plan refine の途中でプランナーがエスカレーションしたときの控え。提案は
 # 改訂前に戻すので、エスカレーションの本文はここにしか残らない。
 REFINE_ESCALATION = STATE / "refine-escalation.md"
+# plan refine が人を待っているあいだの控え。何回目の批評か、批評した提案の
+# ハッシュ、クリティックが書いたままの指摘。人が直したものは、これと比べて確かめる。
+REFINE_STATE = STATE / "refine.json"
 # 終えた計画の置き場。bootstrap が次の計画を起こす前に、計画と台帳をここの
 # 番号のディレクトリへ移す（archive_plan）。
 PLAN_ARCHIVE = PLAN / "archive"
@@ -5607,6 +5614,10 @@ without reading.
       ]
     }}
 
+**Write `title` and `evidence` in Japanese.** A human reads the findings before
+the planner does, and may rewrite them. Quote criteria, names and code exactly
+as they appear in the plan, in their own language.
+
 `machine_would_notice` is false when every criterion would pass while the
 problem stood. Say so plainly when that is the case -- it is the difference
 between a plan that is incomplete and a plan that cannot be caught.
@@ -5720,6 +5731,8 @@ def render_findings(by_mode: dict[str, list[dict]]) -> str:
             evidence = str(finding.get("evidence", "")).strip()
             unseen = finding.get("machine_would_notice") is False
             lines.append(f"{n}. {title}")
+            if finding.get("rewritten"):
+                lines.append("   REWRITTEN BY THE HUMAN")
             if unseen:
                 lines.append("   NO GATE WOULD CATCH THIS")
             if evidence:
@@ -5770,6 +5783,10 @@ contort the plan to satisfy it. Leave that part alone and say why in the plan
 itself, where it will survive: put the reason in the `goal` of the step it
 concerns, in one sentence. A finding you silently ignore will simply be found
 again on the next pass.
+
+A human read these findings before you, and may have rewritten some. A finding
+marked REWRITTEN BY THE HUMAN is the human's word, not the critic's guess: it
+says what the human wants from the plan. Do not argue it away.
 
 # What you may write, into the current directory
 - `tasks.json`      the full revised plan, not a diff
@@ -5840,20 +5857,143 @@ def no_critique_ran(modes: list[str]) -> int:
     return 1
 
 
-def cmd_plan_refine(modes: list[str]) -> int:
-    """保留中の計画を批評し、指摘を返し、それを繰り返す。
+def text_sha256(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def plain_findings(by_mode: dict[str, list[dict]]) -> dict[str, list[dict]]:
+    """人に見せて書き換えさせる形。クリティックの書いた余計なキーは落とす。"""
+    return {mode: [{"title": str(f.get("title", "")).strip(),
+                    "evidence": str(f.get("evidence", "")).strip(),
+                    "machine_would_notice": f.get("machine_would_notice")}
+                   for f in findings]
+            for mode, findings in by_mode.items()}
+
+
+def write_critique_for_human(round_no: int, by_mode: dict[str, list[dict]],
+                             waiting: bool) -> None:
+    """人が読んで直す写しを書く。waiting なら、人が直してよい。
+
+    一時ファイルから置き換える。human/in は sticky だが、ランナーはディレクトリの
+    所有者なので、保守ユーザーが作り直したファイルでも置き換えられる。
+    """
+    value = {"round": round_no, "waiting": waiting,
+             "at": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "modes": by_mode}
+    temporary = CRITIQUE_FOR_HUMAN.with_name(CRITIQUE_FOR_HUMAN.name + ".tmp")
+    temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n",
+                         encoding="utf-8")
+    temporary.chmod(0o660)
+    os.replace(temporary, CRITIQUE_FOR_HUMAN)
+
+
+def settle_critique() -> None:
+    """人を待っている写しを、もう直せないものにする。中身は画面に残す。"""
+    try:
+        value = json.loads(CRITIQUE_FOR_HUMAN.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    if isinstance(value, dict) and value.get("waiting") and isinstance(value.get("modes"), dict):
+        write_critique_for_human(int(value.get("round") or 0), value["modes"], waiting=False)
+
+
+def edited_findings(original: dict[str, list[dict]]) -> dict[str, list[dict]]:
+    """人が直した指摘を読む。書き換えてよいのは title と evidence だけ。
+
+    指摘を消すことも足すこともできない。数が合わない、読めない、題が空の写しは
+    Halt にする。人が直して `loop continue` を流し直せば、もう一度ここを通る。
+    書き換えた指摘には rewritten を付け、プランナーにそう伝える。
+    """
+    where = CRITIQUE_FOR_HUMAN
+    try:
+        value = json.loads(where.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        raise Halt("CRITIQUE", f"{where} is not readable JSON: {error}")
+    modes = value.get("modes") if isinstance(value, dict) else None
+    if not isinstance(modes, dict) or sorted(modes) != sorted(original):
+        raise Halt("CRITIQUE", f"{where} does not hold the modes that were critiqued",
+                   f"expected: {', '.join(sorted(original))}")
+    edited: dict[str, list[dict]] = {}
+    for mode, before in original.items():
+        after = modes[mode]
+        if not isinstance(after, list) or len(after) != len(before):
+            raise Halt("CRITIQUE", f"{where}: {mode} has a different number of findings",
+                       "Only title and evidence may be rewritten; a finding cannot be "
+                       "added or removed.")
+        rows = []
+        for n, (old, new) in enumerate(zip(before, after), 1):
+            title = new.get("title") if isinstance(new, dict) else None
+            evidence = new.get("evidence") if isinstance(new, dict) else None
+            if not isinstance(title, str) or not title.strip() or not isinstance(evidence, str):
+                raise Halt("CRITIQUE", f"{where}: {mode} {n} needs a title and an evidence")
+            row = {**old, "title": title.strip(), "evidence": evidence.strip()}
+            if (row["title"], row["evidence"]) != (old["title"], old["evidence"]):
+                row["rewritten"] = True
+            rows.append(row)
+        edited[mode] = rows
+    return edited
+
+
+def revise_with_findings(requirements: str, tasks: str,
+                         by_mode: dict[str, list[dict]], round_no: int) -> int:
+    """指摘をプランナーに渡し、保留中の提案を改訂させる。0 なら改訂できた。"""
+    language = json.loads(tasks).get("language", "python")
+    report = render_findings(by_mode)
+    ledger("PLAN_REFINE", round=round_no, findings=sum(len(f) for f in by_mode.values()))
+    # 改訂前の提案を控える。plan_with_retry は最初に out/ を空にするので、
+    # 控えが無いと、改訂が失敗したときやエスカレーションしたときに、
+    # リンタを通っていた提案まで失われる。
+    draft = {name: text for name, text in read_proposal().items()
+             if name in PROPOSAL_FILES}
+    # tasks.json は補わない。プランナーが書かなければ、改訂が無いということだ。
+    code = plan_with_retry(
+        lambda feedback: brief_plan_refine(requirements, tasks, report, feedback),
+        "PLAN_REFINE_DRAFT",
+        keep={name: text for name, text in draft.items() if name != "tasks.json"})
+    if code != 0:
+        restore_proposal(draft)
+        ledger("REFINE_RESTORED", round=round_no, reason="revision failed",
+               files=sorted(draft))
+        print(f"the revision failed; the draft from before round {round_no} "
+              f"is back in {PLANNER_OUT}", file=sys.stderr)
+        return code
+    proposal = read_proposal()
+    if ESCALATE_NAME in proposal:
+        REFINE_ESCALATION.write_text(proposal[ESCALATE_NAME], encoding="utf-8")
+        restore_proposal(draft)
+        ledger("REFINE_RESTORED", round=round_no, reason="planner escalated",
+               files=sorted(draft))
+        print("The planner escalated to you rather than revising:\n")
+        print(proposal[ESCALATE_NAME])
+        print(f"\nthe draft from before round {round_no} is back in "
+              f"{PLANNER_OUT}, and the escalation is kept at "
+              f"{REFINE_ESCALATION}.\nRun `plan apply` to apply the draft as "
+              f"it is, or `plan bootstrap` to start over.", file=sys.stderr)
+        return 3
+    # プランナーはファイル全体を書き直すので、言語の印を付け直す。これは
+    # プランナーではなくランナーの印で、失った計画は黙って Python と読まれる。
+    stamp_language(language)
+    return 0
+
+
+def cmd_plan_refine(modes: list[str], resume: bool = False) -> int:
+    """保留中の計画を批評し、指摘をプランナーに返し、それを繰り返す。上限の後も
+    指摘が残れば、人が直せる形で残して止まる。
 
     これで外側の輪が閉じる。これが無いと批評は人が読んで手を打つ報告になり、
-    機械が扱うために作られたちょうどその場所で、人間が輪の中に残る。しかも指摘の
-    宛先は、どのみち人間ではなくプランナーだ。
+    機械が扱うために作られたちょうどその場所で、人間が輪の中に残る。
 
     「保留中の」提案に対して走り、`plan apply` の前で止まる。だから、これが何を
     しても、何かを測った基準に触れることはない。
 
-    limits.critiques で上限を掛ける。このループは1回の呼び出しの中にあるので、
-    台帳ではなくここで数える。上限は「もう少し良くできる」が永遠に続くのを止める。
-    これは小さな話ではない。改訂1回はプランナーの呼び出し1回で、TypeScript の
-    ブリーフでは28分かかった。
+    limits.critiques で改訂の上限を掛ける。上限は「もう少し良くできる」が永遠に
+    続くのを止める。改訂1回はプランナーの呼び出し1回で、TypeScript のブリーフでは
+    28分かかった。
+
+    上限の後も指摘が残って止まるときは、どのみち人が `loop continue` を打つ。
+    そこで人が指摘を読み、title と evidence を書き換えられるようにする。
+    クリティックは計画と要件しか見ておらず、的を外すことがある。resume は人が
+    書き換えた指摘でプランナーに1回だけ改訂させ、批評はもう回さない。書き換えが
+    無ければ、何もせずに提案を残す。どちらも、その後は `plan apply` に進む。
     """
     pending = PLANNER_OUT / "tasks.json"
     if not pending.is_file():
@@ -5864,70 +6004,81 @@ def cmd_plan_refine(modes: list[str]) -> int:
 
     requirements = REQUIREMENTS.read_text(encoding="utf-8") \
         if REQUIREMENTS.is_file() else ""
-    cap = LIMITS["critiques"]
+    if resume:
+        return resume_refine(requirements, pending)
 
+    cap = LIMITS["critiques"]
     for round_no in range(1, cap + 2):
         tasks = pending.read_text(encoding="utf-8")
         load_settings(json.loads(tasks))
-        language = json.loads(tasks).get("language", "python")
 
         by_mode = run_critique(modes, tasks)
         if not by_mode:
             return no_critique_ran(modes)
+        by_mode = plain_findings(by_mode)
         total = sum(len(f) for f in by_mode.values())
-        report = render_findings(by_mode)
         print(f"\n=== critique {round_no} of at most {cap + 1} ===")
-        print(report)
+        print(render_findings(by_mode))
 
         if total == 0:
+            write_critique_for_human(round_no, by_mode, waiting=False)
             ledger("CRITIQUE_CLEAN", round=round_no, modes=sorted(by_mode))
             print("the critic found nothing left. That is not approval -- the "
                   "gates and the human decide that.")
             return 0
 
         if round_no > cap:
+            REFINE_STATE.parent.mkdir(parents=True, exist_ok=True)
+            REFINE_STATE.write_text(json.dumps(
+                {"round": round_no, "tasks_sha256": text_sha256(tasks), "findings": by_mode},
+                ensure_ascii=False), encoding="utf-8")
+            write_critique_for_human(round_no, by_mode, waiting=True)
             ledger("REFINE_CAP", round=round_no, findings=total)
             print(f"\n{total} finding(s) still standing after {cap} revision(s). "
-                  f"The proposal is left as it is; read it and decide.",
-                  file=sys.stderr)
+                  f"The proposal is left as it is. Rewrite the title or the evidence "
+                  f"of any finding in {CRITIQUE_FOR_HUMAN} and run "
+                  f"`plan refine --resume` to have the planner revise once against "
+                  f"your wording, or apply the proposal as it is.", file=sys.stderr)
             return 4
 
-        ledger("PLAN_REFINE", round=round_no, findings=total)
-        # 改訂前の提案を控える。plan_with_retry は最初に out/ を空にするので、
-        # 控えが無いと、改訂が失敗したときやエスカレーションしたときに、
-        # リンタを通っていた提案まで失われる。
-        draft = {name: text for name, text in read_proposal().items()
-                 if name in PROPOSAL_FILES}
-        # tasks.json は補わない。プランナーが書かなければ、改訂が無いということだ。
-        code = plan_with_retry(
-            lambda feedback: brief_plan_refine(requirements, tasks, report, feedback),
-            "PLAN_REFINE_DRAFT",
-            keep={name: text for name, text in draft.items() if name != "tasks.json"})
+        # 上限の前の回は、クリティックの指摘のまま、人を待たずに改訂させる。
+        write_critique_for_human(round_no, by_mode, waiting=False)
+        code = revise_with_findings(requirements, tasks, by_mode, round_no)
         if code != 0:
-            restore_proposal(draft)
-            ledger("REFINE_RESTORED", round=round_no, reason="revision failed",
-                   files=sorted(draft))
-            print(f"the revision failed; the draft from before round {round_no} "
-                  f"is back in {PLANNER_OUT}", file=sys.stderr)
             return code
-        proposal = read_proposal()
-        if ESCALATE_NAME in proposal:
-            REFINE_ESCALATION.write_text(proposal[ESCALATE_NAME], encoding="utf-8")
-            restore_proposal(draft)
-            ledger("REFINE_RESTORED", round=round_no, reason="planner escalated",
-                   files=sorted(draft))
-            print("The planner escalated to you rather than revising:\n")
-            print(proposal[ESCALATE_NAME])
-            print(f"\nthe draft from before round {round_no} is back in "
-                  f"{PLANNER_OUT}, and the escalation is kept at "
-                  f"{REFINE_ESCALATION}.\nRun `plan apply` to apply the draft as "
-                  f"it is, or `plan bootstrap` to start over.", file=sys.stderr)
-            return 3
-        # プランナーはファイル全体を書き直すので、言語の印を付け直す。これは
-        # プランナーではなくランナーの印で、失った計画は黙って Python と読まれる。
-        stamp_language(language)
 
     return 4   # 届かない。ループは必ず戻る
+
+
+def resume_refine(requirements: str, pending: Path) -> int:
+    """上限の後に残った指摘を、人が書き換えたものに替えて、1回だけ改訂させる。
+
+    批評はもう回さない。上限は使い切っていて、人が読んだ指摘に答えた改訂を、
+    人の読んでいない指摘でまた曲げさせない。書き換えが1つも無ければ改訂もしない。
+    どちらも 0 で戻り、`loop continue` は提案を適用する。
+    """
+    try:
+        state = json.loads(REFINE_STATE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        print("no critique is waiting for you; nothing to resume")
+        return 0
+    tasks = pending.read_text(encoding="utf-8")
+    if text_sha256(tasks) != state.get("tasks_sha256"):
+        raise Halt("CRITIQUE", "the pending proposal changed after it was critiqued",
+                   f"Remove {REFINE_STATE} to apply the proposal as it is now.")
+    edited = edited_findings(state["findings"])
+    # 読めた時点で控えを消す。改訂が失敗しても、次の `loop continue` は
+    # 同じ指摘で改訂し直さず、下書きを適用する。
+    REFINE_STATE.unlink()
+    settle_critique()
+    rewritten = [f"{mode} {n}" for mode, rows in edited.items()
+                 for n, row in enumerate(rows, 1) if row.get("rewritten")]
+    ledger("FINDINGS_EDITED", round=state["round"], rewritten=rewritten)
+    if not rewritten:
+        print("no finding was rewritten; the proposal is left as it is")
+        return 0
+    load_settings(json.loads(tasks))
+    return revise_with_findings(requirements, tasks, edited, state["round"])
 
 
 def cmd_critique(modes: list[str]) -> int:
@@ -6048,6 +6199,9 @@ def cmd_plan_bootstrap(source: str | None, language: str = "python") -> int:
         if refused:
             print(refused, file=sys.stderr)
             return 1
+    # 前の計画への批評は、これから書く計画とは関係が無い。
+    REFINE_STATE.unlink(missing_ok=True)
+    CRITIQUE_FOR_HUMAN.unlink(missing_ok=True)
 
     # ブリーフを組み立てる後ではなく前に設定する。environment_facts はテストの
     # コマンドとツールキットを報告し、配置の段落はソースファイルがそもそもどんな
@@ -6158,6 +6312,9 @@ def cmd_plan_apply() -> int:
     PLANNER_ESCALATION.unlink(missing_ok=True)
 
     ledger("PLAN_APPLY", files=applied)
+    # 人を待っていた批評は、適用した計画には効かない。直せる印を外す。
+    REFINE_STATE.unlink(missing_ok=True)
+    settle_critique()
 
     # 計画だけをコミットし、ほかは何も含めない。提案はふつう、止まったステップの
     # 変更が作業ツリーに残ったまま届く。それを同じコミットに入れると、捨てた試行を
@@ -6877,6 +7034,11 @@ def main() -> int:
                        "the planner, and repeat until it is clean or capped")
     refine_cmd.add_argument("--mode", action="append", choices=list(CRITIQUE_MODES),
                             help="repeatable; default is every mode")
+    refine_cmd.add_argument("--resume", action="store_true",
+                            help=f"after the cap: have the planner revise once against "
+                                 f"the findings the human rewrote in {CRITIQUE_FOR_HUMAN}, "
+                                 f"without another critique; does nothing when no "
+                                 f"finding was rewritten")
 
     args = parser.parse_args()
 
@@ -6905,7 +7067,7 @@ def main() -> int:
             if args.plan_cmd == "propose":
                 return cmd_plan_propose(args.step)
             if args.plan_cmd == "refine":
-                return cmd_plan_refine(args.mode or list(CRITIQUE_MODES))
+                return cmd_plan_refine(args.mode or list(CRITIQUE_MODES), resume=args.resume)
             if args.plan_cmd == "show":
                 return cmd_plan_show()
             return cmd_plan_apply()
