@@ -301,6 +301,24 @@ namespace Logic
 }
 """)
 
+    def test_a_nested_type_is_written_inside_its_outer_type(self):
+        step = {"files_write": ["src/Logic/Board.cs"],
+                "contracts": {"provides": [
+                    "src/Logic/Board.cs: class Board",
+                    "src/Logic/Board.cs: struct Board.Cell { public int X; }",
+                    "src/Logic/Board.cs: Board.Cell.Cell(int x)",
+                ]}}
+        text = loop.generate_stub(step, [], {})["src/Logic/Board.cs"]
+        self.assertIn("""    public class Board
+    {
+        public struct Cell
+        {
+            public int X;
+            public Cell(int x) { throw new System.NotImplementedException("__stub__"); }
+        }
+    }
+""", text)
+
     def test_an_enum_keeps_its_members(self):
         files = loop.generate_stub(self.STEP, [], {})
         self.assertIn("    public enum Cell\n    {\n        Empty, Wall\n    }",
@@ -661,6 +679,32 @@ class TheStubKeepsTheExistingCSharp(CSharp):
         step, text = self.build("static int Board.Score(Board board)", "int Board.Area()",
                                 "int Board.Width { get; }", "int Board.Apply(int rule)")
         self.assertEqual(kept_the_rest(text, step), [])
+
+    def test_a_nested_type_goes_whole_at_the_end_of_its_outer_type(self):
+        # 取り込んだ Unity のプロジェクトの S1。ソルバーに回すと、入れ子のクラスを
+        # private のまま置き、static メソッドをその中に入れた。
+        step, text = self.build("static int Board.Total(int n)",
+                                "class Board.Cursor",
+                                "Board.Cursor.Cursor(int start)",
+                                "int Board.Cursor.Position",
+                                "int Board.Cursor.Advance(int steps)")
+        self.assertIn(
+            "        public int Helper(int n) { return n + 1; }\n\n"
+            '        public static int Total(int n) { throw new System.NotImplementedException("__stub__"); }\n'
+            "        public class Cursor\n"
+            "        {\n"
+            '            public Cursor(int start) { throw new System.NotImplementedException("__stub__"); }\n'
+            "            public int Position;\n"
+            '            public int Advance(int steps) { throw new System.NotImplementedException("__stub__"); }\n'
+            "        }\n"
+            "    }\n", text)
+        self.assertEqual(kept_the_rest(text, step), [])
+
+    def test_a_nested_type_the_file_already_has_goes_back_to_the_solver(self):
+        original = EXISTING_CS.replace("public int Helper(int n)",
+                                       "public class Cursor { }\n        public int Helper(int n)")
+        self.assertIsNone(self.build("class Board.Cursor", "int Board.Cursor.Position",
+                                     original=original)[1])
 
 
 def kept_the_rest(after: str, step: dict) -> list[str]:

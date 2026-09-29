@@ -1857,13 +1857,16 @@ CSHARP_STUB_BODY = "{ " + CSHARP_STUB_EXPRESSION + "; }"
 CSHARP_STUB_MARK = re.compile(r"^\s*System\.NotImplementedException\s*:\s*__stub__\s*$")
 CSHARP_ACCESS = re.compile(r"^(?:public|internal|protected|private)\b")
 CSHARP_MODIFIERS = r"(?:(?:public|internal|protected|private|static|abstract|sealed|partial|readonly|virtual|override|new)\s+)*"
+# 型の名前はドットで区切れる。`Board.Cell` は Board の中の入れ子の型。
+CSHARP_TYPE_NAME = r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*"
 CSHARP_TYPE_LINE = re.compile(
-    rf"^(?P<mods>{CSHARP_MODIFIERS})(?P<kind>class|struct|interface|enum)\s+(?P<name>[A-Za-z_]\w*)"
+    rf"^(?P<mods>{CSHARP_MODIFIERS})(?P<kind>class|struct|interface|enum)\s+(?P<name>{CSHARP_TYPE_NAME})"
     r"(?P<bases>\s*:\s*[^{]+?)?\s*(?:\{(?P<body>.*)\})?\s*;?\s*$")
 CSHARP_CTOR_LINE = re.compile(
-    rf"^(?P<mods>{CSHARP_MODIFIERS})(?P<type>[A-Za-z_]\w*)\.(?P=type)\s*\((?P<params>.*)\)\s*;?\s*$")
+    rf"^(?P<mods>{CSHARP_MODIFIERS})(?P<type>(?:[A-Za-z_]\w*\.)*(?P<last>[A-Za-z_]\w*))\.(?P=last)"
+    r"\s*\((?P<params>.*)\)\s*;?\s*$")
 CSHARP_MEMBER_LINE = re.compile(
-    rf"^(?P<mods>{CSHARP_MODIFIERS})(?P<ret>\S.*?)\s+(?P<type>[A-Za-z_]\w*)\.(?P<name>[A-Za-z_]\w*)"
+    rf"^(?P<mods>{CSHARP_MODIFIERS})(?P<ret>\S.*?)\s+(?P<type>{CSHARP_TYPE_NAME})\.(?P<name>[A-Za-z_]\w*)"
     r"\s*(?P<rest>\(.*\)|\{.*\})?\s*;?\s*$")
 # 契約に現れたら `using UnityEngine;` を足す型。全部は知らないので、よく出る
 # ものだけを挙げる。無い型がコンパイルで落ちれば、RED_GATE がそのまま止める。
@@ -1912,6 +1915,14 @@ def csharp_stub_member(member: str) -> str:
     return member + ";"                              # フィールド
 
 
+def csharp_type_block(entry: dict) -> str:
+    """スタブの型1つ。入れ子の型（entry["nested"]）はメンバーの後ろに、字下げして置く。"""
+    separator = ",\n" if entry["kind"] == "enum" else "\n"
+    members = [m for m in entry["members"] if m] + [n["block"] for n in entry.get("nested", [])]
+    inner = separator.join("    " + m.replace("\n", "\n    ") for m in members)
+    return f"{entry['head']}\n{{\n{inner}\n}}"
+
+
 def csharp_namespace(path: str) -> str | None:
     """新しいファイルの名前空間。柵の中のフォルダから作る（layout_note の決まり）。
 
@@ -1954,7 +1965,8 @@ def generate_csharp_stub(step: dict, requires: list[str],
             entry = types.setdefault(name, {"path": path, "members": [], "specs": []})
             if entry["path"] != path or "head" in entry:
                 return None
-            entry["head"] = f"{mods} {kind} {name}{declared.group('bases') or ''}".rstrip()
+            short = name.rpartition(".")[2]
+            entry["head"] = f"{mods} {kind} {short}{declared.group('bases') or ''}".rstrip()
             entry["kind"] = kind
             entry["bases"] = declared.group("bases") or ""
             body = entry["body"] = declared.group("body") or ""
@@ -1973,7 +1985,7 @@ def generate_csharp_stub(step: dict, requires: list[str],
         member = CSHARP_MEMBER_LINE.match(decl) if not ctor else None
         if ctor:
             owner = ctor.group("type")
-            text = f"{ctor.group('mods')}{owner}({ctor.group('params')})"
+            text = f"{ctor.group('mods')}{ctor.group('last')}({ctor.group('params')})"
         elif member:
             owner = member.group("type")
             text = (f"{member.group('mods')}{member.group('ret')} {member.group('name')}"
@@ -1991,13 +2003,35 @@ def generate_csharp_stub(step: dict, requires: list[str],
     if {t["path"] for t in types.values()} != set(step["files_write"]):
         return None
 
+    # 入れ子の型（`Tactical.SpawnTracker`）の外側の型が、契約に行を持たないことがある。
+    # 外側の型も、同じファイルの型として扱う。
+    for name in list(order):
+        outer = name.rpartition(".")[0]
+        while outer:
+            if outer not in types:
+                types[outer] = {"path": types[name]["path"], "members": [], "specs": []}
+                order.insert(order.index(name), outer)
+            elif types[outer]["path"] != types[name]["path"]:
+                return None
+            outer = outer.rpartition(".")[0]
+
     # 型の宣言の行が無いメンバーは、普通のクラスに入れる。既存のファイルでは、
     # 型の行があったか（typed）で、型の頭を確かめるかどうかを分ける。
     for name, entry in types.items():
         entry["name"] = name
         entry["typed"] = "head" in entry
-        entry.setdefault("head", "public class " + name)
+        entry.setdefault("head", "public class " + name.rpartition(".")[2])
         entry.setdefault("kind", "class")
+        entry["nested"] = []
+
+    # 入れ子の型は、外側の型のメンバーとして書く。深いものから組み立てて外側に渡す。
+    # 入れ子の型の既定は private なので、型の頭には public を付けてある。
+    for name in sorted((n for n in types if "." in n), key=lambda n: -n.count(".")):
+        if types[name.rpartition(".")[0]]["kind"] in ("enum", "interface"):
+            return None
+        types[name.rpartition(".")[0]]["nested"].append(
+            {"name": name.rpartition(".")[2], "block": csharp_type_block(types[name])})
+    order = [name for name in order if "." not in name]
 
     # 名前空間。既存のファイルは今の名前空間を保つ（layout_note）。requires の行は
     # `-- namespace X` を持てばそれ、無ければ作業ツリーのファイル、それも無ければ
@@ -2045,15 +2079,8 @@ def generate_csharp_stub(step: dict, requires: list[str],
         usings = ["System", "System.Collections.Generic", "System.Linq"] \
             + (["UnityEngine"] if unity else []) \
             + sorted({ns for ns in namespaces.values() if ns and ns != own})
-        blocks = []
-        for name in order:
-            entry = types[name]
-            if entry["path"] != path:
-                continue
-            separator = ",\n" if entry["kind"] == "enum" else "\n"
-            inner = separator.join(f"    {m}" for m in entry["members"] if m)
-            blocks.append(f"{entry['head']}\n{{\n{inner}\n}}")
-        text = "\n\n".join(blocks)
+        text = "\n\n".join(csharp_type_block(types[name]) for name in order
+                           if types[name]["path"] == path)
         if own:
             text = f"namespace {own}\n{{\n" + "\n".join(
                 f"    {line}" if line else "" for line in text.splitlines()) + "\n}"
@@ -4769,6 +4796,13 @@ def csharp_merge_stub(original: str, entries: list[dict], known: dict[str, str],
                     elif arrow is not None:
                         edits.append((start + arrow, stop, f"=> {CSHARP_STUB_EXPRESSION};"))
 
+        # 入れ子の型は丸ごと足す。同じ名前のものがもうあれば、中身を合わせる手立てが
+        # 無いのでソルバーに回す。
+        for nested in entry.get("nested", []):
+            if any(nested["name"] in m["names"] for m in t["members"]):
+                return None
+            new.append(nested["block"])
+
         if new:
             # 型の末尾、閉じる `}` の行の前に、ほかのメンバーと同じ字下げで足す。
             close = t["close"]
@@ -4781,7 +4815,8 @@ def csharp_merge_stub(original: str, entries: list[dict], known: dict[str, str],
                 lead = original[original.rfind("\n", 0, first) + 1:first]
                 if lead and not lead.strip():
                     indent = lead
-            block = ("\n" if t["members"] else "") + "".join(f"{indent}{m}\n" for m in new)
+            block = ("\n" if t["members"] else "") + "".join(
+                f"{indent}{m.replace(chr(10), chr(10) + indent)}\n" for m in new)
             if before.strip():
                 edits.append((close, close, "\n" + block + outer))
             else:
