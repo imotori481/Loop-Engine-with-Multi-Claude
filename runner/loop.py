@@ -167,6 +167,9 @@ PLANNER_ESCALATION = PLAN / "PLANNER_ESCALATION.md"
 # plan refine の途中でプランナーがエスカレーションしたときの控え。提案は
 # 改訂前に戻すので、エスカレーションの本文はここにしか残らない。
 REFINE_ESCALATION = STATE / "refine-escalation.md"
+# 終えた計画の置き場。bootstrap が次の計画を起こす前に、計画と台帳をここの
+# 番号のディレクトリへ移す（archive_plan）。
+PLAN_ARCHIVE = PLAN / "archive"
 
 # tests/ はプロジェクトの venv の pytest でだけ走らせる。素の
 # `python3 -m pytest` にすると、solver 自身の ~/.local のパッケージが sys.path に
@@ -5972,6 +5975,56 @@ def cmd_critique(modes: list[str]) -> int:
     return 4
 
 
+def archive_plan() -> str | None:
+    """今の計画を plan/archive/<番号>/ へ移してコミットする。移せなければ理由を返す。
+
+    同じリポジトリで2つ目の要件を走らせるための経路だ。新しい計画のステップ id は
+    前の計画と重なる（どちらも S1 から始まる）。台帳が残ると、前の計画の GREEN を
+    新しい S1 の緑と読む。だから台帳ごと移し、新しい台帳は空から始める。前の計画が
+    書いたコードとテストは HEAD に残り、次の計画からは既存のものとして見える。
+
+    途中まで緑の計画は移さない。緑のステップのコードは、残りのステップを前提に
+    書かれている。続けるか捨てるかは人が決める。緑のステップが1つも無い計画は
+    移してよい。コードを何も残していない。
+    """
+    try:
+        tasks = json.loads((PLAN / "tasks.json").read_text(encoding="utf-8"))
+        ids = {s["id"] for s in tasks["steps"]}
+    except (OSError, ValueError, KeyError, TypeError) as bad:
+        return f"refusing: the current plan cannot be read ({bad})"
+    done = green_steps()
+    if done and ids - done:
+        return (f"refusing: {', '.join(sorted(done))} already green but "
+                f"{', '.join(sorted(ids - done))} not; a bootstrap replaces the plan, "
+                f"which would orphan them. Finish the plan with `run --all` first")
+    dirty = touched_paths()
+    if dirty:
+        return ("refusing: the working tree is dirty; `reset <step>` first\n"
+                + "\n".join(sorted(dirty)))
+
+    numbers = [int(p.name) for p in PLAN_ARCHIVE.glob("*") if p.name.isdigit()] \
+        if PLAN_ARCHIVE.is_dir() else []
+    dest = PLAN_ARCHIVE / f"{max(numbers, default=0) + 1:03d}"
+    dest.mkdir(parents=True)
+    for path in (*PROPOSAL_FILES.values(), LEDGER, ESCALATION, PLANNER_ESCALATION):
+        if path.exists():
+            path.rename(dest / path.name)
+    # 契約と凍結のマニフェストはステップ id で引く。前の計画のものが残ると、
+    # 新しい計画の同じ id のステップに前の契約が渡る。
+    for name in ("contracts", "freeze"):
+        shutil.rmtree(STATE / name, ignore_errors=True)
+    REFINE_ESCALATION.unlink(missing_ok=True)
+
+    where = dest.relative_to(PROJECT).as_posix()
+    ledger("PLAN_ARCHIVE", to=where, steps=sorted(done))
+    plan = PLAN.relative_to(PROJECT).as_posix()
+    run(["git", "add", "-A", "--", plan], check=True)
+    run(["git", "commit", "-q", "-m", f"plan: archive the previous plan to {where}",
+         "--", plan], check=True)
+    publish("the archived plan")
+    return None
+
+
 def cmd_plan_bootstrap(source: str | None, language: str = "python") -> int:
     """人間が書いた要件のファイルから、最初の計画をプランナーに頼む。
 
@@ -5987,15 +6040,14 @@ def cmd_plan_bootstrap(source: str | None, language: str = "python") -> int:
         print("write them there, or pass --from <path>", file=sys.stderr)
         return 1
 
-    # bootstrap は計画全体を置き換える。すでに緑のステップがあると、台帳は
-    # もう存在しない条件に対する作業を記述することになる。検査が緑のステップの
-    # 編集を拒む（P5）のと同じ理由だ。
-    done = green_steps()
-    if done:
-        print(f"refusing: {', '.join(sorted(done))} already green", file=sys.stderr)
-        print("a bootstrap replaces the plan, which would orphan them. Start a "
-              "fresh project directory instead.", file=sys.stderr)
-        return 1
+    # bootstrap は計画全体を置き換える。前の計画は台帳ごと plan/archive/ へ移し、
+    # 計画の無い状態から起こす。提案の検査（B1）も、最初のステップの前の
+    # スイートの確かめも、計画が無いことを前提にしている。
+    if (PLAN / "tasks.json").exists():
+        refused = archive_plan()
+        if refused:
+            print(refused, file=sys.stderr)
+            return 1
 
     # ブリーフを組み立てる後ではなく前に設定する。environment_facts はテストの
     # コマンドとツールキットを報告し、配置の段落はソースファイルがそもそもどんな

@@ -122,6 +122,16 @@ class TokenRuns(DashboardFixture):
         self.assertEqual([(r["run"], r["source"]) for r in runs],
                          [(1, "runs/run-001"), (2, "project"), (3, "projects/game")])
 
+    def test_the_ledger_of_an_archived_plan_is_counted_under_its_mirror(self):
+        # 次の計画を起こすと、前の計画の台帳は plan/archive/<番号> へ移る。
+        archived = Path(self.temp.name) / "projects" / "game" / "plan" / "archive" / "001"
+        archived.mkdir(parents=True)
+        (archived / "ledger.jsonl").write_text(
+            json.dumps({"ts": "1", "event": "PLAN_BOOTSTRAP"}) + "\n"
+            + json.dumps(usage("planner", output_tokens=1)) + "\n", encoding="utf-8")
+        runs = self.state.snapshot()["token_runs"]
+        self.assertEqual([(r["run"], r["source"]) for r in runs], [(1, "projects/game")])
+
     def test_the_live_mirror_does_not_repeat_its_project(self):
         records = ({"ts": "1", "event": "PLAN_BOOTSTRAP"}, usage("planner", output_tokens=1))
         self.mirror("projects/game", *records)

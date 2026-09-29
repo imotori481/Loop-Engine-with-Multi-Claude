@@ -142,25 +142,36 @@ def token_runs(ledger: list[dict[str, Any]], source: str = "") -> list[dict[str,
 
 def ledger_files(root: Path) -> list[Path]:
     """写しの置き場の下にある台帳。loop-pull の projects\\*、runs\\*、project を拾う。
+    それぞれの plan/archive/<番号> にある、終えた計画の台帳も拾う。
 
     同じ回が2か所にあるときは先に拾ったほうの名前が残る。project より
     projects\\<name> のほうが、どのプロジェクトかが分かるので先に拾う。
     """
-    return sorted(root.glob("*/*/plan/ledger.jsonl")) + sorted(root.glob("*/plan/ledger.jsonl"))
+    found = []
+    for mirror in ("*/*", "*"):
+        found += sorted(root.glob(f"{mirror}/plan/archive/*/ledger.jsonl"))
+        found += sorted(root.glob(f"{mirror}/plan/ledger.jsonl"))
+    return found
+
+
+def ledger_source(root: Path, path: Path) -> str:
+    """台帳を持つ写しの名前。plan の1つ上のディレクトリ。"""
+    parts = path.relative_to(root).parts
+    return "/".join(parts[:parts.index("plan")])
 
 
 def token_history(root: Path) -> list[dict[str, Any]]:
     """写しの置き場にある全台帳の回を、開始時刻の順に並べて番号を振る。
 
-    1つのプロジェクトの台帳には、ふつう1回分しか入らない。bootstrap は緑の
-    ステップがあると断るからだ。だから回の履歴は、写しを横断して作る。
-    project は今のプロジェクトの写しで、projects の下と同じ回を持つ。
-    開始時刻とトークン数が同じ回は1つにまとめる。
+    1つの台帳には、1つの計画の回が入る。bootstrap は次の計画を起こす前に、
+    前の計画の台帳を plan/archive/ へ移す。だから回の履歴は、写しと退避した
+    台帳を横断して作る。project は今のプロジェクトの写しで、projects の下と
+    同じ回を持つ。開始時刻とトークン数が同じ回は1つにまとめる。
     """
     seen = set()
     runs = []
     for path in ledger_files(root):
-        source = path.parent.parent.relative_to(root).as_posix()
+        source = ledger_source(root, path)
         for run in token_runs(read_jsonl(path), source):
             key = (run["started"], tuple(run["tokens"].values()))
             if key in seen:

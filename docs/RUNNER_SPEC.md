@@ -911,6 +911,19 @@ RED_GATE の R4（スタブに対して通るテスト）なら、そのステ�
                         「3ファイルすべて揃っていること」（B1）を要求する
 ```
 
+**同じリポジトリの2つ目の要件。** `plan/tasks.json` があれば、bootstrap はプランナーを呼ぶ前に
+`archive_plan` で今の計画を退避する。
+
+- `tasks.json`、`SYSTEM_SPEC.md`、`CONTEXT.md`、台帳、`ESCALATION.md`、`PLANNER_ESCALATION.md` を
+  `plan/archive/<番号>/`（`001` から）へ移し、`plan/` だけをコミットして送る
+- 新しい台帳は `PLAN_ARCHIVE` の1行から始まる。ステップ id は前の計画と重なるので、前の GREEN を
+  同じ台帳に残さない
+- `.runner/contracts` と `.runner/freeze` を消す。どちらもステップ id で引く
+- 前の計画のコードとテストは HEAD に残る。次の計画からは既存のコードと既存のテストに見え、
+  最初のステップの前にスイートが緑かを確かめる
+- 退避しないのは2つ。緑のステップと緑でないステップが混ざる計画（`run --all` で終える）と、
+  `plan/` と `.runner/` の外に未コミットの変更がある木（`reset <id>` で戻す）
+
 **人間の権限は要件ファイルであって、`plan/` への書き込みではない。**
 `/srv/loop/human/in` は `runner:humanw 3770`（sticky）。`maint` が humanw に入るので
 sudo なしで置ける。solver と planner はどちらも入っていない ── 要件はシステム全体を
@@ -1292,7 +1305,7 @@ validate                     # §8
 run <id> [--unvalidated]     # 1ステップ。--unvalidated はリンタ違反を台帳に書いて続行
 run --all [--budget <分>]    # 停止条件に当たるまで回す
 reset <id>                   # 止まったステップを捨て、最後の green に戻す
-plan bootstrap [--from <path>]  # 要件 .md から最初の計画を起こさせる
+plan bootstrap [--from <path>]  # 要件 .md から計画を起こさせる。終えた計画は plan/archive/ へ移す
 plan propose [--step <id>]   # ESCALATION.md に対する改訂をプランナーに書かせる
 plan show                    # 保留中の提案を、適用せずに表示する
 plan apply                   # 提案を検査し、通れば plan/ に反映して commit
@@ -1404,6 +1417,7 @@ v1 の実装はこの表をまだ使っておらず、`0 / 1 / 2 / 3` の4値で
 
 ## 更新履歴
 
+- 2026/09/29: §6-6 に、終えた計画を退避して次の計画を起こす規則を追加
 - 2026/09/28: §8 に L17 と既存のテストの差し替えを追加
 - 2026/09/26: §6-5 に R4 で空と分かった条件を削除してよい例外を追加
 - 2026/09/26: §4-4-1 に IMPL の時間切れを試行の失敗として数える規則を追加

@@ -126,8 +126,8 @@ git -C <clone-dir> config branch.<branch>.loopBase <base-branch>
 
 ## トークン消費
 
-写しの `plan/ledger.jsonl` にある `USAGE` を、`loop go` から完了までの回ごとに足して、
-2つのグラフにする。横軸はどちらも回。
+写しの `plan/ledger.jsonl` と、終えた計画の `plan/archive/<番号>/ledger.jsonl` にある `USAGE` を、
+`loop go` から完了までの回ごとに足して、2つのグラフにする。横軸はどちらも回。
 
 | グラフ | 形 | 縦軸 | 切り替え |
 |---|---|---|---|
