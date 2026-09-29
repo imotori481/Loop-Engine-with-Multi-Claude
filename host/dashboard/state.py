@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import csv
 import hashlib
 import json
 import os
@@ -160,28 +161,94 @@ def ledger_source(root: Path, path: Path) -> str:
     return "/".join(parts[:parts.index("plan")])
 
 
+# 見た回の控え。写しの置き場の直下に置く。写しの台帳は作業ツリーにあるので、
+# ブランチを切り替えるか、今のプロジェクトが替わると読めなくなる。
+TOKEN_HISTORY = "token-history.csv"
+TOKEN_COLUMNS = ["source", "started", "outcome", "calls"] + [
+    f"{role}_{name}" for role in ROLES for name in (*KINDS, "usd")]
+_history_lock = threading.Lock()
+
+
+def run_row(run: dict[str, Any]) -> dict[str, Any]:
+    row = {key: run[key] for key in ("source", "started", "outcome", "calls")}
+    for role in ROLES:
+        for kind in KINDS:
+            row[f"{role}_{kind}"] = run["kinds"][role][kind]
+        row[f"{role}_usd"] = run["usd"][role]
+    return row
+
+
+def row_run(row: dict[str, str]) -> dict[str, Any]:
+    kinds = {role: {kind: int(row[f"{role}_{kind}"]) for kind in KINDS} for role in ROLES}
+    return {"source": row["source"], "started": row["started"], "outcome": row["outcome"],
+            "calls": int(row["calls"]), "kinds": kinds,
+            "tokens": {role: sum(kinds[role].values()) for role in ROLES},
+            "usd": {role: float(row[f"{role}_usd"]) for role in ROLES}}
+
+
+def read_token_history(path: Path) -> list[dict[str, Any]]:
+    """控えの回。読めない行は飛ばす。"""
+    try:
+        with path.open(encoding="utf-8", newline="") as handle:
+            rows = list(csv.DictReader(handle))
+    except OSError:
+        return []
+    runs = []
+    for row in rows:
+        try:
+            runs.append(row_run(row))
+        except (KeyError, TypeError, ValueError):
+            continue
+    return runs
+
+
+def write_token_history(path: Path, runs: list[dict[str, Any]]) -> None:
+    """控えを丸ごと書き直す。書けなくても画面は止めない。"""
+    temporary = path.with_name(path.name + ".tmp")
+    try:
+        with temporary.open("w", encoding="utf-8", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=TOKEN_COLUMNS)
+            writer.writeheader()
+            writer.writerows(run_row(run) for run in runs)
+        os.replace(temporary, path)
+    except OSError:
+        pass
+
+
+def newer_run(kept: dict[str, Any] | None, seen: dict[str, Any]) -> dict[str, Any]:
+    """同じ回の2つの写しのうち、呼び出しの多いほう。名前は project より projects\\<name>。"""
+    if kept is None:
+        return seen
+    chosen = seen if seen["calls"] > kept["calls"] else kept
+    if chosen["source"] == "project":
+        other = kept if chosen is seen else seen
+        chosen = {**chosen, "source": other["source"]}
+    return chosen
+
+
 def token_history(root: Path) -> list[dict[str, Any]]:
-    """写しの置き場にある全台帳の回を、開始時刻の順に並べて番号を振る。
+    """控えと写しの全台帳の回を、開始時刻の順に並べて番号を振る。
 
     1つの台帳には、1つの計画の回が入る。bootstrap は次の計画を起こす前に、
     前の計画の台帳を plan/archive/ へ移す。だから回の履歴は、写しと退避した
     台帳を横断して作る。project は今のプロジェクトの写しで、projects の下と
-    同じ回を持つ。開始時刻とトークン数が同じ回は1つにまとめる。
+    同じ回を持つ。
+
+    回は開始時刻で見分ける。箱で一度に走るのは1つだけだ。台帳で見えた回で
+    控えを更新し、台帳から消えた回は控えから出す。
     """
-    seen = set()
-    runs = []
-    for path in ledger_files(root):
-        source = ledger_source(root, path)
-        for run in token_runs(read_jsonl(path), source):
-            key = (run["started"], tuple(run["tokens"].values()))
-            if key in seen:
-                continue
-            seen.add(key)
-            runs.append(run)
-    runs.sort(key=lambda run: run["started"])
-    for number, run in enumerate(runs, 1):
-        run["run"] = number
-    return runs
+    path = root / TOKEN_HISTORY
+    with _history_lock:
+        stored = read_token_history(path)
+        by_start: dict[str, dict[str, Any]] = {run["started"]: run for run in stored}
+        for ledger_path in ledger_files(root):
+            source = ledger_source(root, ledger_path)
+            for run in token_runs(read_jsonl(ledger_path), source):
+                by_start[run["started"]] = newer_run(by_start.get(run["started"]), run)
+        runs = sorted(by_start.values(), key=lambda run: run["started"])
+        if [run_row(run) for run in runs] != [run_row(run) for run in stored]:
+            write_token_history(path, runs)
+    return [{**run, "run": number} for number, run in enumerate(runs, 1)]
 
 
 def request_id(kind: str, value: Any) -> str:
