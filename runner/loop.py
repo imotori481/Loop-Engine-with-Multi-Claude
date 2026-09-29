@@ -3914,6 +3914,21 @@ def head_sources(paths: list[str]) -> dict[str, str]:
     return sources
 
 
+def restore_to_head(paths: list[str]) -> None:
+    """`paths` を最後のコミットの中身に戻す。コミットに無いものは消す。
+
+    `git checkout -- <paths>` は、コミットに無いパスが1つでも混ざると全体を断り、
+    ほかのパスも戻さない。取り込んだ Unity のプロジェクトの S1 では、既存のコードの
+    スタブを消したまま TEST_WRITE をやり直し、消えたファイルを柵の外への書き込みと
+    読んでエスカレーションした。だから、コミットにあるものだけを渡す。
+    """
+    present = sorted(head_sources(paths))
+    for path in paths:
+        (PROJECT / path).unlink(missing_ok=True)
+    if present:
+        run(["git", "checkout", "--"] + present, check=True)
+
+
 # export の有無を問わない。provides は export を求めるが、既存のファイルでは
 # export していない同じ名前の宣言を差し替えることもある。
 TS_DECLARED = re.compile(
@@ -6608,10 +6623,7 @@ def run_step(step_id: str, unvalidated: bool = False) -> int:
             # それは、TypeScript を書けないモデルとまったく同じに見えた。
             broken = broken + chr(10) + chr(10) + ANSI.sub("", red.output)[-2000:]
             set_writable(tests=True, src=True)
-            for path in step["files_test"] + step["files_write"]:
-                (PROJECT / path).unlink(missing_ok=True)
-            run(["git", "checkout", "--"] + step["files_test"] + step["files_write"],
-                check=False)
+            restore_to_head(step["files_test"] + step["files_write"])
         else:
             raise Halt("TEST_WRITE",
                        f"the tests still do not compile after "
@@ -6914,7 +6926,14 @@ def cmd_reset(step_id: str) -> int:
     順番に意味がある。chmod の前に引き取る（ランナーは所有しないものを chmod
     できない）。git の前に chmod する（FREEZE は tests/ を読み取り専用にし、git は
     書けないディレクトリの中のファイルを消せない）。
+
+    柵のディレクトリは最後に作り直す。取り込んだブランチでは、柵に追跡された
+    ファイルが1つも無いことがある。そのとき `git clean` はソルバーの書いた
+    ファイルごと柵を消し、次のステップは柵が無いまま始まろうとして落ちる。
+    取り込んだ Unity のプロジェクトで、テストの柵がこれで消えた。
     """
+    for fence in (TESTS, SRC):
+        fence.mkdir(parents=True, exist_ok=True)
     adopt(TESTS, SRC)
     set_writable(tests=True, src=True)
 
@@ -6926,6 +6945,9 @@ def cmd_reset(step_id: str) -> int:
 
     run(["git", "reset", "--hard", "HEAD"], check=True)
     run(["git", "clean", "-fdq"], check=True)   # -x は付けない。.venv と .runner は残す
+    for fence in (TESTS, SRC):
+        fence.mkdir(parents=True, exist_ok=True)
+    set_writable(tests=True, src=True)
 
     if kept:
         LEDGER.write_bytes(kept)
