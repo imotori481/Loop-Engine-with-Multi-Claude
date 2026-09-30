@@ -2409,8 +2409,9 @@ the stub.
 Edit the original code, do not rewrite it. Keep its branches, its calls and its
 structure, and change only what the tests need: if a new case is required, add
 an `else if` (or a `case`) to the existing chain rather than replacing the
-chain. Before adding a helper method, check whether the original code or the
-files above already have one that does the job, and call it.
+chain. Before adding a helper method, check whether the original code, the
+files above or the rest of the project (search it with Grep) already have one
+that does the job, and call it.
 """
 
 
@@ -2438,7 +2439,8 @@ will be detected and the step will stop.
 
 Make the smallest change that passes the tests. Reuse the code that is already
 there -- existing methods, fields and helpers -- instead of writing new ones
-that do the same thing, and do not add methods the tests do not need.
+that do the same thing, and do not add methods the tests do not need. Search
+the project with Grep and Glob before writing something that may already exist.
 """
 
 

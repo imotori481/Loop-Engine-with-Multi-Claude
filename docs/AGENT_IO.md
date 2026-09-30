@@ -17,7 +17,7 @@
 |---|---|---|---|---|
 | planner | `planner-run` | `/srv/loop/planner/brief/plan.md` | `/srv/loop/planner/out/` | Read Write Edit |
 | critic | `critic-run` | `/srv/loop/critic/brief/<mode>.md` | `/srv/loop/critic/out/` | Read Write |
-| solver | `solver-run` → `solver-claude` | `/srv/loop/brief/<phase>.md` | `src/` と `tests/`（柵の場所） | Read Write Edit。Bash は禁止 |
+| solver | `solver-run` → `solver-claude` | `/srv/loop/brief/<phase>.md` | `src/` と `tests/`（柵の場所） | Read Write Edit Grep Glob。Bash は禁止 |
 
 ブリーフは呼び出しのたびに上書きする。置き場に残るのは、役とモードまたは位相ごとの最後の1回分になる。
 
@@ -167,3 +167,4 @@ C# で10ステップを全部緑にした回の、台帳とブリーフの実測
 - 2026/09/28: critic と solver のブリーフの共通の先頭を追加
 - 2026/09/28: 既存のテストの名前と差し替えを追加
 - 2026/09/30: IMPL のブリーフに載せるこのステップの前のコードとの差分を追加
+- 2026/09/30: solver のツールに Grep と Glob を追加
