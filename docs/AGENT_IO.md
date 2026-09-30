@@ -17,7 +17,7 @@
 |---|---|---|---|---|
 | planner | `planner-run` | `/srv/loop/planner/brief/plan.md` | `/srv/loop/planner/out/` | Read Write Edit |
 | critic | `critic-run` | `/srv/loop/critic/brief/<mode>.md` | `/srv/loop/critic/out/` | Read Write |
-| solver | `solver-run` → `solver-claude` | `/srv/loop/brief/<phase>.md` | `src/` と `tests/`（柵の場所） | Read Write Edit。Bash は禁止 |
+| solver | `solver-run` → `solver-claude` | `/srv/loop/brief/<phase>.md` | `src/` と `tests/`（柵の場所） | Read Write Edit Grep Glob。Bash は禁止 |
 
 ブリーフは呼び出しのたびに上書きする。置き場に残るのは、役とモードまたは位相ごとの最後の1回分になる。
 
@@ -85,13 +85,15 @@ planner の bootstrap と critic の両方に入る。中身は次のとおり�
 
 1. TEST_WRITE（`brief_test_write`）: 共通の部分、受け入れ条件、書いてよいファイル、差し替える既存のテストファイル。goal は渡さない。テストがコンパイルできなければ、コンパイラの出力を足して最大 `LIMITS["test_writes"]` 回まで呼び直す
 2. STUB: ランナーが契約からスタブを書く。書けないときだけ `brief_stub` で solver に頼む。渡すのは署名と書いてよいファイルだけ
-3. IMPL（`brief_impl`）: 共通の部分、goal、凍結したテストの全文、書いてよいファイルの今の中身、直前の失敗、書いてよいファイル。緑になるか試行を使い切るまで、ステップの試行の数だけ呼ぶ
+3. IMPL（`brief_impl`）: 共通の部分、goal、凍結したテストの全文、書いてよいファイルの今の中身、このステップの前のコードとの差分、直前の失敗、書いてよいファイル。緑になるか試行を使い切るまで、ステップの試行の数だけ呼ぶ
 
 TEST_WRITE と IMPL のブリーフは、同じ `solver_material`（CONTEXT.md、依存先の契約、不変条件、署名）で始まる。CONTEXT.md はステップをまたいで、残りは同じステップの位相をまたいで同じなので、後の呼び出しはそこをプロンプトキャッシュから読む。IMPL では、試行ごとに変わる今の中身と直前の失敗を後ろに置く。
 
 solver は `plan/` を読めない。受け入れ条件はブリーフに書かれた分しか届かない。
 
 IMPL のブリーフは、書いてよいファイルのうち作業ツリーにあるものの中身を、試行のたびに読み直して載せる（`current_files_section`）。合計が `IMPL_FILE_CHARS` を超える分は名前だけを挙げ、solver が自分で Read する。Claude Code の Edit と Write は、同じ呼び出しで Read していないファイルを拒むが、1行だけの Read でも通る。ブリーフはそれを solver に伝える。ほかの位相では、既存のファイルの中身はブリーフに入らない。
+
+STUB は既存のメソッドの本体をスタブに差し替えるので、今の中身だけでは元の分岐が見えない。solver はそれを知らずに本体を一から書き、`else if` を1つ足せば済むところで分岐をまるごと差し替え、既存のものと同じ static のヘルパーを足していた。そこで、書いてよいファイルのうち最後のコミットにあったものは、今の中身との差分も載せる（`original_code_section`）。`-` の行が元のコードで、solver にはそれを土台に最小の変更をし、既存のヘルパーを呼ぶよう伝える。差分の合計も `IMPL_FILE_CHARS` を超えない分だけを載せる。
 
 ## 呼び出し回数
 
@@ -164,3 +166,5 @@ C# で10ステップを全部緑にした回の、台帳とブリーフの実測
 - 2026/09/28: IMPL のブリーフに載せるファイルの今の中身を追加
 - 2026/09/28: critic と solver のブリーフの共通の先頭を追加
 - 2026/09/28: 既存のテストの名前と差し替えを追加
+- 2026/09/30: IMPL のブリーフに載せるこのステップの前のコードとの差分を追加
+- 2026/09/30: solver のツールに Grep と Glob を追加
