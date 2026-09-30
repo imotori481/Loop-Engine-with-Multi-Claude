@@ -409,6 +409,142 @@ class RewritingTestsThatDoNotCompile(unittest.TestCase):
         self.assertEqual(loop.ANSI.sub("", "arr[m]"), "arr[m]")
 
 
+NRE = "System.NullReferenceException"
+
+
+def crash_run(*kinds: str) -> loop.TestRun:
+    """kinds の順に落ちたテストの赤。名前は T0, T1, ... にする。"""
+    return loop.TestRun(len(kinds), len(kinds), 0, 0, list(kinds), [], "",
+                        failure_details=[f"T{i}\n    {kind} : boom"
+                                         for i, kind in enumerate(kinds)])
+
+
+class TestsThatCrashAgainstTheStub(Language):
+    """C# のスタブのフィールドは null で、それを使うテストは赤ではなく壊れている。
+
+    取り込んだ Unity のプロジェクトの回で、配列のフィールドを足す S3 が、準備の段の
+    `d.arr[0] = 999` で NullReferenceException になり、R5 で2回止まった。プランナーは
+    `Assert.IsNotNull` を置けと goal に書いたが、goal はテストの書き手に届かない。
+    """
+
+    def test_a_csharp_brief_says_the_fields_are_null(self):
+        self.speak("csharp")
+        brief = loop.brief_test_write(RewritingACrashedTestFile.STEP, "CONTEXT")
+        self.assertIn("a stub whose methods throw", brief)
+        self.assertIn("WITHOUT its initialiser", brief)
+        self.assertIn("Assert.IsNotNull", brief)
+
+    def test_other_languages_keep_their_stub(self):
+        self.speak("python")
+        brief = loop.brief_test_write(RewritingACrashedTestFile.STEP, "CONTEXT")
+        self.assertIn("a wrong value of the right type", brief)
+        self.assertNotIn("THE STUB, IN C#", brief)
+
+    def test_only_null_and_index_crashes_are_the_writers_to_fix(self):
+        self.speak("csharp")
+        crashed = loop.crashed_tests(crash_run("AssertionException", NRE,
+                                               "StubNotImplemented"))
+        self.assertIn("T1", crashed)
+        self.assertNotIn("T0", crashed)
+
+    def test_another_exception_in_the_mix_is_not_rewritten(self):
+        # 契約の側が壊れているかもしれない。書き直しでは直らない。
+        self.speak("csharp")
+        self.assertEqual(loop.crashed_tests(crash_run(NRE, "System.InvalidCastException")), "")
+
+    def test_python_does_not_rewrite_on_a_crash(self):
+        self.speak("python")
+        self.assertEqual(loop.crashed_tests(crash_run("AttributeError")), "")
+
+    def test_the_second_brief_carries_the_crashed_tests(self):
+        section = loop.crash_section("T1\n    System.NullReferenceException : boom")
+        self.assertIn("CRASHED AGAINST THE STUB", section)
+        self.assertIn("T1", section)
+        self.assertEqual(loop.crash_section(""), "")
+
+
+class RewritingACrashedTestFile(Language):
+    """run_step が、スタブに対して落ちたテストを書き直させる流れ。"""
+
+    STEP = {"id": "S3", "goal": "g", "depends_on": [], "expected_tests": 2,
+            "max_attempts": 1, "review_gate": False, "kind": "unit",
+            "files_write": ["src/Save.cs"], "files_test": ["tests/SaveTests.cs"],
+            "acceptance": [{"case": "normal", "given": "g", "then": "1"}],
+            "contracts": {"provides": ["src/Save.cs: int[] Save.Levels"]}}
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.speak("csharp")
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        root = Path(self.temp.name)
+        (root / "plan").mkdir()
+        (root / "plan" / "tasks.json").write_text('{"steps": []}', encoding="utf-8")
+        self.briefs: list[str] = []
+        self.escalated: list[loop.Halt] = []
+        self.greens: list[int] = []
+        self.restored = 0
+        self.runs: list[loop.TestRun] = []
+
+        def call(phase, brief, backend=None):
+            if phase == "TEST_WRITE":
+                self.briefs.append(brief)
+            return ""
+
+        def restore(paths):
+            self.restored += 1
+
+        patches = {
+            "PLAN": root / "plan", "STATE": root / ".runner",
+            "validate_plan": lambda tasks: [],
+            "load_settings": lambda tasks: None,
+            "load_plan": lambda sid: (self.STEP, "context"),
+            "ledger": lambda event, **f: None,
+            "touched_paths": lambda: set(),
+            "set_writable": lambda **kw: None,
+            "assert_touched": lambda *a: None,
+            "assert_written": lambda *a: None,
+            "check_baseline": lambda: None,
+            "head_sources": lambda paths: {},
+            "generate_stub": lambda step, lines, originals: {},
+            "stub_kept_the_rest": lambda step, originals: [],
+            "restore_to_head": restore,
+            "freeze_tests": lambda: {},
+            "frozen_tests_text": lambda step: "",
+            "pytest_run": lambda tag, files: self.runs.pop(0),
+            "call_solver": call,
+            "complete_green": lambda sid, goal, n: self.greens.append(n),
+            "escalate": lambda step, halt, n, run: self.escalated.append(halt),
+        }
+        for name, value in patches.items():
+            p = patch.object(loop, name, value)
+            p.start()
+            self.addCleanup(p.stop)
+
+    def test_a_crash_is_rewritten_and_the_step_goes_on(self):
+        green = loop.TestRun(2, 0, 0, 0, [], ["T0", "T1"], "")
+        self.runs = [crash_run("AssertionException", NRE),
+                     crash_run("AssertionException", "AssertionException"), green]
+        self.assertEqual(loop.run_step("S3"), 0)
+        self.assertEqual(len(self.briefs), 2)
+        self.assertNotIn("CRASHED", self.briefs[0])
+        self.assertIn("CRASHED AGAINST THE STUB", self.briefs[1])
+        self.assertIn("T1", self.briefs[1])
+        self.assertEqual(self.restored, 1)
+        self.assertEqual(self.greens, [1])
+
+    def test_the_last_crash_reaches_red_gate_with_the_tests_named(self):
+        self.runs = [crash_run("AssertionException", NRE)
+                     for _ in range(loop.LIMITS["test_writes"])]
+        self.assertEqual(loop.run_step("S3"), 2)
+        self.assertEqual(len(self.briefs), loop.LIMITS["test_writes"])
+        # 最後の試行のファイルは残す。エスカレーションが読む。
+        self.assertEqual(self.restored, loop.LIMITS["test_writes"] - 1)
+        self.assertEqual(len(self.escalated), 1)
+        self.assertTrue(self.escalated[0].reason.startswith("R5"))
+        self.assertIn("T1", self.escalated[0].detail)
+
+
 class TellingTheSolverWhatFailed(unittest.TestCase):
     """ソルバーに渡すのはアサーションで、ソルバーが開けないファイルのパスではない。
 
