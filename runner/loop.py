@@ -24,6 +24,7 @@ from __future__ import annotations
 import argparse
 import ast
 import atexit
+import difflib
 import hashlib
 import json
 import os
@@ -2373,6 +2374,46 @@ editing tool refuses a file you have not read, read only its first line
     return "\n".join(parts)
 
 
+def original_code_section(step: dict) -> str:
+    """files_write のうち、最後のコミットにあったファイルの、今の中身との差分。無ければ空。
+
+    STUB は既存のメソッドの本体をスタブに差し替える。今の中身だけを見せると、
+    ソルバーは元の分岐も、同じファイルの既存のヘルパーを呼んでいたことも知らずに
+    本体を一から書く。取り込んだ Unity のプロジェクトの回では、`else if` を1つ
+    足せば済むところで分岐をまるごと書き直し、既存の処理と同じ static 関数を
+    いくつも足した。`-` の行が元のコードだ。差分だけにするのは、ファイル全体を
+    二重に載せないためだ。
+    """
+    diffs, total = [], 0
+    for rel, before in head_sources(step["files_write"]).items():
+        path = PROJECT / rel
+        after = path.read_text(encoding="utf-8") if path.is_file() else ""
+        if after == before:
+            continue
+        diff = "".join(difflib.unified_diff(
+            before.splitlines(keepends=True), after.splitlines(keepends=True),
+            f"a/{rel} (before this step)", f"b/{rel} (now)", n=5))
+        if total + len(diff) > IMPL_FILE_CHARS:
+            continue
+        total += len(diff)
+        diffs.append(diff)
+    if not diffs:
+        return ""
+    return """
+# The code before this step
+The stub replaced the bodies of the members this step changes. Lines starting
+with `-` below are the original code; that is where your work starts, not from
+the stub.
+
+""" + "\n".join(diffs) + """
+Edit the original code, do not rewrite it. Keep its branches, its calls and its
+structure, and change only what the tests need: if a new case is required, add
+an `else if` (or a `case`) to the existing chain rather than replacing the
+chain. Before adding a helper method, check whether the original code or the
+files above already have one that does the job, and call it.
+"""
+
+
 def brief_impl(step: dict, context: str, tests_text: str, last_failure: str) -> str:
     return f"""{solver_material(step, context)}
 # Your task
@@ -2384,7 +2425,7 @@ Make the tests pass by implementing the signatures above.
 
 # The tests (frozen -- read-only, and they will not be accepted if modified)
 {tests_text}
-{current_files_section(step)}
+{current_files_section(step)}{original_code_section(step)}
 # How the tests are failing right now
 {last_failure or "(nothing recorded)"}
 
@@ -2394,6 +2435,10 @@ Make the tests pass by implementing the signatures above.
 Change nothing outside those paths. The tests are the specification: if a test
 looks wrong, say so in your final message rather than editing it -- editing it
 will be detected and the step will stop.
+
+Make the smallest change that passes the tests. Reuse the code that is already
+there -- existing methods, fields and helpers -- instead of writing new ones
+that do the same thing, and do not add methods the tests do not need.
 """
 
 

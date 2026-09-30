@@ -383,10 +383,66 @@ class TheSolverIsShownTheFilesItWillEdit(unittest.TestCase):
             (project / "src").mkdir()
             (project / "src/a.py").write_text("CURRENT\n", encoding="utf-8")
             with patch.object(loop, "PROJECT", project), \
-                 patch("loop.dep_contracts", return_value=""):
+                 patch("loop.dep_contracts", return_value=""), \
+                 patch("loop.head_sources", return_value={}):
                 brief = loop.brief_impl(self.STEP, "CONTEXT", "TESTS", "FAILURE")
         self.assertLess(brief.index("TESTS"), brief.index("CURRENT"))
         self.assertLess(brief.index("CURRENT"), brief.index("FAILURE"))
+
+
+class TheSolverIsShownTheCodeTheStubReplaced(unittest.TestCase):
+    """STUB は既存のメソッドの本体をスタブに差し替える。今の中身だけを見せると、
+    ソルバーは元の分岐を知らずに本体を一から書き、`else if` を1つ足せば済む
+    ところで分岐をまるごと差し替え、既存のものと同じヘルパーを足す。
+    """
+
+    STEP = {"id": "S1", "goal": "g", "files_write": ["src/A.cs", "src/B.cs", "src/New.cs"],
+            "contracts": {"provides": [], "requires": [], "invariants": []}}
+
+    ORIGINAL = ("class A {\n    int F(int x) {\n        if (x == 1) return 10;\n"
+                "        else if (x == 2) return 20;\n        return 0;\n    }\n}\n")
+    STUBBED = ("class A {\n    int F(int x) {\n"
+               "        throw new System.NotImplementedException();\n    }\n}\n")
+
+    def section(self, head: dict[str, str], now: dict[str, str], cap: int = 60_000) -> str:
+        with tempfile.TemporaryDirectory() as temp:
+            project = Path(temp)
+            for rel, text in now.items():
+                (project / rel).parent.mkdir(parents=True, exist_ok=True)
+                (project / rel).write_text(text, encoding="utf-8")
+            with patch.object(loop, "PROJECT", project), \
+                 patch.object(loop, "IMPL_FILE_CHARS", cap), \
+                 patch("loop.head_sources", return_value=head):
+                return loop.original_code_section(self.STEP)
+
+    def test_the_original_branches_are_shown_as_removed_lines(self):
+        section = self.section({"src/A.cs": self.ORIGINAL}, {"src/A.cs": self.STUBBED})
+        self.assertIn("-        if (x == 1) return 10;", section)
+        self.assertIn("-        else if (x == 2) return 20;", section)
+        self.assertIn("+        throw new System.NotImplementedException();", section)
+
+    def test_the_solver_is_told_to_extend_the_original_not_rewrite_it(self):
+        section = self.section({"src/A.cs": self.ORIGINAL}, {"src/A.cs": self.STUBBED})
+        self.assertIn("Edit the original code, do not rewrite it.", section)
+        self.assertIn("`else if`", section)
+
+    def test_unchanged_and_new_files_get_no_section(self):
+        self.assertEqual(self.section({"src/B.cs": "class B {}\n"},
+                                      {"src/B.cs": "class B {}\n",
+                                       "src/New.cs": "class New {}\n"}), "")
+
+    def test_diffs_over_the_cap_are_left_out(self):
+        section = self.section({"src/A.cs": self.ORIGINAL}, {"src/A.cs": self.STUBBED}, cap=10)
+        self.assertEqual(section, "")
+
+    def test_the_brief_asks_for_the_smallest_change_that_reuses_existing_code(self):
+        with tempfile.TemporaryDirectory() as temp, \
+             patch.object(loop, "PROJECT", Path(temp)), \
+             patch("loop.dep_contracts", return_value=""), \
+             patch("loop.head_sources", return_value={}):
+            brief = loop.brief_impl(self.STEP, "CONTEXT", "TESTS", "FAILURE")
+        self.assertIn("Make the smallest change that passes the tests.", brief)
+        self.assertIn("instead of writing new ones", brief)
 
 
 class TheSolverBriefsShareTheirOpening(unittest.TestCase):
@@ -403,7 +459,8 @@ class TheSolverBriefsShareTheirOpening(unittest.TestCase):
     def briefs(self) -> tuple[str, str, str]:
         with tempfile.TemporaryDirectory() as temp, \
              patch.object(loop, "PROJECT", Path(temp)), \
-             patch("loop.dep_contracts", return_value="DEPS"):
+             patch("loop.dep_contracts", return_value="DEPS"), \
+             patch("loop.head_sources", return_value={}):
             return (loop.solver_material(self.STEP, "CONTEXT"),
                     loop.brief_test_write(self.STEP, "CONTEXT"),
                     loop.brief_impl(self.STEP, "CONTEXT", "TESTS", "FAILURE"))
@@ -418,7 +475,8 @@ class TheSolverBriefsShareTheirOpening(unittest.TestCase):
     def test_a_replaced_test_file_is_rewritten_from_scratch(self):
         with tempfile.TemporaryDirectory() as temp, \
              patch.object(loop, "PROJECT", Path(temp)), \
-             patch("loop.dep_contracts", return_value="DEPS"):
+             patch("loop.dep_contracts", return_value="DEPS"), \
+             patch("loop.head_sources", return_value={}):
             plain = loop.brief_test_write(self.STEP, "CONTEXT")
             replacing = loop.brief_test_write(self.STEP, "CONTEXT",
                                               replaced=["tests/test_a.py"])
