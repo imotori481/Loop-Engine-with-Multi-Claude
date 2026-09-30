@@ -301,7 +301,8 @@ class WhatTheCodeAlreadyDeclares(unittest.TestCase):
             self.assertEqual(loop.existing_contracts(), [])
 
     def facts(self, existing: list[str]) -> str:
-        with patch.object(loop, "existing_contracts", return_value=existing), \
+        by_file = {"src/pkg/mod.py": existing} if existing else {}
+        with patch.object(loop, "existing_declarations", return_value=by_file), \
              patch.dict(os.environ, {"DISPLAY": ""}), \
              patch("loop.run") as run:
             run.return_value = SimpleNamespace(
@@ -330,6 +331,238 @@ class WhatTheCodeAlreadyDeclares(unittest.TestCase):
 
     def test_a_new_project_is_not_told_about_code_it_does_not_have(self):
         self.assertNotIn("What the code already declares", self.facts([]))
+
+
+class TheSolverIsShownTheFilesItWillEdit(unittest.TestCase):
+    """既存のファイルを書き換える IMPL は、ファイルを Read するたびにそれまでの
+    文脈を送り直す。取り込んだ Unity のプロジェクトの回で、ソルバーの消費の63%が
+    そのターンだった。今の中身をブリーフに載せる。
+    """
+
+    STEP = {"id": "S1", "goal": "g", "files_write": ["src/a.py", "src/b.py", "src/new.py"],
+            "contracts": {"provides": [], "requires": [], "invariants": []}}
+
+    def section(self, files: dict[str, str], cap: int = 60_000) -> str:
+        with tempfile.TemporaryDirectory() as temp:
+            project = Path(temp)
+            for rel, text in files.items():
+                (project / rel).parent.mkdir(parents=True, exist_ok=True)
+                (project / rel).write_text(text, encoding="utf-8")
+            with patch.object(loop, "PROJECT", project), \
+                 patch.object(loop, "IMPL_FILE_CHARS", cap):
+                return loop.current_files_section(self.STEP)
+
+    def test_existing_files_are_shown_and_new_ones_are_not(self):
+        section = self.section({"src/a.py": "def a(): pass\n",
+                                "src/b.py": "def b(): pass\n"})
+        self.assertIn("--- src/a.py ---\ndef a(): pass", section)
+        self.assertIn("--- src/b.py ---\ndef b(): pass", section)
+        self.assertNotIn("src/new.py", section)
+
+    def test_the_solver_reads_one_line_instead_of_the_whole_file(self):
+        # Claude Code の Edit は、同じ呼び出しで Read していないファイルを拒む。
+        # 1行だけの Read でも通る。
+        section = self.section({"src/a.py": "x = 1\n"})
+        self.assertIn("you do not need to read them again", section)
+        self.assertIn("(offset 1, limit 1)", section)
+
+    def test_files_over_the_cap_are_named_but_not_shown(self):
+        section = self.section({"src/a.py": "a" * 30, "src/b.py": "b" * 30}, cap=40)
+        self.assertIn("a" * 30, section)
+        self.assertNotIn("b" * 30, section)
+        self.assertIn("read these yourself:\nsrc/b.py", section)
+
+    def test_a_step_that_only_creates_files_gets_no_section(self):
+        self.assertEqual(self.section({}), "")
+
+    def test_the_files_come_after_the_tests_and_before_the_failure(self):
+        # 失敗の文と今の中身は試行ごとに変わる。変わらない部分を先に置けば、
+        # 次の試行はそこをプロンプトキャッシュから読む。
+        with tempfile.TemporaryDirectory() as temp:
+            project = Path(temp)
+            (project / "src").mkdir()
+            (project / "src/a.py").write_text("CURRENT\n", encoding="utf-8")
+            with patch.object(loop, "PROJECT", project), \
+                 patch("loop.dep_contracts", return_value=""), \
+                 patch("loop.head_sources", return_value={}):
+                brief = loop.brief_impl(self.STEP, "CONTEXT", "TESTS", "FAILURE")
+        self.assertLess(brief.index("TESTS"), brief.index("CURRENT"))
+        self.assertLess(brief.index("CURRENT"), brief.index("FAILURE"))
+
+
+class TheSolverIsShownTheCodeTheStubReplaced(unittest.TestCase):
+    """STUB は既存のメソッドの本体をスタブに差し替える。今の中身だけを見せると、
+    ソルバーは元の分岐を知らずに本体を一から書き、`else if` を1つ足せば済む
+    ところで分岐をまるごと差し替え、既存のものと同じヘルパーを足す。
+    """
+
+    STEP = {"id": "S1", "goal": "g", "files_write": ["src/A.cs", "src/B.cs", "src/New.cs"],
+            "contracts": {"provides": [], "requires": [], "invariants": []}}
+
+    ORIGINAL = ("class A {\n    int F(int x) {\n        if (x == 1) return 10;\n"
+                "        else if (x == 2) return 20;\n        return 0;\n    }\n}\n")
+    STUBBED = ("class A {\n    int F(int x) {\n"
+               "        throw new System.NotImplementedException();\n    }\n}\n")
+
+    def section(self, head: dict[str, str], now: dict[str, str], cap: int = 60_000) -> str:
+        with tempfile.TemporaryDirectory() as temp:
+            project = Path(temp)
+            for rel, text in now.items():
+                (project / rel).parent.mkdir(parents=True, exist_ok=True)
+                (project / rel).write_text(text, encoding="utf-8")
+            with patch.object(loop, "PROJECT", project), \
+                 patch.object(loop, "IMPL_FILE_CHARS", cap), \
+                 patch("loop.head_sources", return_value=head):
+                return loop.original_code_section(self.STEP)
+
+    def test_the_original_branches_are_shown_as_removed_lines(self):
+        section = self.section({"src/A.cs": self.ORIGINAL}, {"src/A.cs": self.STUBBED})
+        self.assertIn("-        if (x == 1) return 10;", section)
+        self.assertIn("-        else if (x == 2) return 20;", section)
+        self.assertIn("+        throw new System.NotImplementedException();", section)
+
+    def test_the_solver_is_told_to_extend_the_original_not_rewrite_it(self):
+        section = self.section({"src/A.cs": self.ORIGINAL}, {"src/A.cs": self.STUBBED})
+        self.assertIn("Edit the original code, do not rewrite it.", section)
+        self.assertIn("`else if`", section)
+
+    def test_unchanged_and_new_files_get_no_section(self):
+        self.assertEqual(self.section({"src/B.cs": "class B {}\n"},
+                                      {"src/B.cs": "class B {}\n",
+                                       "src/New.cs": "class New {}\n"}), "")
+
+    def test_diffs_over_the_cap_are_left_out(self):
+        section = self.section({"src/A.cs": self.ORIGINAL}, {"src/A.cs": self.STUBBED}, cap=10)
+        self.assertEqual(section, "")
+
+    def test_the_brief_asks_for_the_smallest_change_that_reuses_existing_code(self):
+        with tempfile.TemporaryDirectory() as temp, \
+             patch.object(loop, "PROJECT", Path(temp)), \
+             patch("loop.dep_contracts", return_value=""), \
+             patch("loop.head_sources", return_value={}):
+            brief = loop.brief_impl(self.STEP, "CONTEXT", "TESTS", "FAILURE")
+        self.assertIn("Make the smallest change that passes the tests.", brief)
+        self.assertIn("instead of writing new ones", brief)
+
+
+class TheSolverBriefsShareTheirOpening(unittest.TestCase):
+    """TEST_WRITE と IMPL は、CONTEXT.md、契約、不変条件、署名を共有する。先頭を
+    そろえれば、後の呼び出しはそこをプロンプトキャッシュから読む。
+    """
+
+    STEP = {"id": "S1", "goal": "GOAL-TEXT", "expected_tests": 1,
+            "files_write": ["src/a.py"], "files_test": ["tests/test_a.py"],
+            "acceptance": [{"case": "c", "given": "g", "then": "t"}],
+            "contracts": {"provides": ["def f(x: int) -> int"], "requires": [],
+                          "invariants": ["f is pure"]}}
+
+    def briefs(self) -> tuple[str, str, str]:
+        with tempfile.TemporaryDirectory() as temp, \
+             patch.object(loop, "PROJECT", Path(temp)), \
+             patch("loop.dep_contracts", return_value="DEPS"), \
+             patch("loop.head_sources", return_value={}):
+            return (loop.solver_material(self.STEP, "CONTEXT"),
+                    loop.brief_test_write(self.STEP, "CONTEXT"),
+                    loop.brief_impl(self.STEP, "CONTEXT", "TESTS", "FAILURE"))
+
+    def test_both_phases_open_with_the_same_material(self):
+        shared, test_write, impl = self.briefs()
+        self.assertTrue(test_write.startswith(shared))
+        self.assertTrue(impl.startswith(shared))
+        for part in ("CONTEXT", "DEPS", "f is pure", "def f(x: int) -> int"):
+            self.assertIn(part, shared)
+
+    def test_a_replaced_test_file_is_rewritten_from_scratch(self):
+        with tempfile.TemporaryDirectory() as temp, \
+             patch.object(loop, "PROJECT", Path(temp)), \
+             patch("loop.dep_contracts", return_value="DEPS"), \
+             patch("loop.head_sources", return_value={}):
+            plain = loop.brief_test_write(self.STEP, "CONTEXT")
+            replacing = loop.brief_test_write(self.STEP, "CONTEXT",
+                                              replaced=["tests/test_a.py"])
+        self.assertNotIn("you replace them", plain)
+        self.assertIn("you replace them\ntests/test_a.py", replacing)
+        self.assertIn("Do not keep, adapt or\ncopy the old tests", replacing)
+        self.assertIn("(offset 1,\nlimit 1)", replacing)
+
+    def test_the_goal_stays_out_of_the_tests_brief(self):
+        # テストは受け入れ条件から作る。goal を共通の部分に入れると、TEST_WRITE
+        # にも届く。
+        shared, test_write, impl = self.briefs()
+        self.assertNotIn("GOAL-TEXT", shared)
+        self.assertNotIn("GOAL-TEXT", test_write)
+        self.assertIn("GOAL-TEXT", impl)
+
+
+class TestsAlreadyInTheRepository(unittest.TestCase):
+    """要件が振る舞いを変えると、それを確かめる既存のテストはどんな実装でも落ちる。
+    そのファイルは、振る舞いを変えるステップが files_test に挙げて差し替える。
+    """
+
+    FILES = {
+        "tests/test_board.py": "import pytest\n\ndef test_score_counts_rows():\n"
+                               "    pass\n\nasync def test_async_load():\n    pass\n",
+        "tests/__init__.py": "",
+    }
+
+    def run_git(self, argv, **_):
+        if argv[:2] == ["git", "ls-tree"]:
+            return SimpleNamespace(returncode=0, stdout="\0".join(self.FILES), stderr="")
+        if argv[:2] == ["git", "show"]:
+            path = argv[2].split(":", 1)[1]
+            return SimpleNamespace(returncode=0, stdout=self.FILES[path], stderr="")
+        raise AssertionError(argv)
+
+    def text(self, plan):
+        with patch("loop.run", side_effect=self.run_git), \
+             patch.dict(loop.LANGUAGE, loop.LANGUAGES["python"], clear=True):
+            return loop.existing_tests_text(plan)
+
+    def test_the_planner_sees_each_file_with_its_test_names(self):
+        text = self.text(None)
+        self.assertIn("    tests/test_board.py\n        test_score_counts_rows\n"
+                      "        test_async_load", text)
+        self.assertNotIn("__init__", text)
+        self.assertIn("REPLACES the whole file", text)
+        self.assertIn("(L17)", text)
+
+    def test_the_critic_sees_only_the_files_the_plan_replaces(self):
+        keeps = {"steps": [{"files_test": ["tests/test_new.py"]}]}
+        replaces = {"steps": [{"files_test": ["tests/test_board.py"]}]}
+        self.assertEqual(self.text(keeps), "")
+        self.assertIn("Test files this plan replaces", self.text(replaces))
+
+    def test_the_revision_is_not_offered_the_tests_of_a_green_step(self):
+        tasks = ('{"steps": [{"id": "S1", "files_test": ["tests/test_board.py"]}]}')
+        with patch("loop.run", side_effect=self.run_git), \
+             patch.dict(loop.LANGUAGE, loop.LANGUAGES["python"], clear=True):
+            self.assertEqual(loop.preplan_tests_section(tasks, ["S1"]), "")
+            offered = loop.preplan_tests_section(tasks, [])
+        self.assertIn("tests/test_board.py", offered)
+        self.assertIn("do not replace the file", offered)
+
+
+class TestNamesByLanguage(unittest.TestCase):
+    def names(self, language, text):
+        with patch.dict(loop.LANGUAGE, loop.LANGUAGES[language], clear=True):
+            return loop.test_names(text)
+
+    def test_typescript_names_come_from_it_and_test(self):
+        self.assertEqual(self.names("typescript", (
+            "describe('board', () => {\n"
+            "  it('counts rows', () => {});\n"
+            "  test.each([1])(\"doubles %i\", () => {});\n"
+            "  it(`keeps the player's score`, () => {});\n"
+            "});\n")), ["counts rows", "doubles %i", "keeps the player's score"])
+
+    def test_csharp_names_come_from_test_attributes_once_each(self):
+        self.assertEqual(self.names("csharp", (
+            "public class BoardTests {\n"
+            "    [Test]\n    public void CountsRows() {}\n"
+            "    [TestCase(1)]\n    [TestCase(2)]\n    public void Doubles(int n) {}\n"
+            "    [UnityTest]\n    public IEnumerator Loads() { yield break; }\n"
+            "    public void Helper() {}\n"
+            "}\n")), ["CountsRows", "Doubles", "Loads"])
 
 
 if __name__ == "__main__":

@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import csv
 import hashlib
 import json
 import os
@@ -68,25 +69,40 @@ ESCALATION_FILES = {
 ROLES = ("planner", "critic", "solver")
 
 
+# トークンの種類と、USAGE の usage の中での名前。
+KINDS = {"input": "input_tokens", "cache_write": "cache_creation_input_tokens",
+         "cache_read": "cache_read_input_tokens", "output": "output_tokens"}
+
+
+def usage_kinds(record: dict[str, Any]) -> dict[str, int]:
+    """USAGE 1件の、種類別のトークン数。"""
+    usage = record.get("usage")
+    if not isinstance(usage, dict):
+        usage = {}
+    kinds = {}
+    for kind, key in KINDS.items():
+        value = usage.get(key)
+        kinds[kind] = int(value) if isinstance(value, (int, float)) else 0
+    return kinds
+
+
 def usage_tokens(record: dict[str, Any]) -> int:
     """USAGE 1件のトークン数。数え方はランナーの画面の in と out に合わせる。
 
     入力は、キャッシュから読んだ分と書いた分を足す。
     """
-    usage = record.get("usage")
-    if not isinstance(usage, dict):
-        return 0
-    total = 0
-    for key in ("input_tokens", "cache_creation_input_tokens",
-                "cache_read_input_tokens", "output_tokens"):
-        value = usage.get(key)
-        if isinstance(value, (int, float)):
-            total += int(value)
-    return total
+    return sum(usage_kinds(record).values())
+
+
+def usage_usd(record: dict[str, Any]) -> float:
+    value = record.get("cost_usd")
+    return float(value) if isinstance(value, (int, float)) else 0.0
 
 
 def token_runs(ledger: list[dict[str, Any]], source: str = "") -> list[dict[str, Any]]:
     """1つの台帳を、loop go から完了までの回に分け、回ごと役ごとのトークン数を足す。
+
+    tokens は役ごとの合計、kinds は役ごとの種類別、usd は役ごとの cost_usd の和。
 
     1回は PLAN_BOOTSTRAP から始まり、次の PLAN_BOOTSTRAP の手前で終わる。
     計画づくりと批評は run --all より前に流れるので、RUN_ALL_START では区切らない。
@@ -105,10 +121,16 @@ def token_runs(ledger: list[dict[str, Any]], source: str = "") -> list[dict[str,
                 current["outcome"] = "abandoned"
             current = {"source": source, "started": record.get("ts", ""),
                        "outcome": "running", "calls": 0,
-                       "tokens": dict.fromkeys(ROLES, 0)}
+                       "tokens": dict.fromkeys(ROLES, 0),
+                       "kinds": {role: dict.fromkeys(KINDS, 0) for role in ROLES},
+                       "usd": dict.fromkeys(ROLES, 0.0)}
             runs.append(current)
         if event == "USAGE" and record.get("who") in ROLES:
-            current["tokens"][record["who"]] += usage_tokens(record)
+            who = record["who"]
+            for kind, value in usage_kinds(record).items():
+                current["kinds"][who][kind] += value
+            current["tokens"][who] += usage_tokens(record)
+            current["usd"][who] += usage_usd(record)
             current["calls"] += 1
         elif event == "ALL_GREEN":
             current["outcome"] = "green"
@@ -121,35 +143,112 @@ def token_runs(ledger: list[dict[str, Any]], source: str = "") -> list[dict[str,
 
 def ledger_files(root: Path) -> list[Path]:
     """写しの置き場の下にある台帳。loop-pull の projects\\*、runs\\*、project を拾う。
+    それぞれの plan/archive/<番号> にある、終えた計画の台帳も拾う。
 
     同じ回が2か所にあるときは先に拾ったほうの名前が残る。project より
     projects\\<name> のほうが、どのプロジェクトかが分かるので先に拾う。
     """
-    return sorted(root.glob("*/*/plan/ledger.jsonl")) + sorted(root.glob("*/plan/ledger.jsonl"))
+    found = []
+    for mirror in ("*/*", "*"):
+        found += sorted(root.glob(f"{mirror}/plan/archive/*/ledger.jsonl"))
+        found += sorted(root.glob(f"{mirror}/plan/ledger.jsonl"))
+    return found
+
+
+def ledger_source(root: Path, path: Path) -> str:
+    """台帳を持つ写しの名前。plan の1つ上のディレクトリ。"""
+    parts = path.relative_to(root).parts
+    return "/".join(parts[:parts.index("plan")])
+
+
+# 見た回の控え。写しの置き場の直下に置く。写しの台帳は作業ツリーにあるので、
+# ブランチを切り替えるか、今のプロジェクトが替わると読めなくなる。
+TOKEN_HISTORY = "token-history.csv"
+TOKEN_COLUMNS = ["source", "started", "outcome", "calls"] + [
+    f"{role}_{name}" for role in ROLES for name in (*KINDS, "usd")]
+_history_lock = threading.Lock()
+
+
+def run_row(run: dict[str, Any]) -> dict[str, Any]:
+    row = {key: run[key] for key in ("source", "started", "outcome", "calls")}
+    for role in ROLES:
+        for kind in KINDS:
+            row[f"{role}_{kind}"] = run["kinds"][role][kind]
+        row[f"{role}_usd"] = run["usd"][role]
+    return row
+
+
+def row_run(row: dict[str, str]) -> dict[str, Any]:
+    kinds = {role: {kind: int(row[f"{role}_{kind}"]) for kind in KINDS} for role in ROLES}
+    return {"source": row["source"], "started": row["started"], "outcome": row["outcome"],
+            "calls": int(row["calls"]), "kinds": kinds,
+            "tokens": {role: sum(kinds[role].values()) for role in ROLES},
+            "usd": {role: float(row[f"{role}_usd"]) for role in ROLES}}
+
+
+def read_token_history(path: Path) -> list[dict[str, Any]]:
+    """控えの回。読めない行は飛ばす。"""
+    try:
+        with path.open(encoding="utf-8", newline="") as handle:
+            rows = list(csv.DictReader(handle))
+    except OSError:
+        return []
+    runs = []
+    for row in rows:
+        try:
+            runs.append(row_run(row))
+        except (KeyError, TypeError, ValueError):
+            continue
+    return runs
+
+
+def write_token_history(path: Path, runs: list[dict[str, Any]]) -> None:
+    """控えを丸ごと書き直す。書けなくても画面は止めない。"""
+    temporary = path.with_name(path.name + ".tmp")
+    try:
+        with temporary.open("w", encoding="utf-8", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=TOKEN_COLUMNS)
+            writer.writeheader()
+            writer.writerows(run_row(run) for run in runs)
+        os.replace(temporary, path)
+    except OSError:
+        pass
+
+
+def newer_run(kept: dict[str, Any] | None, seen: dict[str, Any]) -> dict[str, Any]:
+    """同じ回の2つの写しのうち、呼び出しの多いほう。名前は project より projects\\<name>。"""
+    if kept is None:
+        return seen
+    chosen = seen if seen["calls"] > kept["calls"] else kept
+    if chosen["source"] == "project":
+        other = kept if chosen is seen else seen
+        chosen = {**chosen, "source": other["source"]}
+    return chosen
 
 
 def token_history(root: Path) -> list[dict[str, Any]]:
-    """写しの置き場にある全台帳の回を、開始時刻の順に並べて番号を振る。
+    """控えと写しの全台帳の回を、開始時刻の順に並べて番号を振る。
 
-    1つのプロジェクトの台帳には、ふつう1回分しか入らない。bootstrap は緑の
-    ステップがあると断るからだ。だから回の履歴は、写しを横断して作る。
-    project は今のプロジェクトの写しで、projects の下と同じ回を持つ。
-    開始時刻とトークン数が同じ回は1つにまとめる。
+    1つの台帳には、1つの計画の回が入る。bootstrap は次の計画を起こす前に、
+    前の計画の台帳を plan/archive/ へ移す。だから回の履歴は、写しと退避した
+    台帳を横断して作る。project は今のプロジェクトの写しで、projects の下と
+    同じ回を持つ。
+
+    回は開始時刻で見分ける。箱で一度に走るのは1つだけだ。台帳で見えた回で
+    控えを更新し、台帳から消えた回は控えから出す。
     """
-    seen = set()
-    runs = []
-    for path in ledger_files(root):
-        source = path.parent.parent.relative_to(root).as_posix()
-        for run in token_runs(read_jsonl(path), source):
-            key = (run["started"], tuple(run["tokens"].values()))
-            if key in seen:
-                continue
-            seen.add(key)
-            runs.append(run)
-    runs.sort(key=lambda run: run["started"])
-    for number, run in enumerate(runs, 1):
-        run["run"] = number
-    return runs
+    path = root / TOKEN_HISTORY
+    with _history_lock:
+        stored = read_token_history(path)
+        by_start: dict[str, dict[str, Any]] = {run["started"]: run for run in stored}
+        for ledger_path in ledger_files(root):
+            source = ledger_source(root, ledger_path)
+            for run in token_runs(read_jsonl(ledger_path), source):
+                by_start[run["started"]] = newer_run(by_start.get(run["started"]), run)
+        runs = sorted(by_start.values(), key=lambda run: run["started"])
+        if [run_row(run) for run in runs] != [run_row(run) for run in stored]:
+            write_token_history(path, runs)
+    return [{**run, "run": number} for number, run in enumerate(runs, 1)]
 
 
 def request_id(kind: str, value: Any) -> str:

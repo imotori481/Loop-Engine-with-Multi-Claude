@@ -132,7 +132,7 @@ class UsageIsRecorded(unittest.TestCase):
             record = json.loads(loop.LEDGER.read_text(encoding="utf-8"))
         line = screen.getvalue().strip()
         self.assertEqual(line, "[USAGE] who=solver phase=IMPL model=claude-sonnet-5 "
-                               "in=110 out=20 sec=4 usd=0.01")
+                               "in=110 out=20 read=100 write=6 sec=4 usd=0.01")
         self.assertNotIn("iterations", line)
         self.assertIn("iterations", record["usage"])
 

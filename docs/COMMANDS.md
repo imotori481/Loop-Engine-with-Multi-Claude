@@ -65,12 +65,18 @@ PowerShell なら `.\host\loop.cmd <args>`、Git Bash なら `./host/loop.cmd <a
 
 止まった理由と次の手は、`loop status` とログの最後の行に出る。
 
+改訂の上限まで回してもクリティックの指摘が残ると止まる。的外れな指摘を書き換えてから `loop continue` を流すと、
+書き換えた指摘でプランナーが1回だけ計画を直し、適用して走らせる。何も書き換えなければ、そのまま適用する。
+ダッシュボードの「クリティックの指摘」からも、書き換えと続行ができる。
+
 | やりたいこと | コマンド |
 |---|---|
 | 途中で止まったステップを最後の緑に戻す | `loop raw reset <step>` |
 | 計画をリンタにかける | `loop raw validate` |
 | 適用待ちの提案を見る | `loop raw plan show` |
 | 適用待ちの提案を適用して続ける | `loop continue` |
+| クリティックの指摘を見る | `loop findings` |
+| 残った指摘を1件書き換える（番号は0から） | `echo '{"mode": "<mode>", "index": <n>, "title": "<題>", "evidence": "<根拠>"}' \| loop findings set` |
 | エスカレーションへの改訂案をプランナーに書かせる | `loop raw plan propose --step <step>` |
 | 計画を批評だけする | `loop raw critique` |
 

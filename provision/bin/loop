@@ -17,6 +17,7 @@ UNIT=loop-run
 LOGS=$LOOP/logs
 REQUIREMENTS=$LOOP/human/in/REQUIREMENTS.md
 PENDING=$LOOP/planner/out/tasks.json
+CRITIQUE=$LOOP/human/in/CRITIQUE.json
 PLAN=$LOOP/project/plan
 ENGINE="${LOOP_ENGINE:-/opt/loop-engine}"
 PROJECT_SH="$ENGINE/provision/loop-project.sh"
@@ -67,6 +68,20 @@ apply_pending() {
   esac
 }
 
+# 上限まで改訂しても指摘が残れば 4 で止まる。人がダッシュボードか 'loop findings set' で
+# 指摘を書き換えてから 'loop continue' を流すと、--resume が書き換えた指摘で1回だけ
+# 改訂させる。書き換えが無ければ何もしない。どちらも、その後に提案を適用する。
+refine() {
+  local rc=0
+  step plan refine "$@" || rc=$?
+  case "$rc" in
+    0) ;;
+    3) finish 3 "plan refine の途中でプランナーが判断を返した。$LOOP/project/.runner/refine-escalation.md を読む" ;;
+    4) finish 4 "クリティックの指摘が残った。直すならダッシュボードか 'loop findings set'。直しても直さなくても、次は 'loop continue'" ;;
+    *) finish "$rc" "plan refine が失敗した（終了コード $rc）" ;;
+  esac
+}
+
 run_all() {
   local rc=0
   step run --all || rc=$?
@@ -89,16 +104,12 @@ work() {
       finish 3 "プランナーが計画を書かずに判断を返した。$LOOP/planner/out/ESCALATE.md を読む"
     fi
 
-    step plan refine || rc=$?
-    case "$rc" in
-      0) ;;
-      3) finish 3 "plan refine の途中でプランナーが判断を返した。$LOOP/project/.runner/refine-escalation.md を読む" ;;
-      4) finish 4 "クリティックの指摘が残った。上の指摘を読み、このまま適用するなら 'loop continue'" ;;
-      *) finish "$rc" "plan refine が失敗した（終了コード $rc）" ;;
-    esac
+    refine
     apply_pending
-  else
-    [ ! -f "$PENDING" ] || apply_pending
+  elif [ -f "$PENDING" ]; then
+    # 人を待つ批評が無ければ、--resume は何もせずに 0 で戻り、提案を適用する。
+    refine --resume
+    apply_pending
   fi
   run_all
 }
@@ -184,6 +195,18 @@ cmd_now() {
   python3 "$ENGINE/provision/loop_now.py" "$(project_name)" "$active" "$LOGS"
 }
 
+# クリティックの指摘を見せ、直す。sudo を使わない。写しはグループ humanw に
+# 書き込みを許してある。中身は loop_findings.py。
+cmd_findings() {
+  case "${1:-show}" in
+    show) python3 "$ENGINE/provision/loop_findings.py" show "$CRITIQUE" ;;
+    set)
+      running && die "走っている間は直せない"
+      python3 "$ENGINE/provision/loop_findings.py" set "$CRITIQUE" ;;
+    *) die "使い方: loop findings [show | set]" ;;
+  esac
+}
+
 cmd_log() {
   local log
   log="$(latest_log)"
@@ -205,9 +228,13 @@ usage() {
 
   go <要件>.md [--language <言語>]
                     要件を置き、計画づくりから全ステップまでを裏で流す
-  continue          適用待ちの提案があれば適用し、全ステップを裏で流す
+  continue          直したクリティックの指摘があればプランナーに渡し、適用待ちの
+                    提案を適用して、全ステップを裏で流す
   status            プロジェクト、走っているか、人への問い、台帳の末尾を出す
   now               いまの作業を JSON で出す（ホストのダッシュボードが読む）
+  findings          クリティックの指摘を出す
+  findings set      指摘1件の title と evidence を書き換える。標準入力に
+                    {"mode", "index", "title", "evidence"} の JSON を渡す
   log               走行ログを追う。Ctrl-C で抜けても走行は続く
   stop              走行を止める
   project <引数>    プロジェクトの一覧と切り替え。'loop project' で使い方を出す
@@ -221,6 +248,7 @@ case "${1:-}" in
   continue) cmd_continue ;;
   status)   cmd_status ;;
   now)      cmd_now ;;
+  findings) shift; cmd_findings "$@" ;;
   log)      cmd_log ;;
   stop)     cmd_stop ;;
   project)  shift; sudo ADMIN_USER="$(id -un)" bash "$PROJECT_SH" "$@" ;;

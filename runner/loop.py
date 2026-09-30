@@ -24,6 +24,7 @@ from __future__ import annotations
 import argparse
 import ast
 import atexit
+import difflib
 import hashlib
 import json
 import os
@@ -135,6 +136,10 @@ FINDINGS_NAME = "FINDINGS.json"
 # /srv/loop/planner/out と対になっていて、形は同じ、向きは逆、グループは別。
 HUMAN_IN = LOOP / "human" / "in"
 REQUIREMENTS = HUMAN_IN / "REQUIREMENTS.md"
+# クリティックの指摘の、人が読んで書き換える写し。plan refine が批評のたびに
+# 書いて止まり、再開したときに読み戻してプランナーへ渡す。human/in は humanw の
+# 保守ユーザーが書け、プランナーとクリティックは読めない。
+CRITIQUE_FOR_HUMAN = HUMAN_IN / "CRITIQUE.json"
 
 # プランナーが書いてよい3つのファイル（BOOTSTRAP「書いてよいのは次の3つだけ」）。
 # out/ に書く名前から、プロジェクトの中の置き場への対応表にしてある。この表が
@@ -167,6 +172,12 @@ PLANNER_ESCALATION = PLAN / "PLANNER_ESCALATION.md"
 # plan refine の途中でプランナーがエスカレーションしたときの控え。提案は
 # 改訂前に戻すので、エスカレーションの本文はここにしか残らない。
 REFINE_ESCALATION = STATE / "refine-escalation.md"
+# plan refine が人を待っているあいだの控え。何回目の批評か、批評した提案の
+# ハッシュ、クリティックが書いたままの指摘。人が直したものは、これと比べて確かめる。
+REFINE_STATE = STATE / "refine.json"
+# 終えた計画の置き場。bootstrap が次の計画を起こす前に、計画と台帳をここの
+# 番号のディレクトリへ移す（archive_plan）。
+PLAN_ARCHIVE = PLAN / "archive"
 
 # tests/ はプロジェクトの venv の pytest でだけ走らせる。素の
 # `python3 -m pytest` にすると、solver 自身の ~/.local のパッケージが sys.path に
@@ -1350,16 +1361,20 @@ def record_usage(who: str, phase: str, data: dict) -> None:
     台帳には usage を丸ごと書く。画面には1行に要るものだけを出す。usage の
     中身は、キャッシュの内訳や iterations まで入っていて、1回の呼び出しで
     画面を数行占めていた。入力は、キャッシュから読んだ分と書いた分を足す。
+    read と write はそのうちのキャッシュの読み取りと書き込みで、`loop now` が
+    種類別の消費を数えるのに使う。
     """
     usage = data.get("usage") or {}
     models = sorted(data.get("modelUsage") or {})
-    tokens_in = sum(int(usage.get(k) or 0) for k in (
-        "input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"))
+    cache_read = int(usage.get("cache_read_input_tokens") or 0)
+    cache_write = int(usage.get("cache_creation_input_tokens") or 0)
+    tokens_in = int(usage.get("input_tokens") or 0) + cache_read + cache_write
     tokens_out = int(usage.get("output_tokens") or 0)
     seconds = (data.get("duration_ms") or 0) / 1000
     cost = data.get("total_cost_usd")
     echo = (f"who={who} phase={phase} model={','.join(models) or '-'} "
-            f"in={tokens_in} out={tokens_out} sec={seconds:.0f}"
+            f"in={tokens_in} out={tokens_out} read={cache_read} write={cache_write} "
+            f"sec={seconds:.0f}"
             + (f" usd={cost:.2f}" if isinstance(cost, (int, float)) else "")
             + (" ERROR" if data.get("is_error") else ""))
     ledger("USAGE", echo=echo, who=who, phase=phase,
@@ -1518,11 +1533,16 @@ def render_invariants(step: dict) -> str:
     return "\n".join(f"- {i}" for i in inv) if inv else "(none stated)"
 
 
-def brief_test_write(step: dict, context: str, broken: str = "") -> str:
-    # goal は渡さない。テストは受け入れ条件から作るもので、これからソルバーに
-    # 頼む実装の説明から作るものではない。
-    acceptance = render_acceptance(step)
-    return f"""Write tests. Do not write an implementation.
+def solver_material(step: dict, context: str) -> str:
+    """TEST_WRITE と IMPL のブリーフを、この同じ本文で始める。
+
+    CONTEXT.md はステップをまたいで同じで、契約、不変条件、署名は同じステップの
+    位相をまたいで同じだ。先頭がそろっていれば、後の呼び出しはこの部分を
+    プロンプトキャッシュから読む。位相ごとの指示は、この後に置く。goal は
+    TEST_WRITE に渡さないので、ここには入れない。
+    """
+    return f"""Below is the context for one step of a build. Your task follows
+after it.
 
 # Project context
 {context}
@@ -1533,11 +1553,43 @@ def brief_test_write(step: dict, context: str, broken: str = "") -> str:
 # Invariants that must hold
 {render_invariants(step)}
 
+# Signatures this step provides
+{render_provides(step)}
+"""
+
+
+def replaced_tests_section(replaced: list[str], expected: int) -> str:
+    """TEST_WRITE のブリーフの、差し替える既存のテストファイルについての節。"""
+    if not replaced:
+        return ""
+    return f"""
+# These test files already exist, and you replace them
+{chr(10).join(replaced)}
+
+Their tests check behaviour this step changes, so they are removed. Write each
+of these files from scratch with this step's tests only. Do not keep, adapt or
+copy the old tests. Together with the other files above, the step has exactly
+{expected} tests.
+
+You may read one of these files to see how it is set up (imports, namespace,
+fixtures), but its tests describe the old behaviour. If your editing tool
+refuses to overwrite a file you have not read, read its first line (offset 1,
+limit 1) and then write the whole file.
+"""
+
+
+def brief_test_write(step: dict, context: str, broken: str = "",
+                     replaced: list[str] | None = None) -> str:
+    # goal は渡さない。テストは受け入れ条件から作るもので、これからソルバーに
+    # 頼む実装の説明から作るものではない。
+    acceptance = render_acceptance(step)
+    return f"""{solver_material(step, context)}
+# Your task
+
+Write tests for the signatures above. Do not write an implementation.
+
 # Acceptance criteria -- write exactly {step["expected_tests"]} tests, at least one per criterion
 {acceptance}
-
-# Signatures under test
-{render_provides(step)}
 
 # Files you may create or modify
 {chr(10).join(step["files_test"])}
@@ -1546,7 +1598,7 @@ Write nothing outside those paths. The implementation does not exist yet, so
 every test you write must fail when run against a stub that returns a wrong
 value of the right type. Do not weaken a test to make it pass, and do not
 create the module under test.
-{naming_note()}{compile_failure_section(broken)}"""
+{replaced_tests_section(replaced or [], step["expected_tests"])}{naming_note()}{compile_failure_section(broken)}"""
 
 
 def compile_failure_section(broken: str) -> str:
@@ -1806,13 +1858,16 @@ CSHARP_STUB_BODY = "{ " + CSHARP_STUB_EXPRESSION + "; }"
 CSHARP_STUB_MARK = re.compile(r"^\s*System\.NotImplementedException\s*:\s*__stub__\s*$")
 CSHARP_ACCESS = re.compile(r"^(?:public|internal|protected|private)\b")
 CSHARP_MODIFIERS = r"(?:(?:public|internal|protected|private|static|abstract|sealed|partial|readonly|virtual|override|new)\s+)*"
+# 型の名前はドットで区切れる。`Board.Cell` は Board の中の入れ子の型。
+CSHARP_TYPE_NAME = r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*"
 CSHARP_TYPE_LINE = re.compile(
-    rf"^(?P<mods>{CSHARP_MODIFIERS})(?P<kind>class|struct|interface|enum)\s+(?P<name>[A-Za-z_]\w*)"
+    rf"^(?P<mods>{CSHARP_MODIFIERS})(?P<kind>class|struct|interface|enum)\s+(?P<name>{CSHARP_TYPE_NAME})"
     r"(?P<bases>\s*:\s*[^{]+?)?\s*(?:\{(?P<body>.*)\})?\s*;?\s*$")
 CSHARP_CTOR_LINE = re.compile(
-    rf"^(?P<mods>{CSHARP_MODIFIERS})(?P<type>[A-Za-z_]\w*)\.(?P=type)\s*\((?P<params>.*)\)\s*;?\s*$")
+    rf"^(?P<mods>{CSHARP_MODIFIERS})(?P<type>(?:[A-Za-z_]\w*\.)*(?P<last>[A-Za-z_]\w*))\.(?P=last)"
+    r"\s*\((?P<params>.*)\)\s*;?\s*$")
 CSHARP_MEMBER_LINE = re.compile(
-    rf"^(?P<mods>{CSHARP_MODIFIERS})(?P<ret>\S.*?)\s+(?P<type>[A-Za-z_]\w*)\.(?P<name>[A-Za-z_]\w*)"
+    rf"^(?P<mods>{CSHARP_MODIFIERS})(?P<ret>\S.*?)\s+(?P<type>{CSHARP_TYPE_NAME})\.(?P<name>[A-Za-z_]\w*)"
     r"\s*(?P<rest>\(.*\)|\{.*\})?\s*;?\s*$")
 # 契約に現れたら `using UnityEngine;` を足す型。全部は知らないので、よく出る
 # ものだけを挙げる。無い型がコンパイルで落ちれば、RED_GATE がそのまま止める。
@@ -1861,6 +1916,14 @@ def csharp_stub_member(member: str) -> str:
     return member + ";"                              # フィールド
 
 
+def csharp_type_block(entry: dict) -> str:
+    """スタブの型1つ。入れ子の型（entry["nested"]）はメンバーの後ろに、字下げして置く。"""
+    separator = ",\n" if entry["kind"] == "enum" else "\n"
+    members = [m for m in entry["members"] if m] + [n["block"] for n in entry.get("nested", [])]
+    inner = separator.join("    " + m.replace("\n", "\n    ") for m in members)
+    return f"{entry['head']}\n{{\n{inner}\n}}"
+
+
 def csharp_namespace(path: str) -> str | None:
     """新しいファイルの名前空間。柵の中のフォルダから作る（layout_note の決まり）。
 
@@ -1903,7 +1966,8 @@ def generate_csharp_stub(step: dict, requires: list[str],
             entry = types.setdefault(name, {"path": path, "members": [], "specs": []})
             if entry["path"] != path or "head" in entry:
                 return None
-            entry["head"] = f"{mods} {kind} {name}{declared.group('bases') or ''}".rstrip()
+            short = name.rpartition(".")[2]
+            entry["head"] = f"{mods} {kind} {short}{declared.group('bases') or ''}".rstrip()
             entry["kind"] = kind
             entry["bases"] = declared.group("bases") or ""
             body = entry["body"] = declared.group("body") or ""
@@ -1922,7 +1986,7 @@ def generate_csharp_stub(step: dict, requires: list[str],
         member = CSHARP_MEMBER_LINE.match(decl) if not ctor else None
         if ctor:
             owner = ctor.group("type")
-            text = f"{ctor.group('mods')}{owner}({ctor.group('params')})"
+            text = f"{ctor.group('mods')}{ctor.group('last')}({ctor.group('params')})"
         elif member:
             owner = member.group("type")
             text = (f"{member.group('mods')}{member.group('ret')} {member.group('name')}"
@@ -1940,13 +2004,35 @@ def generate_csharp_stub(step: dict, requires: list[str],
     if {t["path"] for t in types.values()} != set(step["files_write"]):
         return None
 
+    # 入れ子の型（`Tactical.SpawnTracker`）の外側の型が、契約に行を持たないことがある。
+    # 外側の型も、同じファイルの型として扱う。
+    for name in list(order):
+        outer = name.rpartition(".")[0]
+        while outer:
+            if outer not in types:
+                types[outer] = {"path": types[name]["path"], "members": [], "specs": []}
+                order.insert(order.index(name), outer)
+            elif types[outer]["path"] != types[name]["path"]:
+                return None
+            outer = outer.rpartition(".")[0]
+
     # 型の宣言の行が無いメンバーは、普通のクラスに入れる。既存のファイルでは、
     # 型の行があったか（typed）で、型の頭を確かめるかどうかを分ける。
     for name, entry in types.items():
         entry["name"] = name
         entry["typed"] = "head" in entry
-        entry.setdefault("head", "public class " + name)
+        entry.setdefault("head", "public class " + name.rpartition(".")[2])
         entry.setdefault("kind", "class")
+        entry["nested"] = []
+
+    # 入れ子の型は、外側の型のメンバーとして書く。深いものから組み立てて外側に渡す。
+    # 入れ子の型の既定は private なので、型の頭には public を付けてある。
+    for name in sorted((n for n in types if "." in n), key=lambda n: -n.count(".")):
+        if types[name.rpartition(".")[0]]["kind"] in ("enum", "interface"):
+            return None
+        types[name.rpartition(".")[0]]["nested"].append(
+            {"name": name.rpartition(".")[2], "block": csharp_type_block(types[name])})
+    order = [name for name in order if "." not in name]
 
     # 名前空間。既存のファイルは今の名前空間を保つ（layout_note）。requires の行は
     # `-- namespace X` を持てばそれ、無ければ作業ツリーのファイル、それも無ければ
@@ -1994,15 +2080,8 @@ def generate_csharp_stub(step: dict, requires: list[str],
         usings = ["System", "System.Collections.Generic", "System.Linq"] \
             + (["UnityEngine"] if unity else []) \
             + sorted({ns for ns in namespaces.values() if ns and ns != own})
-        blocks = []
-        for name in order:
-            entry = types[name]
-            if entry["path"] != path:
-                continue
-            separator = ",\n" if entry["kind"] == "enum" else "\n"
-            inner = separator.join(f"    {m}" for m in entry["members"] if m)
-            blocks.append(f"{entry['head']}\n{{\n{inner}\n}}")
-        text = "\n\n".join(blocks)
+        text = "\n\n".join(csharp_type_block(types[name]) for name in order
+                           if types[name]["path"] == path)
         if own:
             text = f"namespace {own}\n{{\n" + "\n".join(
                 f"    {line}" if line else "" for line in text.splitlines()) + "\n}"
@@ -2253,27 +2332,101 @@ must fail on an assertion, not on an exception.
 """
 
 
-def brief_impl(step: dict, context: str, tests_text: str, last_failure: str) -> str:
-    return f"""Make the tests pass.
+# IMPL のブリーフに載せるファイルの中身の上限（字数の合計）。取り込んだ Unity の
+# プロジェクトの回で、既存のファイルを書き換える IMPL は10〜23ターン回り、ソルバーの
+# 消費の63%を占めた。ファイルを Read するたびに、それまでの文脈を送り直す。
+# 載せきれないファイルは、名前だけを挙げてソルバーに読ませる。
+IMPL_FILE_CHARS = 60_000
 
-# Project context
-{context}
+
+def current_files_section(step: dict) -> str:
+    """files_write のうち、作業ツリーにあるファイルの今の中身。無ければ空。
+
+    試行のたびに読み直す。修理の試行では、前の試行が書いたものが今の中身だ。
+
+    Claude Code の Edit と Write は、同じ呼び出しの中で Read していないファイルを
+    拒む。1行だけの Read でも通るので、全文を読み直させずに1行だけ読ませる。
+    """
+    shown, skipped, total = [], [], 0
+    for rel in step["files_write"]:
+        path = PROJECT / rel
+        if not path.is_file():
+            continue
+        text = path.read_text(encoding="utf-8")
+        if total + len(text) > IMPL_FILE_CHARS:
+            skipped.append(rel)
+            continue
+        total += len(text)
+        shown.append(f"--- {rel} ---\n{text}")
+    if not shown and not skipped:
+        return ""
+    parts = ["\n# The files you may modify, as they are now\n"]
+    if shown:
+        parts.append("\n\n".join(shown))
+        parts.append("""
+These are the current contents; you do not need to read them again. If your
+editing tool refuses a file you have not read, read only its first line
+(offset 1, limit 1) and then edit it.
+""")
+    if skipped:
+        parts.append("Too large to show here; read these yourself:\n"
+                     + chr(10).join(skipped) + "\n")
+    return "\n".join(parts)
+
+
+def original_code_section(step: dict) -> str:
+    """files_write のうち、最後のコミットにあったファイルの、今の中身との差分。無ければ空。
+
+    STUB は既存のメソッドの本体をスタブに差し替える。今の中身だけを見せると、
+    ソルバーは元の分岐も、同じファイルの既存のヘルパーを呼んでいたことも知らずに
+    本体を一から書く。取り込んだ Unity のプロジェクトの回では、`else if` を1つ
+    足せば済むところで分岐をまるごと書き直し、既存の処理と同じ static 関数を
+    いくつも足した。`-` の行が元のコードだ。差分だけにするのは、ファイル全体を
+    二重に載せないためだ。
+    """
+    diffs, total = [], 0
+    for rel, before in head_sources(step["files_write"]).items():
+        path = PROJECT / rel
+        after = path.read_text(encoding="utf-8") if path.is_file() else ""
+        if after == before:
+            continue
+        diff = "".join(difflib.unified_diff(
+            before.splitlines(keepends=True), after.splitlines(keepends=True),
+            f"a/{rel} (before this step)", f"b/{rel} (now)", n=5))
+        if total + len(diff) > IMPL_FILE_CHARS:
+            continue
+        total += len(diff)
+        diffs.append(diff)
+    if not diffs:
+        return ""
+    return """
+# The code before this step
+The stub replaced the bodies of the members this step changes. Lines starting
+with `-` below are the original code; that is where your work starts, not from
+the stub.
+
+""" + "\n".join(diffs) + """
+Edit the original code, do not rewrite it. Keep its branches, its calls and its
+structure, and change only what the tests need: if a new case is required, add
+an `else if` (or a `case`) to the existing chain rather than replacing the
+chain. Before adding a helper method, check whether the original code, the
+files above or the rest of the project (search it with Grep) already have one
+that does the job, and call it.
+"""
+
+
+def brief_impl(step: dict, context: str, tests_text: str, last_failure: str) -> str:
+    return f"""{solver_material(step, context)}
+# Your task
+
+Make the tests pass by implementing the signatures above.
 
 # Goal
 {step["goal"]}
 
-# Signatures you must provide
-{render_provides(step)}
-
-# Invariants that must hold
-{render_invariants(step)}
-
-# Contracts you may rely on
-{dep_contracts(step)}
-
 # The tests (frozen -- read-only, and they will not be accepted if modified)
 {tests_text}
-
+{current_files_section(step)}{original_code_section(step)}
 # How the tests are failing right now
 {last_failure or "(nothing recorded)"}
 
@@ -2283,6 +2436,11 @@ def brief_impl(step: dict, context: str, tests_text: str, last_failure: str) -> 
 Change nothing outside those paths. The tests are the specification: if a test
 looks wrong, say so in your final message rather than editing it -- editing it
 will be detected and the step will stop.
+
+Make the smallest change that passes the tests. Reuse the code that is already
+there -- existing methods, fields and helpers -- instead of writing new ones
+that do the same thing, and do not add methods the tests do not need. Search
+the project with Grep and Glob before writing something that may already exist.
 """
 
 
@@ -2731,6 +2889,18 @@ def validate_plan(tasks: dict) -> list[str]:
                 problems.append(f"L4: {f} is written by both {owners[f]} and {s['id']}")
             owners[f] = s["id"]
 
+    # L17 -- テストのファイルを挙げるステップも1つ
+    #
+    # files_test に既存のテストファイルを挙げたステップは、それを丸ごと書き直す。
+    # 2つのステップが同じファイルを挙げると、後のステップが、前のステップが緑に
+    # なったときに凍結したテストを消す。
+    testers: dict[str, str] = {}
+    for s in steps:
+        for f in s["files_test"]:
+            if f in testers:
+                problems.append(f"L17: {f} is in files_test of both {testers[f]} and {s['id']}")
+            testers[f] = s["id"]
+
     # L9 / L10 -- 早いうちにつながったものがあり、最後につなぐ
     # L9 は、最初の3つのうちに integration か skeleton のステップを求めていた。
     # L13 は「最初の」ステップを skeleton にすることを求め、それは作りの上で L9 を
@@ -3045,6 +3215,40 @@ def check_proposal(old: dict, new: dict) -> list[str]:
     return problems
 
 
+def preplan_tests_section(tasks: str, done: list[str]) -> str:
+    """改訂のブリーフの、計画より前からあるテストについての節。無ければ空。
+
+    HEAD には緑になったステップのテストも入っている。それは L17 で差し替えられない
+    ので、見せない。止まった理由が「前からあるテストを壊した」なら、そのテストが
+    確かめる振る舞いを要件が変えているのかもしれず、差し替えがプランナーの手になる。
+    """
+    try:
+        plan = json.loads(tasks)
+    except ValueError:
+        return ""
+    steps = plan.get("steps", []) if isinstance(plan, dict) else []
+    green = {f for s in steps if isinstance(s, dict) and s.get("id") in done
+             for f in s.get("files_test", []) or []}
+    preplan = {f: names for f, names in existing_tests().items() if f not in green}
+    if not preplan:
+        return ""
+    listing = "\n".join(f"    {f}\n" + "\n".join(f"        {n}" for n in names[:TEST_NAMES_SHOWN])
+                        for f, names in preplan.items())
+    return f"""
+# Tests that were in the repository before this plan
+
+{listing}
+
+If the step stopped because it breaks one of these, and the requirements change
+the behaviour that test checks, list its file in that step's `files_test`. The
+step then replaces the whole file: every test now in it is removed, and the file
+holds only that step's tests, counted in the same `expected_tests`. A test in
+that file for behaviour that does not change is removed with it. If the broken
+test checks behaviour the requirements keep, the implementation is what is wrong;
+do not replace the file.
+"""
+
+
 def brief_plan_revise(step: dict | None, escalation: str, feedback: str = "") -> str:
     spec = SYSTEM_SPEC.read_text(encoding="utf-8") if SYSTEM_SPEC.exists() \
         else "(not written yet)"
@@ -3079,7 +3283,7 @@ stub cannot satisfy it, or escalate.
 
 You do not write code and you cannot reach the repository. You write files into
 the current directory and the runner decides whether to apply them.
-
+{preplan_tests_section(tasks, done)}
 # SYSTEM_SPEC.md
 {spec}
 
@@ -3247,6 +3451,7 @@ yourself first.
          rejected
     L15  every line of contracts.provides names the module it lives in, and that
          module is one of this step's own files_write
+    L17  no file appears in files_test of two different steps
 
 # Four things that are not obvious
 
@@ -3332,7 +3537,7 @@ making a plan this machine accepts is your problem, not the author's.
 
 # The requirements, written by the human
 {requirements}
-{environment_facts()}
+{environment_facts(short=True)}
 {layout_text(BOOTSTRAP_RULES.replace('{LAYOUT_NOTE}', LANGUAGE['layout_note']))}
 {BOOTSTRAP_ESCALATE}
 {feedback_section(feedback)}
@@ -3588,6 +3793,12 @@ def ts_declarations(text: str, path: str) -> list[str]:
 def existing_contracts() -> list[str]:
     """最後のコミットの柵の中（LAYOUT["src"]）にある公開の宣言。計画の言語の
     ファイルだけを読む。
+    """
+    return [line for lines in existing_declarations().values() for line in lines]
+
+
+def existing_declarations() -> dict[str, list[str]]:
+    """existing_contracts の宣言を、それを持つファイルのパスごとに分けたもの。
 
     作業ツリーではなく HEAD から読む。ステップの途中の書きかけやスタブを、
     すでにあるコードとして見せないためだ。
@@ -3596,26 +3807,175 @@ def existing_contracts() -> list[str]:
         listing = run(["git", "ls-tree", "-r", "-z", "--name-only", "HEAD", "--",
                        LAYOUT["src"]])
     except OSError:
-        return []   # 作業ツリーがまだ無い
+        return {}   # 作業ツリーがまだ無い
     if listing.returncode != 0:
-        return []   # コミットがまだ無い
+        return {}   # コミットがまだ無い
     suffix = LANGUAGE["source_suffix"]
-    lines: list[str] = []
+    by_file: dict[str, list[str]] = {}
     for path in listing.stdout.split("\0"):
         if not in_layout(path, "src") or not path.endswith(suffix):
             continue
         shown = run(["git", "show", f"HEAD:{path}"])
         if shown.returncode != 0:
             continue
+        lines: list[str] = []
         if LANGUAGE["name"] == "typescript":
-            lines += ts_declarations(shown.stdout, path)
+            lines = ts_declarations(shown.stdout, path)
         elif LANGUAGE["name"] == "python":
             modules = modules_of([path])
             if modules:
-                lines += python_declarations(shown.stdout, modules[0])
+                lines = python_declarations(shown.stdout, modules[0])
         elif LANGUAGE["name"] == "csharp":
-            lines += csharp_declarations(shown.stdout, path)
-    return lines
+            lines = csharp_declarations(shown.stdout, path)
+        if lines:
+            by_file[path] = lines
+    return by_file
+
+
+# テストの名前の拾い方。プランナーはテストの本体を読めないので、どのファイルが
+# 何を確かめているかを名前で伝える。
+TEST_NAMES = {
+    "python": re.compile(r"^[ \t]*(?:async[ \t]+)?def[ \t]+(test\w*)[ \t]*\(", re.M),
+    "typescript": re.compile(
+        r"\b(?:it|test)(?:\.\w+)?(?:\([^()]*\))?\(\s*(['\"`])((?:\\.|(?!\1).)*)\1"),
+    "csharp": re.compile(
+        r"\[\s*(?:NUnit\.Framework\.)?(?:Test|TestCase|TestCaseSource|UnityTest)\b[^\]]*\]"
+        r"(?:\s*\[[^\]]*\])*\s*(?:(?:public|private|internal|protected|static|async)\s+)*"
+        r"[\w<>\[\],.]+\s+(\w+)\s*\("),
+}
+
+
+def test_names(text: str) -> list[str]:
+    """テストのファイルが持つテストの名前。出てきた順で、重複は1つにする。"""
+    names = []
+    for match in TEST_NAMES[LANGUAGE["name"]].finditer(text):
+        names.append(match.group(match.lastindex))
+    return list(dict.fromkeys(names))
+
+
+def existing_tests() -> dict[str, list[str]]:
+    """HEAD にあるテストのファイルと、それぞれのテストの名前。
+
+    テストを1つも見つけられないファイル（`__init__.py` や共通の道具）は入れない。
+    計画の途中で呼べば、緑になったステップのテストも入る。
+    """
+    try:
+        listing = run(["git", "ls-tree", "-r", "-z", "--name-only", "HEAD", "--",
+                       LAYOUT["tests"]])
+    except OSError:
+        return {}
+    if listing.returncode != 0:
+        return {}
+    by_file: dict[str, list[str]] = {}
+    for path in listing.stdout.split("\0"):
+        if not in_layout(path, "tests") or Path(path).suffix not in LANGUAGE["test_suffixes"]:
+            continue
+        shown = run(["git", "show", f"HEAD:{path}"])
+        if shown.returncode != 0:
+            continue
+        names = test_names(shown.stdout)
+        if names:
+            by_file[path] = names
+    return by_file
+
+
+# 1つのファイルについて見せるテストの名前の数。
+TEST_NAMES_SHOWN = 30
+
+
+def existing_tests_text(plan: dict | None) -> str:
+    """既存のテストと、それを差し替える決まり。無ければ空。
+
+    既存のテストは毎ステップ走り、落ちればステップは緑にならない。要件が
+    振る舞いを変えるなら、それを確かめる既存のテストは、どんな実装でも落ちる。
+    そのファイルは、振る舞いを変えるステップが files_test に挙げて丸ごと
+    書き直す。
+
+    計画を渡すと（クリティック）、計画が差し替えるファイルだけを見せる。
+    """
+    by_file = existing_tests()
+    if plan is not None:
+        listed = {f for s in plan.get("steps", []) if isinstance(s, dict)
+                  for f in s.get("files_test", []) or []}
+        by_file = {f: names for f, names in by_file.items() if f in listed}
+    if not by_file:
+        return ""
+
+    def names(found: list[str]) -> str:
+        shown = [f"        {n}" for n in found[:TEST_NAMES_SHOWN]]
+        if len(found) > TEST_NAMES_SHOWN:
+            shown.append(f"        ... and {len(found) - TEST_NAMES_SHOWN} more")
+        return "\n".join(shown)
+
+    listing = "\n".join(f"    {f}\n{names(found)}" for f, found in by_file.items())
+    if plan is not None:
+        return f"""
+# Test files this plan replaces
+
+These test files are in the repository already, with the tests named below. The
+step that lists one in `files_test` replaces the whole file: the tests now in it
+are removed, and the file holds only that step's tests.
+
+{listing}
+"""
+    return f"""
+# Tests already in the repository
+
+These test files are in the last commit, written before this plan. The runner
+runs every one of them on every step, and a step that makes one of them fail is
+not green. Only the test names are shown, not the bodies.
+
+{listing}
+
+When the requirements change behaviour that one of these tests checks, that test
+fails however well the step is implemented. The step that makes the change lists
+the test file in its `files_test`, and the step REPLACES the whole file:
+
+- every test now in the file is removed, and the file then holds only this
+  step's tests, counted in `expected_tests` together with its other test files
+- replace a file only when the requirements change what its tests check
+- a test in that file for behaviour that does not change is removed with it.
+  Its behaviour stays checked only if this step writes a criterion for it that
+  calls a name this step provides (R4)
+- only one step may list a given file (L17)
+"""
+
+
+def declarations_for_plan(by_file: dict[str, list[str]],
+                          plan: dict) -> tuple[list[str], list[str]]:
+    """計画が触れる宣言だけを行で残し、ほかはファイル名だけにする。
+
+    返すのは (残す行, 行を外したファイル)。残すのは、どこかのステップの
+    `requires` か `provides` に出る名前の宣言と、どこかの `files_write` にある
+    ファイルの宣言。C# のメンバー（`Board.Score`）が出れば、その型の頭（`Board`）
+    も残す。クリティックがこの一覧を使うのは、既にあるものを「どのステップも
+    書いていない」と指摘しないためだけで、計画が口にしない宣言は要らない。
+    取り込んだ Unity のプロジェクトでは、この一覧がブリーフの3分の2を占めていた。
+    """
+    names: set[str] = set()
+    files: set[str] = set()
+    for step in plan.get("steps") or []:
+        if not isinstance(step, dict):
+            continue
+        contracts = step.get("contracts") or {}
+        for line in (contracts.get("requires") or []) + (contracts.get("provides") or []):
+            if isinstance(line, str):
+                name = declared_name(line)
+                names.add(name)
+                if "." in name:
+                    names.add(name.split(".")[0])
+        files |= {f for f in step.get("files_write") or [] if isinstance(f, str)}
+    kept: list[str] = []
+    dropped: list[str] = []
+    for path, lines in by_file.items():
+        if path in files:
+            kept += lines
+            continue
+        chosen = [line for line in lines if declared_name(line) in names]
+        kept += chosen
+        if len(chosen) < len(lines):
+            dropped.append(path)
+    return kept, dropped
 
 
 def head_sources(paths: list[str]) -> dict[str, str]:
@@ -3626,6 +3986,21 @@ def head_sources(paths: list[str]) -> dict[str, str]:
         if shown.returncode == 0:
             sources[path] = shown.stdout
     return sources
+
+
+def restore_to_head(paths: list[str]) -> None:
+    """`paths` を最後のコミットの中身に戻す。コミットに無いものは消す。
+
+    `git checkout -- <paths>` は、コミットに無いパスが1つでも混ざると全体を断り、
+    ほかのパスも戻さない。取り込んだ Unity のプロジェクトの S1 では、既存のコードの
+    スタブを消したまま TEST_WRITE をやり直し、消えたファイルを柵の外への書き込みと
+    読んでエスカレーションした。だから、コミットにあるものだけを渡す。
+    """
+    present = sorted(head_sources(paths))
+    for path in paths:
+        (PROJECT / path).unlink(missing_ok=True)
+    if present:
+        run(["git", "checkout", "--"] + present, check=True)
 
 
 # export の有無を問わない。provides は export を求めるが、既存のファイルでは
@@ -4321,6 +4696,74 @@ def csharp_declarations(text: str, path: str) -> list[str]:
     return lines
 
 
+# 短くした行に残す修飾子。呼び方（型から呼ぶか、値を書けるか）を決めるものだけ。
+CSHARP_SHORT_MODIFIERS = {"static", "const", "readonly", "abstract", "virtual", "override"}
+CSHARP_PARAMETER_MODIFIERS = {"this", "ref", "out", "in", "params"}
+
+
+def csharp_short_declaration(line: str) -> str:
+    """csharp_declarations のメンバーの行から、引数と戻り値の型を外す。
+
+    `static int Board.Score(Board board, int bonus = 0)` は `static Board.Score(board, bonus)`
+    になる。型の頭、enum、interface はそのまま返す。declared_name は元の行と同じ
+    名前を返すので、この行を requires に写しても L3 を通り、ソルバーには
+    existing_requirements が HEAD の署名を渡す。取り込んだ Unity のプロジェクトでは、
+    bootstrap のブリーフの大半がこの一覧で、呼び出しのたびにそれを読み直していた。
+    """
+    name = declared_name(line)
+    if "." not in name:
+        return line
+    path, sep, rest = line.partition(": ")
+    if not sep:
+        path, rest = "", line
+    body, dash, where = rest.partition(" -- ")
+    found = re.search(re.escape(name) + r"(?=\s*(?:\(|\{|;|=|<|$))", body)
+    if not found:
+        return line
+    mods = [w for w in body[:found.start()].split() if w in CSHARP_SHORT_MODIFIERS]
+    after = body[found.end():].lstrip()
+
+    def closing(text: str, open_: str, close: str) -> int:
+        depth = 0
+        for i, c in enumerate(text):
+            if c == open_:
+                depth += 1
+            elif c == close:
+                depth -= 1
+                if depth == 0:
+                    return i
+        return len(text)
+
+    tail = ""
+    if after.startswith("<"):
+        stop = closing(after, "<", ">") + 1
+        tail, after = after[:stop], after[stop:].lstrip()
+    if after.startswith("("):
+        inner = after[1:closing(after, "(", ")")]
+        params, depth, start, quote = [], 0, 0, ""
+        for i, c in enumerate(inner + ","):
+            if quote:
+                if c == quote and inner[i - 1] != "\\":
+                    quote = ""
+            elif c in "\"'":
+                quote = c
+            elif c in "<([":
+                depth += 1
+            elif c in ">)]":
+                depth -= 1
+            elif c == "," and depth == 0:
+                param = inner[start:i].split("=")[0].split()
+                if param:
+                    params.append(" ".join([w for w in param[:-1]
+                                            if w in CSHARP_PARAMETER_MODIFIERS] + [param[-1]]))
+                start = i + 1
+        tail += f"({', '.join(params)})"
+    elif after.startswith("{"):
+        tail += " " + after[:closing(after, "{", "}") + 1]
+    short = " ".join(mods + [name + tail])
+    return (f"{path}: " if path else "") + short + (f" -- {where}" if dash else "")
+
+
 def csharp_balanced(text: str) -> bool:
     """差し替える範囲の中で、`#if` と `#endif` の数が合うか。"""
     return (len(re.findall(r"(?m)^[ \t]*#[ \t]*if\b", text))
@@ -4400,6 +4843,13 @@ def csharp_merge_stub(original: str, entries: list[dict], known: dict[str, str],
                     elif arrow is not None:
                         edits.append((start + arrow, stop, f"=> {CSHARP_STUB_EXPRESSION};"))
 
+        # 入れ子の型は丸ごと足す。同じ名前のものがもうあれば、中身を合わせる手立てが
+        # 無いのでソルバーに回す。
+        for nested in entry.get("nested", []):
+            if any(nested["name"] in m["names"] for m in t["members"]):
+                return None
+            new.append(nested["block"])
+
         if new:
             # 型の末尾、閉じる `}` の行の前に、ほかのメンバーと同じ字下げで足す。
             close = t["close"]
@@ -4412,7 +4862,8 @@ def csharp_merge_stub(original: str, entries: list[dict], known: dict[str, str],
                 lead = original[original.rfind("\n", 0, first) + 1:first]
                 if lead and not lead.strip():
                     indent = lead
-            block = ("\n" if t["members"] else "") + "".join(f"{indent}{m}\n" for m in new)
+            block = ("\n" if t["members"] else "") + "".join(
+                f"{indent}{m.replace(chr(10), chr(10) + indent)}\n" for m in new)
             if before.strip():
                 edits.append((close, close, "\n" + block + outer))
             else:
@@ -4560,8 +5011,13 @@ Unity afterwards.
 """)
 
 
-def environment_facts() -> str:
+def environment_facts(plan: dict | None = None, short: bool = False) -> str:
     """プロジェクトが実際にどうなっているかを、機械から読み取る。
+
+    `plan` を渡すと、既存の宣言を、その計画が触れるものだけに絞る
+    （declarations_for_plan）。クリティックのブリーフが使う。`short` なら、C# の
+    メンバーの行から引数と戻り値の型を外す（csharp_short_declaration）。bootstrap の
+    ブリーフが使う。
 
     BOOTSTRAP_RULES の規則は、ランナーが強制するものの書き写しだ。つまり、書いた
     者が覚えていた分しか揃わない。最初の版には L12 が無く、その隙間に向けて
@@ -4635,9 +5091,16 @@ write a criterion about the text of index.html.
     # 取り込んだリポジトリには、最初のステップより前からコードがある。プランナーは
     # コードを読めない（BOOTSTRAP 1-1）ので、ここに無ければ、そこにある関数も型も
     # 知らずに計画を書く。署名だけを渡し、本体は渡さない。
-    existing = existing_contracts()
+    by_file = existing_declarations()
+    existing = [line for lines in by_file.values() for line in lines]
+    others: list[str] = []
+    if plan is not None:
+        existing, others = declarations_for_plan(by_file, plan)
+    shortened = short and LANGUAGE["name"] == "csharp"
+    if shortened:
+        existing = [csharp_short_declaration(line) for line in existing]
     existing_text = ""
-    if existing:
+    if existing or others:
         existing_text = layout_text("""
 # What the code already declares
 
@@ -4666,7 +5129,25 @@ Do not write criteria to show that the rest still works. The tests already in
 the repository run on every step, and a step that breaks one of them is not
 green. That is how unchanged behaviour is kept.
 
-""") + "\n".join(f"    {line}" for line in existing) + "\n"
+""")
+        if shortened:
+            existing_text += """Members are shown without their parameter and return types:
+`static Board.Score(board)` is a static method that takes one argument. Copy
+such a line into `contracts.requires` as it stands; the runner hands the solver
+the full signature from the code. A step that changes a member writes the full
+signature it wants in `contracts.provides`.
+
+"""
+        existing_text += "\n".join(f"    {line}" for line in existing) + "\n"
+        if others:
+            existing_text += layout_text("""
+Only the declarations this plan names in `requires` or `provides`, and those in
+a file some step writes, are shown above. These files under {SRC}/ declare
+more, not shown line by line. They also exist before the first step runs:
+
+""") + "\n".join(f"    {path}" for path in others) + "\n"
+
+    existing_text += existing_tests_text(plan)
 
     # テストが何に届くかを決めるファイル。言語ごとに名前は違うが仕事は同じで、
     # どちらでもプランナーに見せる必要がある。import のパスに逆らう計画は負ける。
@@ -5042,16 +5523,50 @@ def stamp_language(name: str) -> None:
 CRITIQUE_MODES = ("coverage", "trace")
 
 
+def critic_environment(tasks: str) -> str:
+    """クリティックに見せる環境。既存の宣言は、計画が触れるものだけにする。
+
+    計画が読めなければ絞らない。読めない計画にも、全部を見せるのは損ではない。
+    """
+    try:
+        plan = json.loads(tasks)
+    except ValueError:
+        plan = None
+    return environment_facts(plan if isinstance(plan, dict) else None)
+
+
+def critic_material(tasks: str) -> str:
+    """どのモードのブリーフも、この同じ本文で始める。
+
+    ブリーフの大半は計画と既存の宣言で、モードが変わっても同じだ。モードは
+    続けて呼ぶので、先頭がそろっていれば、2つ目の呼び出しはこの部分を
+    プロンプトキャッシュから読む。役の説明と問いは、この後に置く。
+    """
+    return f"""Below are a plan for something that has not been built yet and
+facts about the project it will be built in. Your role and your task follow
+after them.
+
+# The plan
+
+{tasks}
+
+{critic_environment(tasks)}"""
+
+
 def brief_critique_coverage(requirements: str, tasks: str) -> str:
     """この計画を完全に満たしたとき、人間が求めたものが手に入るか。"""
-    return f"""You are the critic. Your only job is to answer one question about
-a piece of work that has not been built yet.
+    return f"""{critic_material(tasks)}
+
+# Your role
+
+You are the critic. Your only job is to answer one question about the work
+above.
 
 # The question
 
 A human wrote requirements for something they want. A planner turned those
-requirements into a plan: a sequence of steps, each with acceptance criteria
-that a machine will check.
+requirements into the plan above: a sequence of steps, each with acceptance
+criteria that a machine will check.
 
 **If every acceptance criterion in this plan passed, would the human's
 requirements be satisfied?**
@@ -5059,12 +5574,6 @@ requirements be satisfied?**
 # The requirements, written by the human
 
 {requirements}
-
-# The plan
-
-{tasks}
-
-{environment_facts()}
 
 # How to read the plan
 
@@ -5103,15 +5612,12 @@ def brief_critique_trace(tasks: str) -> str:
     導いた。つまり、欠けているものについて要件が何も言っていなくても、動かない
     製品を捕まえられる。run 7 の要件は、初期状態に一言も触れていなかった。
     """
-    return f"""You are the tracer. You read a plan for something that has not
-been built yet, and you work out what a user of the finished thing would
-actually be able to do.
+    return f"""{critic_material(tasks)}
 
-# The plan
+# Your role
 
-{tasks}
-
-{environment_facts()}
+You are the tracer. You read the plan above and work out what a user of the
+finished thing would actually be able to do.
 
 # How to read it
 
@@ -5166,7 +5672,8 @@ Then say plainly:
   artifact's own logic: the read path is reachable, and what it finds is
   always nothing. Report that.
 
-  Code listed under "What the code already declares" is not such a thing. It
+  Code listed under "What the code already declares" is not such a thing,
+  whether it is shown line by line or only by its file. It
   exists before the first step, so a step that calls it or reads what it
   provides is using something that is already there. Do not report it as
   something no step writes.
@@ -5203,6 +5710,10 @@ without reading.
         }}
       ]
     }}
+
+**Write `title` and `evidence` in Japanese.** A human reads the findings before
+the planner does, and may rewrite them. Quote criteria, names and code exactly
+as they appear in the plan, in their own language.
 
 `machine_would_notice` is false when every criterion would pass while the
 problem stood. Say so plainly when that is the case -- it is the difference
@@ -5317,6 +5828,8 @@ def render_findings(by_mode: dict[str, list[dict]]) -> str:
             evidence = str(finding.get("evidence", "")).strip()
             unseen = finding.get("machine_would_notice") is False
             lines.append(f"{n}. {title}")
+            if finding.get("rewritten"):
+                lines.append("   REWRITTEN BY THE HUMAN")
             if unseen:
                 lines.append("   NO GATE WOULD CATCH THIS")
             if evidence:
@@ -5367,6 +5880,10 @@ contort the plan to satisfy it. Leave that part alone and say why in the plan
 itself, where it will survive: put the reason in the `goal` of the step it
 concerns, in one sentence. A finding you silently ignore will simply be found
 again on the next pass.
+
+A human read these findings before you, and may have rewritten some. A finding
+marked REWRITTEN BY THE HUMAN is the human's word, not the critic's guess: it
+says what the human wants from the plan. Do not argue it away.
 
 # What you may write, into the current directory
 - `tasks.json`      the full revised plan, not a diff
@@ -5437,20 +5954,143 @@ def no_critique_ran(modes: list[str]) -> int:
     return 1
 
 
-def cmd_plan_refine(modes: list[str]) -> int:
-    """保留中の計画を批評し、指摘を返し、それを繰り返す。
+def text_sha256(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def plain_findings(by_mode: dict[str, list[dict]]) -> dict[str, list[dict]]:
+    """人に見せて書き換えさせる形。クリティックの書いた余計なキーは落とす。"""
+    return {mode: [{"title": str(f.get("title", "")).strip(),
+                    "evidence": str(f.get("evidence", "")).strip(),
+                    "machine_would_notice": f.get("machine_would_notice")}
+                   for f in findings]
+            for mode, findings in by_mode.items()}
+
+
+def write_critique_for_human(round_no: int, by_mode: dict[str, list[dict]],
+                             waiting: bool) -> None:
+    """人が読んで直す写しを書く。waiting なら、人が直してよい。
+
+    一時ファイルから置き換える。human/in は sticky だが、ランナーはディレクトリの
+    所有者なので、保守ユーザーが作り直したファイルでも置き換えられる。
+    """
+    value = {"round": round_no, "waiting": waiting,
+             "at": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "modes": by_mode}
+    temporary = CRITIQUE_FOR_HUMAN.with_name(CRITIQUE_FOR_HUMAN.name + ".tmp")
+    temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n",
+                         encoding="utf-8")
+    temporary.chmod(0o660)
+    os.replace(temporary, CRITIQUE_FOR_HUMAN)
+
+
+def settle_critique() -> None:
+    """人を待っている写しを、もう直せないものにする。中身は画面に残す。"""
+    try:
+        value = json.loads(CRITIQUE_FOR_HUMAN.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    if isinstance(value, dict) and value.get("waiting") and isinstance(value.get("modes"), dict):
+        write_critique_for_human(int(value.get("round") or 0), value["modes"], waiting=False)
+
+
+def edited_findings(original: dict[str, list[dict]]) -> dict[str, list[dict]]:
+    """人が直した指摘を読む。書き換えてよいのは title と evidence だけ。
+
+    指摘を消すことも足すこともできない。数が合わない、読めない、題が空の写しは
+    Halt にする。人が直して `loop continue` を流し直せば、もう一度ここを通る。
+    書き換えた指摘には rewritten を付け、プランナーにそう伝える。
+    """
+    where = CRITIQUE_FOR_HUMAN
+    try:
+        value = json.loads(where.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        raise Halt("CRITIQUE", f"{where} is not readable JSON: {error}")
+    modes = value.get("modes") if isinstance(value, dict) else None
+    if not isinstance(modes, dict) or sorted(modes) != sorted(original):
+        raise Halt("CRITIQUE", f"{where} does not hold the modes that were critiqued",
+                   f"expected: {', '.join(sorted(original))}")
+    edited: dict[str, list[dict]] = {}
+    for mode, before in original.items():
+        after = modes[mode]
+        if not isinstance(after, list) or len(after) != len(before):
+            raise Halt("CRITIQUE", f"{where}: {mode} has a different number of findings",
+                       "Only title and evidence may be rewritten; a finding cannot be "
+                       "added or removed.")
+        rows = []
+        for n, (old, new) in enumerate(zip(before, after), 1):
+            title = new.get("title") if isinstance(new, dict) else None
+            evidence = new.get("evidence") if isinstance(new, dict) else None
+            if not isinstance(title, str) or not title.strip() or not isinstance(evidence, str):
+                raise Halt("CRITIQUE", f"{where}: {mode} {n} needs a title and an evidence")
+            row = {**old, "title": title.strip(), "evidence": evidence.strip()}
+            if (row["title"], row["evidence"]) != (old["title"], old["evidence"]):
+                row["rewritten"] = True
+            rows.append(row)
+        edited[mode] = rows
+    return edited
+
+
+def revise_with_findings(requirements: str, tasks: str,
+                         by_mode: dict[str, list[dict]], round_no: int) -> int:
+    """指摘をプランナーに渡し、保留中の提案を改訂させる。0 なら改訂できた。"""
+    language = json.loads(tasks).get("language", "python")
+    report = render_findings(by_mode)
+    ledger("PLAN_REFINE", round=round_no, findings=sum(len(f) for f in by_mode.values()))
+    # 改訂前の提案を控える。plan_with_retry は最初に out/ を空にするので、
+    # 控えが無いと、改訂が失敗したときやエスカレーションしたときに、
+    # リンタを通っていた提案まで失われる。
+    draft = {name: text for name, text in read_proposal().items()
+             if name in PROPOSAL_FILES}
+    # tasks.json は補わない。プランナーが書かなければ、改訂が無いということだ。
+    code = plan_with_retry(
+        lambda feedback: brief_plan_refine(requirements, tasks, report, feedback),
+        "PLAN_REFINE_DRAFT",
+        keep={name: text for name, text in draft.items() if name != "tasks.json"})
+    if code != 0:
+        restore_proposal(draft)
+        ledger("REFINE_RESTORED", round=round_no, reason="revision failed",
+               files=sorted(draft))
+        print(f"the revision failed; the draft from before round {round_no} "
+              f"is back in {PLANNER_OUT}", file=sys.stderr)
+        return code
+    proposal = read_proposal()
+    if ESCALATE_NAME in proposal:
+        REFINE_ESCALATION.write_text(proposal[ESCALATE_NAME], encoding="utf-8")
+        restore_proposal(draft)
+        ledger("REFINE_RESTORED", round=round_no, reason="planner escalated",
+               files=sorted(draft))
+        print("The planner escalated to you rather than revising:\n")
+        print(proposal[ESCALATE_NAME])
+        print(f"\nthe draft from before round {round_no} is back in "
+              f"{PLANNER_OUT}, and the escalation is kept at "
+              f"{REFINE_ESCALATION}.\nRun `plan apply` to apply the draft as "
+              f"it is, or `plan bootstrap` to start over.", file=sys.stderr)
+        return 3
+    # プランナーはファイル全体を書き直すので、言語の印を付け直す。これは
+    # プランナーではなくランナーの印で、失った計画は黙って Python と読まれる。
+    stamp_language(language)
+    return 0
+
+
+def cmd_plan_refine(modes: list[str], resume: bool = False) -> int:
+    """保留中の計画を批評し、指摘をプランナーに返し、それを繰り返す。上限の後も
+    指摘が残れば、人が直せる形で残して止まる。
 
     これで外側の輪が閉じる。これが無いと批評は人が読んで手を打つ報告になり、
-    機械が扱うために作られたちょうどその場所で、人間が輪の中に残る。しかも指摘の
-    宛先は、どのみち人間ではなくプランナーだ。
+    機械が扱うために作られたちょうどその場所で、人間が輪の中に残る。
 
     「保留中の」提案に対して走り、`plan apply` の前で止まる。だから、これが何を
     しても、何かを測った基準に触れることはない。
 
-    limits.critiques で上限を掛ける。このループは1回の呼び出しの中にあるので、
-    台帳ではなくここで数える。上限は「もう少し良くできる」が永遠に続くのを止める。
-    これは小さな話ではない。改訂1回はプランナーの呼び出し1回で、TypeScript の
-    ブリーフでは28分かかった。
+    limits.critiques で改訂の上限を掛ける。上限は「もう少し良くできる」が永遠に
+    続くのを止める。改訂1回はプランナーの呼び出し1回で、TypeScript のブリーフでは
+    28分かかった。
+
+    上限の後も指摘が残って止まるときは、どのみち人が `loop continue` を打つ。
+    そこで人が指摘を読み、title と evidence を書き換えられるようにする。
+    クリティックは計画と要件しか見ておらず、的を外すことがある。resume は人が
+    書き換えた指摘でプランナーに1回だけ改訂させ、批評はもう回さない。書き換えが
+    無ければ、何もせずに提案を残す。どちらも、その後は `plan apply` に進む。
     """
     pending = PLANNER_OUT / "tasks.json"
     if not pending.is_file():
@@ -5461,70 +6101,81 @@ def cmd_plan_refine(modes: list[str]) -> int:
 
     requirements = REQUIREMENTS.read_text(encoding="utf-8") \
         if REQUIREMENTS.is_file() else ""
-    cap = LIMITS["critiques"]
+    if resume:
+        return resume_refine(requirements, pending)
 
+    cap = LIMITS["critiques"]
     for round_no in range(1, cap + 2):
         tasks = pending.read_text(encoding="utf-8")
         load_settings(json.loads(tasks))
-        language = json.loads(tasks).get("language", "python")
 
         by_mode = run_critique(modes, tasks)
         if not by_mode:
             return no_critique_ran(modes)
+        by_mode = plain_findings(by_mode)
         total = sum(len(f) for f in by_mode.values())
-        report = render_findings(by_mode)
         print(f"\n=== critique {round_no} of at most {cap + 1} ===")
-        print(report)
+        print(render_findings(by_mode))
 
         if total == 0:
+            write_critique_for_human(round_no, by_mode, waiting=False)
             ledger("CRITIQUE_CLEAN", round=round_no, modes=sorted(by_mode))
             print("the critic found nothing left. That is not approval -- the "
                   "gates and the human decide that.")
             return 0
 
         if round_no > cap:
+            REFINE_STATE.parent.mkdir(parents=True, exist_ok=True)
+            REFINE_STATE.write_text(json.dumps(
+                {"round": round_no, "tasks_sha256": text_sha256(tasks), "findings": by_mode},
+                ensure_ascii=False), encoding="utf-8")
+            write_critique_for_human(round_no, by_mode, waiting=True)
             ledger("REFINE_CAP", round=round_no, findings=total)
             print(f"\n{total} finding(s) still standing after {cap} revision(s). "
-                  f"The proposal is left as it is; read it and decide.",
-                  file=sys.stderr)
+                  f"The proposal is left as it is. Rewrite the title or the evidence "
+                  f"of any finding in {CRITIQUE_FOR_HUMAN} and run "
+                  f"`plan refine --resume` to have the planner revise once against "
+                  f"your wording, or apply the proposal as it is.", file=sys.stderr)
             return 4
 
-        ledger("PLAN_REFINE", round=round_no, findings=total)
-        # 改訂前の提案を控える。plan_with_retry は最初に out/ を空にするので、
-        # 控えが無いと、改訂が失敗したときやエスカレーションしたときに、
-        # リンタを通っていた提案まで失われる。
-        draft = {name: text for name, text in read_proposal().items()
-                 if name in PROPOSAL_FILES}
-        # tasks.json は補わない。プランナーが書かなければ、改訂が無いということだ。
-        code = plan_with_retry(
-            lambda feedback: brief_plan_refine(requirements, tasks, report, feedback),
-            "PLAN_REFINE_DRAFT",
-            keep={name: text for name, text in draft.items() if name != "tasks.json"})
+        # 上限の前の回は、クリティックの指摘のまま、人を待たずに改訂させる。
+        write_critique_for_human(round_no, by_mode, waiting=False)
+        code = revise_with_findings(requirements, tasks, by_mode, round_no)
         if code != 0:
-            restore_proposal(draft)
-            ledger("REFINE_RESTORED", round=round_no, reason="revision failed",
-                   files=sorted(draft))
-            print(f"the revision failed; the draft from before round {round_no} "
-                  f"is back in {PLANNER_OUT}", file=sys.stderr)
             return code
-        proposal = read_proposal()
-        if ESCALATE_NAME in proposal:
-            REFINE_ESCALATION.write_text(proposal[ESCALATE_NAME], encoding="utf-8")
-            restore_proposal(draft)
-            ledger("REFINE_RESTORED", round=round_no, reason="planner escalated",
-                   files=sorted(draft))
-            print("The planner escalated to you rather than revising:\n")
-            print(proposal[ESCALATE_NAME])
-            print(f"\nthe draft from before round {round_no} is back in "
-                  f"{PLANNER_OUT}, and the escalation is kept at "
-                  f"{REFINE_ESCALATION}.\nRun `plan apply` to apply the draft as "
-                  f"it is, or `plan bootstrap` to start over.", file=sys.stderr)
-            return 3
-        # プランナーはファイル全体を書き直すので、言語の印を付け直す。これは
-        # プランナーではなくランナーの印で、失った計画は黙って Python と読まれる。
-        stamp_language(language)
 
     return 4   # 届かない。ループは必ず戻る
+
+
+def resume_refine(requirements: str, pending: Path) -> int:
+    """上限の後に残った指摘を、人が書き換えたものに替えて、1回だけ改訂させる。
+
+    批評はもう回さない。上限は使い切っていて、人が読んだ指摘に答えた改訂を、
+    人の読んでいない指摘でまた曲げさせない。書き換えが1つも無ければ改訂もしない。
+    どちらも 0 で戻り、`loop continue` は提案を適用する。
+    """
+    try:
+        state = json.loads(REFINE_STATE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        print("no critique is waiting for you; nothing to resume")
+        return 0
+    tasks = pending.read_text(encoding="utf-8")
+    if text_sha256(tasks) != state.get("tasks_sha256"):
+        raise Halt("CRITIQUE", "the pending proposal changed after it was critiqued",
+                   f"Remove {REFINE_STATE} to apply the proposal as it is now.")
+    edited = edited_findings(state["findings"])
+    # 読めた時点で控えを消す。改訂が失敗しても、次の `loop continue` は
+    # 同じ指摘で改訂し直さず、下書きを適用する。
+    REFINE_STATE.unlink()
+    settle_critique()
+    rewritten = [f"{mode} {n}" for mode, rows in edited.items()
+                 for n, row in enumerate(rows, 1) if row.get("rewritten")]
+    ledger("FINDINGS_EDITED", round=state["round"], rewritten=rewritten)
+    if not rewritten:
+        print("no finding was rewritten; the proposal is left as it is")
+        return 0
+    load_settings(json.loads(tasks))
+    return revise_with_findings(requirements, tasks, edited, state["round"])
 
 
 def cmd_critique(modes: list[str]) -> int:
@@ -5572,6 +6223,56 @@ def cmd_critique(modes: list[str]) -> int:
     return 4
 
 
+def archive_plan() -> str | None:
+    """今の計画を plan/archive/<番号>/ へ移してコミットする。移せなければ理由を返す。
+
+    同じリポジトリで2つ目の要件を走らせるための経路だ。新しい計画のステップ id は
+    前の計画と重なる（どちらも S1 から始まる）。台帳が残ると、前の計画の GREEN を
+    新しい S1 の緑と読む。だから台帳ごと移し、新しい台帳は空から始める。前の計画が
+    書いたコードとテストは HEAD に残り、次の計画からは既存のものとして見える。
+
+    途中まで緑の計画は移さない。緑のステップのコードは、残りのステップを前提に
+    書かれている。続けるか捨てるかは人が決める。緑のステップが1つも無い計画は
+    移してよい。コードを何も残していない。
+    """
+    try:
+        tasks = json.loads((PLAN / "tasks.json").read_text(encoding="utf-8"))
+        ids = {s["id"] for s in tasks["steps"]}
+    except (OSError, ValueError, KeyError, TypeError) as bad:
+        return f"refusing: the current plan cannot be read ({bad})"
+    done = green_steps()
+    if done and ids - done:
+        return (f"refusing: {', '.join(sorted(done))} already green but "
+                f"{', '.join(sorted(ids - done))} not; a bootstrap replaces the plan, "
+                f"which would orphan them. Finish the plan with `run --all` first")
+    dirty = touched_paths()
+    if dirty:
+        return ("refusing: the working tree is dirty; `reset <step>` first\n"
+                + "\n".join(sorted(dirty)))
+
+    numbers = [int(p.name) for p in PLAN_ARCHIVE.glob("*") if p.name.isdigit()] \
+        if PLAN_ARCHIVE.is_dir() else []
+    dest = PLAN_ARCHIVE / f"{max(numbers, default=0) + 1:03d}"
+    dest.mkdir(parents=True)
+    for path in (*PROPOSAL_FILES.values(), LEDGER, ESCALATION, PLANNER_ESCALATION):
+        if path.exists():
+            path.rename(dest / path.name)
+    # 契約と凍結のマニフェストはステップ id で引く。前の計画のものが残ると、
+    # 新しい計画の同じ id のステップに前の契約が渡る。
+    for name in ("contracts", "freeze"):
+        shutil.rmtree(STATE / name, ignore_errors=True)
+    REFINE_ESCALATION.unlink(missing_ok=True)
+
+    where = dest.relative_to(PROJECT).as_posix()
+    ledger("PLAN_ARCHIVE", to=where, steps=sorted(done))
+    plan = PLAN.relative_to(PROJECT).as_posix()
+    run(["git", "add", "-A", "--", plan], check=True)
+    run(["git", "commit", "-q", "-m", f"plan: archive the previous plan to {where}",
+         "--", plan], check=True)
+    publish("the archived plan")
+    return None
+
+
 def cmd_plan_bootstrap(source: str | None, language: str = "python") -> int:
     """人間が書いた要件のファイルから、最初の計画をプランナーに頼む。
 
@@ -5587,15 +6288,17 @@ def cmd_plan_bootstrap(source: str | None, language: str = "python") -> int:
         print("write them there, or pass --from <path>", file=sys.stderr)
         return 1
 
-    # bootstrap は計画全体を置き換える。すでに緑のステップがあると、台帳は
-    # もう存在しない条件に対する作業を記述することになる。検査が緑のステップの
-    # 編集を拒む（P5）のと同じ理由だ。
-    done = green_steps()
-    if done:
-        print(f"refusing: {', '.join(sorted(done))} already green", file=sys.stderr)
-        print("a bootstrap replaces the plan, which would orphan them. Start a "
-              "fresh project directory instead.", file=sys.stderr)
-        return 1
+    # bootstrap は計画全体を置き換える。前の計画は台帳ごと plan/archive/ へ移し、
+    # 計画の無い状態から起こす。提案の検査（B1）も、最初のステップの前の
+    # スイートの確かめも、計画が無いことを前提にしている。
+    if (PLAN / "tasks.json").exists():
+        refused = archive_plan()
+        if refused:
+            print(refused, file=sys.stderr)
+            return 1
+    # 前の計画への批評は、これから書く計画とは関係が無い。
+    REFINE_STATE.unlink(missing_ok=True)
+    CRITIQUE_FOR_HUMAN.unlink(missing_ok=True)
 
     # ブリーフを組み立てる後ではなく前に設定する。environment_facts はテストの
     # コマンドとツールキットを報告し、配置の段落はソースファイルがそもそもどんな
@@ -5706,6 +6409,9 @@ def cmd_plan_apply() -> int:
     PLANNER_ESCALATION.unlink(missing_ok=True)
 
     ledger("PLAN_APPLY", files=applied)
+    # 人を待っていた批評は、適用した計画には効かない。直せる印を外す。
+    REFINE_STATE.unlink(missing_ok=True)
+    settle_critique()
 
     # 計画だけをコミットし、ほかは何も含めない。提案はふつう、止まったステップの
     # 変更が作業ツリーに残ったまま届く。それを同じコミットに入れると、捨てた試行を
@@ -5945,7 +6651,12 @@ def run_step(step_id: str, unvalidated: bool = False) -> int:
         broken = ""
         for write_attempt in range(1, LIMITS["test_writes"] + 1):
             set_writable(tests=True, src=False)
-            call_solver("TEST_WRITE", brief_test_write(step, context, broken))
+            # files_test のうち HEAD にあるものは、計画より前からあるテストで、この
+            # ステップが丸ごと書き直す。L17 があるので、ほかのステップのテストではない。
+            replaced = sorted(head_sources(step["files_test"]))
+            if replaced and write_attempt == 1:
+                ledger("TESTS_REPLACED", step=step_id, files=replaced)
+            call_solver("TEST_WRITE", brief_test_write(step, context, broken, replaced))
             assert_touched("TEST_WRITE", step["files_test"])
             assert_written("TEST_WRITE", step["files_test"])
             ledger("TEST_WRITE", step=step_id, ok=True, attempt=write_attempt)
@@ -5994,10 +6705,7 @@ def run_step(step_id: str, unvalidated: bool = False) -> int:
             # それは、TypeScript を書けないモデルとまったく同じに見えた。
             broken = broken + chr(10) + chr(10) + ANSI.sub("", red.output)[-2000:]
             set_writable(tests=True, src=True)
-            for path in step["files_test"] + step["files_write"]:
-                (PROJECT / path).unlink(missing_ok=True)
-            run(["git", "checkout", "--"] + step["files_test"] + step["files_write"],
-                check=False)
+            restore_to_head(step["files_test"] + step["files_write"])
         else:
             raise Halt("TEST_WRITE",
                        f"the tests still do not compile after "
@@ -6300,7 +7008,14 @@ def cmd_reset(step_id: str) -> int:
     順番に意味がある。chmod の前に引き取る（ランナーは所有しないものを chmod
     できない）。git の前に chmod する（FREEZE は tests/ を読み取り専用にし、git は
     書けないディレクトリの中のファイルを消せない）。
+
+    柵のディレクトリは最後に作り直す。取り込んだブランチでは、柵に追跡された
+    ファイルが1つも無いことがある。そのとき `git clean` はソルバーの書いた
+    ファイルごと柵を消し、次のステップは柵が無いまま始まろうとして落ちる。
+    取り込んだ Unity のプロジェクトで、テストの柵がこれで消えた。
     """
+    for fence in (TESTS, SRC):
+        fence.mkdir(parents=True, exist_ok=True)
     adopt(TESTS, SRC)
     set_writable(tests=True, src=True)
 
@@ -6312,6 +7027,9 @@ def cmd_reset(step_id: str) -> int:
 
     run(["git", "reset", "--hard", "HEAD"], check=True)
     run(["git", "clean", "-fdq"], check=True)   # -x は付けない。.venv と .runner は残す
+    for fence in (TESTS, SRC):
+        fence.mkdir(parents=True, exist_ok=True)
+    set_writable(tests=True, src=True)
 
     if kept:
         LEDGER.write_bytes(kept)
@@ -6420,6 +7138,11 @@ def main() -> int:
                        "the planner, and repeat until it is clean or capped")
     refine_cmd.add_argument("--mode", action="append", choices=list(CRITIQUE_MODES),
                             help="repeatable; default is every mode")
+    refine_cmd.add_argument("--resume", action="store_true",
+                            help=f"after the cap: have the planner revise once against "
+                                 f"the findings the human rewrote in {CRITIQUE_FOR_HUMAN}, "
+                                 f"without another critique; does nothing when no "
+                                 f"finding was rewritten")
 
     args = parser.parse_args()
 
@@ -6448,7 +7171,7 @@ def main() -> int:
             if args.plan_cmd == "propose":
                 return cmd_plan_propose(args.step)
             if args.plan_cmd == "refine":
-                return cmd_plan_refine(args.mode or list(CRITIQUE_MODES))
+                return cmd_plan_refine(args.mode or list(CRITIQUE_MODES), resume=args.resume)
             if args.plan_cmd == "show":
                 return cmd_plan_show()
             return cmd_plan_apply()

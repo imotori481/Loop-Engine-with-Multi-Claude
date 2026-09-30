@@ -23,7 +23,9 @@ ROLES = ("planner", "critic", "solver")
 # 変えるときはここも合わせる。
 LOOP_HEADER = re.compile(r"^=== loop (\w+) 開始 \((\d{4}-\d\d-\d\d) (\d\d:\d\d:\d\d)\)")
 STEP_HEADER = re.compile(r"^--- loop\.py .* \((\d{4}-\d\d-\d\d) (\d\d:\d\d:\d\d)\)$")
-USAGE = re.compile(r"^\[USAGE\] who=(\w+) .*? in=(\d+) out=(\d+)")
+USAGE = re.compile(r"^\[USAGE\] who=(\w+) ")
+FIELD = re.compile(r"(\w+)=(\S+)")
+KINDS = ("input", "cache_write", "cache_read", "output")
 CRITIQUE_HEADER = "=== critique "
 ALL_GREEN = "全ステップが緑"
 
@@ -57,6 +59,40 @@ def project_logs(logs: str, project: str) -> list[str]:
                   if name.fullmatch(os.path.basename(path)))
 
 
+def add_usage(loop: dict, line: str) -> None:
+    """`[USAGE]` の1行を、役割ごとのトークン数、種類別、USD に足す。
+
+    read と write を持たない行（それを出す前のランナーのもの）が1行でもあれば、
+    種類別は None にする。入力のうちキャッシュの分が分からない。
+    """
+    fields = dict(FIELD.findall(line))
+    who = fields.get("who")
+    if who not in ROLES:
+        return
+    try:
+        tokens_in, tokens_out = int(fields["in"]), int(fields["out"])
+    except (KeyError, ValueError):
+        return
+    loop["tokens"][who] += tokens_in + tokens_out
+    loop["calls"] += 1
+    try:
+        loop["usd"][who] += float(fields.get("usd", 0))
+    except ValueError:
+        pass
+    if loop["kinds"] is None:
+        return
+    try:
+        read, write = int(fields["read"]), int(fields["write"])
+    except (KeyError, ValueError):
+        loop["kinds"] = None
+        return
+    kinds = loop["kinds"][who]
+    kinds["input"] += tokens_in - read - write
+    kinds["cache_write"] += write
+    kinds["cache_read"] += read
+    kinds["output"] += tokens_out
+
+
 def current_loop(paths: list[str]) -> dict | None:
     """最後の `loop go` から後のログを足し、今の回のトークン数と最後の指摘を返す。
 
@@ -73,7 +109,9 @@ def current_loop(paths: list[str]) -> dict | None:
         header = LOOP_HEADER.match(lines[0]) if lines else None
         if header and header.group(1) == "go":
             loop = {"started": stamp(header.group(2), header.group(3)), "calls": 0,
-                    "tokens": dict.fromkeys(ROLES, 0), "critique": None}
+                    "tokens": dict.fromkeys(ROLES, 0),
+                    "kinds": {role: dict.fromkeys(KINDS, 0) for role in ROLES},
+                    "usd": dict.fromkeys(ROLES, 0.0), "critique": None}
         if loop is None:
             continue
         at = None
@@ -88,10 +126,8 @@ def current_loop(paths: list[str]) -> dict | None:
             step = STEP_HEADER.match(line)
             if step:
                 at = stamp(step.group(1), step.group(2))
-            usage = USAGE.match(line)
-            if usage and usage.group(1) in ROLES:
-                loop["tokens"][usage.group(1)] += int(usage.group(2)) + int(usage.group(3))
-                loop["calls"] += 1
+            if USAGE.match(line):
+                add_usage(loop, line)
             if line.startswith(CRITIQUE_HEADER):
                 block = [line]
         if block is not None:
@@ -105,6 +141,16 @@ def outcome(running: bool, last: str | None) -> str:
     return "green" if last and ALL_GREEN in last else "stopped"
 
 
+def findings(logs: str) -> dict | None:
+    """plan refine が書いた、人が直す指摘の写し。human/in は humanw で読める。
+
+    bootstrap が消すので、あれば今の計画への批評だ。waiting なら人が直してよい。
+    """
+    path = os.path.join(os.path.dirname(logs), "human", "in", "CRITIQUE.json")
+    value = read(path, json.load)
+    return value if isinstance(value, dict) and isinstance(value.get("modes"), dict) else None
+
+
 def main(argv: list[str]) -> int:
     project, active, logs = argv[1:4]
     running = active == "true"
@@ -114,7 +160,8 @@ def main(argv: list[str]) -> int:
         loop["outcome"] = outcome(running, last)
     print(json.dumps({"project": project, "running": running,
                       "now": read(os.path.join(logs, "now.json"), json.load),
-                      "last": last, "loop": loop}, ensure_ascii=False))
+                      "last": last, "loop": loop, "findings": findings(logs)},
+                     ensure_ascii=False))
     return 0
 
 

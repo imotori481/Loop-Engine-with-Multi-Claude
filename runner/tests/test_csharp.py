@@ -301,6 +301,24 @@ namespace Logic
 }
 """)
 
+    def test_a_nested_type_is_written_inside_its_outer_type(self):
+        step = {"files_write": ["src/Logic/Board.cs"],
+                "contracts": {"provides": [
+                    "src/Logic/Board.cs: class Board",
+                    "src/Logic/Board.cs: struct Board.Cell { public int X; }",
+                    "src/Logic/Board.cs: Board.Cell.Cell(int x)",
+                ]}}
+        text = loop.generate_stub(step, [], {})["src/Logic/Board.cs"]
+        self.assertIn("""    public class Board
+    {
+        public struct Cell
+        {
+            public int X;
+            public Cell(int x) { throw new System.NotImplementedException("__stub__"); }
+        }
+    }
+""", text)
+
     def test_an_enum_keeps_its_members(self):
         files = loop.generate_stub(self.STEP, [], {})
         self.assertIn("    public enum Cell\n    {\n        Empty, Wall\n    }",
@@ -492,6 +510,107 @@ class WhatTheCodeAlreadyDeclares(CSharp):
                              ["src/Logic/Cell.cs: enum Cell { Empty } -- namespace Logic"])
 
 
+class ThePlannerIsGivenShortLines(CSharp):
+    """bootstrap のブリーフでは、メンバーの行から引数と戻り値の型を外す。
+
+    取り込んだ Unity のプロジェクトでは、bootstrap の呼び出しが1回約11万の
+    キャッシュ書き込みを抱えて7〜12ターン回った。requires の行は名前で比べ、
+    ソルバーには HEAD の署名を渡すので、プランナーに型は要らない。
+    """
+
+    PATH = "src/Logic/Board.cs"
+
+    def setUp(self):
+        super().setUp()
+        p = mock.patch.object(loop, "UNITY_REFS", Path("/nonexistent/unity-refs"))
+        p.start()
+        self.addCleanup(p.stop)
+        self.full = loop.csharp_declarations(EXISTING_CS, self.PATH)
+
+    def test_members_lose_their_types_and_the_rest_is_kept(self):
+        at, where = f"{self.PATH}: ", " -- namespace Game.Logic"
+        self.assertEqual([loop.csharp_short_declaration(line) for line in self.full], [
+            at + "class Board" + where,
+            at + "Board.Width { get; }" + where,
+            at + "Board.Height { get; }" + where,
+            at + "const Board.Brace" + where,
+            at + "static readonly Board.Empty" + where,
+            at + "Board.Board(width, height)" + where,
+            at + "static Board.Score(board)" + where,
+            at + "Board.Area()" + where,
+            at + "Board.Runtime()" + where,
+            at + "Board.Helper(n)" + where,
+            at + "interface IShape { int Area(); }" + where,
+            at + "enum Cell { Empty, Wall }" + where,
+        ])
+
+    def test_parameters_keep_their_modifiers_and_lose_defaults_and_generics(self):
+        cases = (
+            ("src/B.cs: static bool Board.TryGet(this Board b, out int value, "
+             "Dictionary<int, string> map, string sep = \",\") -- namespace L",
+             "src/B.cs: static Board.TryGet(this b, out value, map, sep) -- namespace L"),
+            ("src/B.cs: T Board.Get<T>(int i) where T : class",
+             "src/B.cs: Board.Get<T>(i)"),
+            ("src/B.cs: void Board.Log(params object[] args)",
+             "src/B.cs: Board.Log(params args)"),
+        )
+        for full, short in cases:
+            with self.subTest(full=full):
+                self.assertEqual(loop.csharp_short_declaration(full), short)
+
+    def test_a_short_line_declares_the_same_name(self):
+        for line in self.full:
+            with self.subTest(line=line):
+                self.assertEqual(loop.declared_name(loop.csharp_short_declaration(line)),
+                                 loop.declared_name(line))
+
+    def plan(self, requires):
+        step = {
+            "id": "S1", "kind": "skeleton", "goal": "g", "depends_on": [],
+            "contracts": {"requires": requires, "invariants": [],
+                          "provides": ["src/Logic/Deck.cs: static int Deck.Total(Board board)"]},
+            "acceptance": [{"case": c, "given": "g", "then": "1"}
+                           for c in ("normal", "boundary", "error")],
+            "files_write": ["src/Logic/Deck.cs"], "files_test": ["tests/DeckTests.cs"],
+            "expected_tests": 3, "max_attempts": 3, "review_gate": False,
+        }
+        with mock.patch.dict(loop.LAYOUT, loop.LAYOUT_DEFAULT), \
+             mock.patch.object(loop, "existing_contracts", return_value=self.full):
+            return step, loop.validate_plan({"language": "csharp", "steps": [step]})
+
+    def test_a_short_line_copied_into_requires_passes_l3(self):
+        short = [loop.csharp_short_declaration(line) for line in self.full
+                 if loop.declared_name(line) in ("Board", "Board.Score")]
+        _, problems = self.plan(short)
+        self.assertFalse(any(p.startswith("L3") for p in problems), problems)
+
+    def test_the_solver_still_gets_the_signature_from_head(self):
+        step, _ = self.plan([f"{self.PATH}: static Board.Score(board) -- namespace Game.Logic"])
+        with mock.patch.object(loop, "existing_contracts", return_value=self.full):
+            self.assertEqual(loop.existing_requirements(step, set()),
+                             [f"{self.PATH}: static int Board.Score(Board board) -- namespace Game.Logic"])
+
+    def facts(self, **kwargs) -> str:
+        with mock.patch.object(loop, "existing_declarations",
+                               return_value={self.PATH: self.full}), \
+             mock.patch.object(loop, "dotnet_projects", side_effect=OSError("no feed")), \
+             mock.patch.dict(os.environ, {"DISPLAY": ""}), \
+             mock.patch("loop.run", return_value=SimpleNamespace(
+                 returncode=0, stdout="8.0.131", stderr="")):
+            return loop.environment_facts(**kwargs)
+
+    def test_only_the_bootstrap_brief_is_short(self):
+        short = self.facts(short=True)
+        self.assertIn("static Board.Score(board)", short)
+        self.assertIn("without their parameter and return types", short)
+        full = self.facts()
+        self.assertIn("static int Board.Score(Board board)", full)
+        self.assertNotIn("without their parameter and return types", full)
+        with mock.patch.object(loop, "environment_facts", return_value="") as facts:
+            loop.brief_plan_bootstrap("要件")
+        facts.assert_called_once_with(short=True)
+
+
 class TheStubKeepsTheExistingCSharp(CSharp):
     """既存のファイルでは、provides のメンバーの本体だけを差し替える。"""
 
@@ -561,6 +680,32 @@ class TheStubKeepsTheExistingCSharp(CSharp):
                                 "int Board.Width { get; }", "int Board.Apply(int rule)")
         self.assertEqual(kept_the_rest(text, step), [])
 
+    def test_a_nested_type_goes_whole_at_the_end_of_its_outer_type(self):
+        # 取り込んだ Unity のプロジェクトの S1。ソルバーに回すと、入れ子のクラスを
+        # private のまま置き、static メソッドをその中に入れた。
+        step, text = self.build("static int Board.Total(int n)",
+                                "class Board.Cursor",
+                                "Board.Cursor.Cursor(int start)",
+                                "int Board.Cursor.Position",
+                                "int Board.Cursor.Advance(int steps)")
+        self.assertIn(
+            "        public int Helper(int n) { return n + 1; }\n\n"
+            '        public static int Total(int n) { throw new System.NotImplementedException("__stub__"); }\n'
+            "        public class Cursor\n"
+            "        {\n"
+            '            public Cursor(int start) { throw new System.NotImplementedException("__stub__"); }\n'
+            "            public int Position;\n"
+            '            public int Advance(int steps) { throw new System.NotImplementedException("__stub__"); }\n'
+            "        }\n"
+            "    }\n", text)
+        self.assertEqual(kept_the_rest(text, step), [])
+
+    def test_a_nested_type_the_file_already_has_goes_back_to_the_solver(self):
+        original = EXISTING_CS.replace("public int Helper(int n)",
+                                       "public class Cursor { }\n        public int Helper(int n)")
+        self.assertIsNone(self.build("class Board.Cursor", "int Board.Cursor.Position",
+                                     original=original)[1])
+
 
 def kept_the_rest(after: str, step: dict) -> list[str]:
     """EXISTING_CS を after に書き換えたときの stub_kept_the_rest。"""
@@ -624,7 +769,7 @@ class WhatThePlannerIsTold(CSharp):
              mock.patch.object(loop, "SRC", project / "Assets" / "Source"), \
              mock.patch.object(loop, "TESTS", project / "Assets" / "Tests"), \
              mock.patch.dict(loop.LAYOUT, {"src": "Assets/Source", "tests": "Assets/Tests"}), \
-             mock.patch.object(loop, "existing_contracts", return_value=[]), \
+             mock.patch.object(loop, "existing_declarations", return_value={}), \
              mock.patch.object(loop, "dotnet_projects", side_effect=OSError("no feed")), \
              mock.patch.dict(os.environ, {"DISPLAY": ""}), \
              mock.patch("loop.run", return_value=SimpleNamespace(

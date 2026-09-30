@@ -350,6 +350,16 @@ sudo -u runner /srv/loop/bin/smoke-critic
 
 `smoke-pytest` は、ソルバーが pytest を実行**できない**ことを確かめる。
 
+3役の `claude -p` は、`--tools` で使えるツールそのものを許可するものだけに絞り、
+`--system-prompt` で既定のシステムプロンプトを役ごとの短いものに置き換える。
+どちらも1ターンごとに送る固定の文脈を減らすためのもの。効き目は、`smoke-planner` と
+`smoke-solver` が端末に出す JSON の `usage` で見る。
+
+| 項目 | 意味 |
+|---|---|
+| `cache_creation_input_tokens` | キャッシュ書き込み。固定の文脈が減れば下がる |
+| `cache_read_input_tokens` | キャッシュ読み取り。ターンごとに固定の文脈を読み直す分 |
+
 ### 2-10. 走らせる（箱）
 
 保守ユーザーが `loop` コマンドで操作する。`25-runner.sh` が `/usr/local/bin/loop` に置く。
@@ -362,6 +372,8 @@ loop now                             # いまの作業を JSON で出す（ダ�
 loop log                             # 走行ログを追う。Ctrl-C で抜けても走行は続く
 loop continue                        # 止まったところから続ける
 loop stop                            # 走行を止める
+loop findings                        # クリティックの指摘を出す
+loop findings set                    # 指摘1件を書き換える。標準入力に JSON を渡す
 ```
 
 `loop go` は要件を `/srv/loop/human/in/REQUIREMENTS.md` に置き、次を順に裏で流す。
@@ -371,18 +383,36 @@ loop stop                            # 走行を止める
 3. `plan apply`
 4. `run --all`
 
+前の要件の計画が全部緑なら、`plan bootstrap` がそれを台帳ごと `plan/archive/<番号>/` へ移してから
+次の計画を起こす。前の計画のコードとテストは、次の計画から既存のものとして見える。
+途中まで緑の計画があるときは移さずに止まる。先に `loop continue` で終える。
+
 次の場合は、適用や実行に進まずに止まる。何を読めばよいかはログの最後の行と `loop status` に出る。
 
 | 止まる場面 | 次の手 |
 |---|---|
+| 途中まで緑の計画がある | `loop continue` で終えてから `loop go` |
 | プランナーが計画を書かずにエスカレーションした | 書かれた問いを読み、要件を直して `loop go` |
-| `plan refine` のあとも critic の指摘が残った | 指摘を読む。そのまま適用するなら `loop continue` |
+| `plan refine` のあとも critic の指摘が残った | 指摘を読み、的外れなものを書き換えてから `loop continue`。そのまま適用するなら何も書き換えずに `loop continue` |
 | `plan apply` が提案を拒んだ | 違反を読み、要件を直して `loop go` |
 | `run --all` が止まった | `loop status` のエスカレーションを読む |
 | 利用枠が尽きた | 枠が戻ってから `loop continue`。途中のステップがあれば先に `loop raw reset <ステップ>` |
 
-`loop continue` は、適用待ちの提案があれば `plan apply` を流してから `run --all` を流す。
-提案が無ければ `run --all` だけを流す。
+`loop continue` は、適用待ちの提案があれば `plan refine --resume` と `plan apply` を流してから
+`run --all` を流す。提案が無ければ `run --all` だけを流す。`--resume` は、人が書き換えた指摘が
+あれば、プランナーに1回だけ改訂させる。クリティックはもう呼ばない。書き換えが無ければ何もしない。
+
+クリティックの指摘は `/srv/loop/human/in/CRITIQUE.json` にある。`title` と `evidence` は日本語で、
+書き換えられるのは、上限の後も指摘が残って止まっているあいだだけだ。ダッシュボードからも直せる。
+端末では `loop findings` で番号を見て、`loop findings set` に1件ずつ渡す。番号は0から数える。
+
+```bash
+echo '{"mode": "trace", "index": 0, "title": "<題>", "evidence": "<根拠>"}' | loop findings set
+```
+
+ダッシュボードは SSH で `sudo -n /usr/local/bin/loop continue` を流す。端末の無い SSH ではパスワードを
+訊けないので、`25-runner.sh` が `/etc/sudoers.d/loop-continue` に、保守ユーザーがこの1つだけを
+パスワード無しで流せる規則を置く。引数まで固定するので、ほかのコマンドには効かない。
 
 走行は systemd の一時ユニット `loop-run` として runner で動く。SSH が切れても止まらず、
 二重には起動できない。`loop stop` は3役の呼び出しも含めてまとめて止める。
@@ -911,6 +941,7 @@ VirtualBox 構成の手順は `c4374f4` から拾える。
 
 ## 更新履歴
 
+- 2026/09/28: 3役の起動でツールとシステムプロンプトを絞ることと、その確かめ方を §2-9 に追加
 - 2026/09/27: Unity の参照アセンブリの置き場（§2-11）と、それで測る `probe-unity`（§2-8）を追加
 - 2026/09/27: .NET を凍結する `36-dotnet.sh` と `smoke-dotnet` を §2-8 に追加
 - 2026/09/26: §2-10 を `loop` コマンドで走らせる手順に置き換え

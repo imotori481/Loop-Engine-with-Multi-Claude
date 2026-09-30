@@ -70,7 +70,11 @@ trap 'rm -rf "$HOME"' EXIT
 
 cd "$OUT"
 
-# --safe-mode / --setting-sources "" / --no-session-persistence
+# planner-run と同じく、既定のシステムプロンプトを、ブリーフが唯一の入力である
+# ことと作業ディレクトリの場所だけに置き換える。
+SYSTEM_PROMPT="You are the critic in an automated build loop. The user message is your brief and your only input. Your working directory is $OUT; a relative path in the brief is relative to it. Use the Read and Write tools with absolute paths. Write only the files the brief asks for. No one will answer questions, so do not ask any. When done, reply as the brief says."
+
+# --safe-mode/ --setting-sources "" / --no-session-persistence
 #     プランナーと同じく、ブリーフだけを入力にする（RUNNER_SPEC 5 章）。
 # --output-format json
 #     結果の文と消費量を1つの JSON で返す。ランナーが消費量を台帳に残し、
@@ -78,6 +82,10 @@ cd "$OUT"
 # --allowedTools "Read Write"
 #     標準入力でブリーフを読み、ここに指摘のファイルを1つ書く。Edit は許さない。
 #     ここに書き直すべきものは無い。
+# --tools "Read,Write"
+#     使えるツールそのものを同じ2つに絞り、ほかのツールの定義を文脈から外す。
+# --system-prompt
+#     既定のシステムプロンプトを上の短いものに置き換える。
 set +e
 timeout --kill-after=30 "$LIMIT" claude -p \
   "${role_args[@]}" \
@@ -86,6 +94,8 @@ timeout --kill-after=30 "$LIMIT" claude -p \
   --setting-sources "" \
   --no-session-persistence \
   --allowedTools "Read Write" \
+  --tools "Read,Write" \
+  --system-prompt "$SYSTEM_PROMPT" \
   < "$BRIEF"
 rc=$?
 set -e

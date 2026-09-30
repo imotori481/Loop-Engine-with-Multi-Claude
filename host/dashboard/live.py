@@ -52,19 +52,46 @@ class Live:
             self._cached, self._at = self._ask(), time.monotonic()
             return self._cached
 
+    def _run(self, command: list[str], stdin: str | None = None) -> subprocess.CompletedProcess:
+        """箱で固定のコマンドを流す。届かなければ ValueError。"""
+        host = self.ssh_host()
+        if host is None:
+            raise ValueError("live view is disabled in config.json")
+        argv = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", host, *command]
+        try:
+            return subprocess.run(argv, shell=False, capture_output=True, text=True,
+                                  encoding="utf-8", input=stdin, timeout=TIMEOUT_SECONDS)
+        except (OSError, subprocess.TimeoutExpired) as error:
+            raise ValueError(f"could not reach the sandbox: {error}")
+
+    def _act(self, command: list[str], stdin: str | None = None) -> str:
+        """箱を書き換えるコマンドを流す。断られたら、箱の言葉で ValueError。"""
+        proc = self._run(command, stdin)
+        with self._lock:
+            self._cached = None
+        lines = (proc.stderr or proc.stdout).strip().splitlines()
+        if proc.returncode != 0:
+            raise ValueError(lines[-1] if lines else f"the sandbox refused ({proc.returncode})")
+        return proc.stdout.strip()
+
+    def rewrite_finding(self, mode: str, index: int, title: str, evidence: str) -> str:
+        """クリティックの指摘1件の title と evidence を書き換える。
+
+        値は標準入力の JSON で渡し、コマンドラインには入れない。何を受け付けるかは
+        箱の loop_findings.py が決める。
+        """
+        request = {"mode": mode, "index": index, "title": title, "evidence": evidence}
+        return self._act(["loop", "findings", "set"], json.dumps(request, ensure_ascii=False))
+
+    def continue_loop(self) -> str:
+        """`loop continue` を流す。sudoers が保守ユーザーにこれだけをパスワード無しで許す。"""
+        return self._act(["sudo", "-n", "/usr/local/bin/loop", "continue"])
+
     def _ask(self) -> dict[str, Any]:
         try:
-            host = self.ssh_host()
+            proc = self._run(["loop", "now"])
         except ValueError as error:
             return {"error": str(error)}
-        if host is None:
-            return {"error": "live view is disabled in config.json"}
-        argv = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", host, "loop", "now"]
-        try:
-            proc = subprocess.run(argv, shell=False, capture_output=True, text=True,
-                                  encoding="utf-8", timeout=TIMEOUT_SECONDS)
-        except (OSError, subprocess.TimeoutExpired) as error:
-            return {"error": f"could not reach the sandbox: {error}"}
         if proc.returncode != 0:
             reason = (proc.stderr or proc.stdout).strip().splitlines()
             return {"error": "could not reach the sandbox"

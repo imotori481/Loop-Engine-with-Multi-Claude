@@ -60,17 +60,27 @@ HOME="$(mktemp -d)"
 export HOME
 trap 'rm -rf "$HOME"' EXIT
 
-# --safe-mode / --setting-sources "" / --no-session-persistence
+# planner-run と同じく、既定のシステムプロンプトを、ブリーフが唯一の入力である
+# ことと作業ディレクトリの場所だけに置き換える。cwd は solver-run が決めている。
+SYSTEM_PROMPT="You are the solver in an automated build loop. The user message is your brief and your only input. Your working directory is $PWD; a relative path in the brief is relative to it. Use the Read, Write and Edit tools with absolute paths, and Grep and Glob to find code already in the project. Change only the files the brief allows. You cannot run commands or tests; the runner runs them after you finish. No one will answer questions, so do not ask any. When done, reply as the brief says."
+
+# --safe-mode/ --setting-sources "" / --no-session-persistence
 #     ブリーフだけを入力にする（RUNNER_SPEC 5 章）。planner-run と同じ。
-# --allowedTools "Read Write Edit"
-#     ファイルを読んで書くだけ。書ける場所は src/ と tests/ で、それを決めるのは
-#     このフラグではなくファイルシステムの権限（40-perms.sh）。
+# --allowedTools "Read Write Edit Grep Glob"
+#     ファイルを探して読んで書くだけ。書ける場所は src/ と tests/ で、それを決めるのは
+#     このフラグではなくファイルシステムの権限（40-perms.sh）。Grep と Glob は
+#     読むだけなので柵は緩まない。これが無いと、ソルバーはブリーフに載らない既存の
+#     ヘルパーを見つけられず、同じ処理の static 関数を新しく書いていた。探すターンの
+#     分トークンは増えるが、成果物の品質を先にとる。
+# --tools "Read,Write,Edit,Grep,Glob"
+#     使えるツールそのものを同じ5つに絞り、ほかのツールの定義を文脈から外す。
+# --system-prompt
+#     既定のシステムプロンプトを上の短いものに置き換える。
 # --output-format json
 #     結果の文と、使ったモデル・トークン数・所要時間を1つの JSON で返す。
 #     ランナーが消費量を台帳に残し、結果の文だけを取り出す。
 # --disallowedTools "Bash"
-#     許可リストに無い時点で -p では拒否される。上の理由を読み手に示すために
-#     明示する。
+#     --tools に無い時点で定義されない。上の理由を読み手に示すために明示する。
 #
 # 上限時間はここで掛ける。ランナーは別 uid で、このプロセスに信号を送れない。
 # `timeout` は 124 で終わる。
@@ -81,8 +91,10 @@ timeout --kill-after=30 "$LIMIT" claude -p \
   --safe-mode \
   --setting-sources "" \
   --no-session-persistence \
-  --allowedTools "Read Write Edit" \
+  --allowedTools "Read Write Edit Grep Glob" \
   --disallowedTools "Bash" \
+  --tools "Read,Write,Edit,Grep,Glob" \
+  --system-prompt "$SYSTEM_PROMPT" \
   < "$BRIEF"
 rc=$?
 set -e

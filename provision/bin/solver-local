@@ -219,18 +219,20 @@ def files_from_brief(brief: str) -> list[str]:
     return paths
 
 
-def current_contents(paths: list[str]) -> str:
+def current_contents(paths: list[str], brief: str) -> str:
     """許されたファイルの、いまの中身。
 
     このバックエンドはリポジトリを読みに行かないので要る。問い合わせは1回で、
-    探しに行けない。codex は探しに行けるので、brief_impl はこれを運ばない。
-    ブリーフに足すのではなくここで読むことで、ブリーフの約束（1ステップ分の
-    情報だけ）は変わらない。
+    探しに行けない。brief_impl は既存のファイルを上限まで載せるが、ほかの位相の
+    ブリーフと、上限を超えたファイルは載せない。ブリーフに `--- <パス> ---` で
+    載っているファイルは、同じ中身を二度渡さない。
     """
     parts = []
     for rel in paths:
         p = Path(rel)
-        if p.is_file():
+        if f"--- {rel} ---\n" in brief:
+            parts.append(f"--- {rel} ---\n(shown above)")
+        elif p.is_file():
             parts.append(f"--- {rel} ---\n{p.read_text(encoding='utf-8')}")
         else:
             parts.append(f"--- {rel} ---\n(does not exist yet)")
@@ -288,7 +290,7 @@ def main() -> int:
 
     user = (brief
             + "\n\n# Current contents of the files you may write\n"
-            + current_contents(allowed)
+            + current_contents(allowed, brief)
             + "\n\n# Output\nReturn JSON: the complete final content of every file"
               " you are changing. Only these paths:\n"
             + "\n".join(allowed) + "\n")

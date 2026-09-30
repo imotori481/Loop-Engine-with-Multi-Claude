@@ -79,6 +79,21 @@ class TokenRuns(DashboardFixture):
             (1, "green", {"planner": 17, "critic": 7, "solver": 7}),
         ])
 
+    def test_each_role_keeps_its_tokens_by_kind_and_its_cost(self):
+        # 合計だけでは、ブリーフが大きいのか、ターンが多いのかが分からない。
+        self.ledger(
+            {"ts": "1", "event": "PLAN_BOOTSTRAP"},
+            {**usage("critic", input_tokens=4, cache_creation_input_tokens=100,
+                     cache_read_input_tokens=120, output_tokens=15), "cost_usd": 0.5},
+            {**usage("critic", cache_read_input_tokens=30, output_tokens=5), "cost_usd": 0.25},
+            usage("solver", input_tokens=1),
+        )
+        run = self.state.snapshot()["token_runs"][0]
+        self.assertEqual(run["kinds"]["critic"],
+                         {"input": 4, "cache_write": 100, "cache_read": 150, "output": 20})
+        self.assertEqual(run["tokens"]["critic"], 274)
+        self.assertEqual(run["usd"], {"planner": 0.0, "critic": 0.75, "solver": 0.0})
+
     def test_a_second_bootstrap_starts_the_next_loop(self):
         self.ledger(
             {"ts": "1", "event": "PLAN_BOOTSTRAP"}, usage("planner", output_tokens=1),
@@ -106,6 +121,59 @@ class TokenRuns(DashboardFixture):
         runs = self.state.snapshot()["token_runs"]
         self.assertEqual([(r["run"], r["source"]) for r in runs],
                          [(1, "runs/run-001"), (2, "project"), (3, "projects/game")])
+
+    def test_the_ledger_of_an_archived_plan_is_counted_under_its_mirror(self):
+        # 次の計画を起こすと、前の計画の台帳は plan/archive/<番号> へ移る。
+        archived = Path(self.temp.name) / "projects" / "game" / "plan" / "archive" / "001"
+        archived.mkdir(parents=True)
+        (archived / "ledger.jsonl").write_text(
+            json.dumps({"ts": "1", "event": "PLAN_BOOTSTRAP"}) + "\n"
+            + json.dumps(usage("planner", output_tokens=1)) + "\n", encoding="utf-8")
+        runs = self.state.snapshot()["token_runs"]
+        self.assertEqual([(r["run"], r["source"]) for r in runs], [(1, "projects/game")])
+
+    def test_a_run_stays_after_its_ledger_is_gone(self):
+        # 写しの台帳は作業ツリーにある。ブランチを切り替えると読めなくなる。
+        self.mirror("projects/game", {"ts": "1", "event": "PLAN_BOOTSTRAP"},
+                    usage("planner", output_tokens=3))
+        self.state.snapshot()
+        (Path(self.temp.name) / "projects" / "game" / "plan" / "ledger.jsonl").unlink()
+        runs = self.state.snapshot()["token_runs"]
+        self.assertEqual([(r["run"], r["source"], r["tokens"]["planner"]) for r in runs],
+                         [(1, "projects/game", 3)])
+
+    def test_a_run_seen_again_updates_the_stored_one(self):
+        self.ledger({"ts": "1", "event": "PLAN_BOOTSTRAP"}, usage("planner", output_tokens=1))
+        self.state.snapshot()
+        self.ledger({"ts": "1", "event": "PLAN_BOOTSTRAP"}, usage("planner", output_tokens=1),
+                    usage("solver", input_tokens=4), {"event": "ALL_GREEN"})
+        runs = self.state.snapshot()["token_runs"]
+        self.assertEqual([(r["outcome"], r["calls"], r["tokens"]["solver"]) for r in runs],
+                         [("green", 2, 4)])
+
+    def test_the_stored_run_keeps_its_kinds_and_cost(self):
+        self.ledger({"ts": "1", "event": "PLAN_BOOTSTRAP"},
+                    {**usage("critic", input_tokens=4, cache_creation_input_tokens=100,
+                             cache_read_input_tokens=120, output_tokens=15), "cost_usd": 0.5})
+        before = self.state.snapshot()["token_runs"]
+        (self.project / "plan" / "ledger.jsonl").unlink()
+        after = self.state.snapshot()["token_runs"]
+        self.assertEqual(after, before)
+
+    def test_the_project_name_is_kept_when_only_the_live_mirror_is_newer(self):
+        self.mirror("projects/game", {"ts": "1", "event": "PLAN_BOOTSTRAP"},
+                    usage("planner", output_tokens=1))
+        self.ledger({"ts": "1", "event": "PLAN_BOOTSTRAP"}, usage("planner", output_tokens=1),
+                    usage("solver", input_tokens=2))
+        runs = self.state.snapshot()["token_runs"]
+        self.assertEqual([(r["source"], r["calls"]) for r in runs], [("projects/game", 2)])
+
+    def test_an_unreadable_stored_row_is_skipped(self):
+        (Path(self.temp.name) / "token-history.csv").write_text(
+            "source,started\nbroken,1\n", encoding="utf-8")
+        self.ledger({"ts": "2", "event": "PLAN_BOOTSTRAP"}, usage("planner", output_tokens=1))
+        runs = self.state.snapshot()["token_runs"]
+        self.assertEqual([r["started"] for r in runs], ["2"])
 
     def test_the_live_mirror_does_not_repeat_its_project(self):
         records = ({"ts": "1", "event": "PLAN_BOOTSTRAP"}, usage("planner", output_tokens=1))
