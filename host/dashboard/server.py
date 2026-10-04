@@ -18,6 +18,7 @@ from urllib.parse import urlparse
 try:
     from .access import LOCAL, Reach
     from .actions import Launchers
+    from .importer import Importer, ImportJob
     from .live import Live
     from .mirror import MirrorSync
     from .pullrequest import PullRequestError, PullRequests
@@ -25,6 +26,7 @@ try:
 except ImportError:  # 直接実行したとき: python host/dashboard/server.py
     from access import LOCAL, Reach
     from actions import Launchers
+    from importer import Importer, ImportJob
     from live import Live
     from mirror import MirrorSync
     from pullrequest import PullRequestError, PullRequests
@@ -56,7 +58,7 @@ def send_pull_request(state: DashboardState, pulls: PullRequests | None) -> dict
 
 def handler_for(state: DashboardState, launchers: Launchers, reach: Reach, token: str,
                 live: Live | None = None, pulls: PullRequests | None = None,
-                mirror: MirrorSync | None = None):
+                mirror: MirrorSync | None = None, imports: ImportJob | None = None):
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, format: str, *args) -> None:
             print("dashboard: " + format % args)
@@ -126,6 +128,10 @@ def handler_for(state: DashboardState, launchers: Launchers, reach: Reach, token
             if path == "/api/pull":
                 self._json(mirror.status() if mirror is not None
                            else {"error": "loop-pull is not configured"})
+                return
+            if path == "/api/import":
+                self._json(imports.status() if imports is not None
+                           else {"error": "import is not configured"})
                 return
             files = {"/": "index.html", "/app.js": "app.js", "/style.css": "style.css"}
             name = files.get(path)
@@ -218,6 +224,15 @@ def handler_for(state: DashboardState, launchers: Launchers, reach: Reach, token
                         raise ValueError("loop-pull is not configured")
                     self._json(mirror.start(), HTTPStatus.ACCEPTED)
                     return
+                if path == "/api/import":
+                    # ホストにクローンし、箱にプロジェクトを作って切り替える。開始と同じく、
+                    # この機械の前でだけ。
+                    if scope != LOCAL:
+                        raise ValueError("an import can only be started at the machine itself")
+                    if imports is None:
+                        raise ValueError("import is not configured")
+                    self._json(imports.start(body), HTTPStatus.ACCEPTED)
+                    return
                 if path == "/api/launch":
                     # プログラムの起動だけは、画面のある場所でしか意味が無い。
                     # スマホから起動すれば、誰も見ていない窓が開くだけだ。
@@ -247,10 +262,12 @@ def main() -> int:
     args = parser.parse_args()
     token = secrets.token_urlsafe(32)
     state = DashboardState(args.project, args.data, args.mirrors)
+    live = Live(args.config)
     server = ThreadingHTTPServer(
         ("127.0.0.1", args.port),
-        handler_for(state, Launchers(args.config), Reach(args.config), token, Live(args.config),
-                    PullRequests(state.project, state.mirrors / "projects"), MirrorSync()),
+        handler_for(state, Launchers(args.config), Reach(args.config), token, live,
+                    PullRequests(state.project, state.mirrors / "projects"), MirrorSync(),
+                    ImportJob(Importer(live))),
     )
     print(f"Loop dashboard: http://127.0.0.1:{args.port}")
     try:

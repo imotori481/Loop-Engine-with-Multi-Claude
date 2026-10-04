@@ -55,6 +55,7 @@ details { margin-top: 14px; } summary { cursor: pointer; color: #9bb7a8; font-si
 .form { display: grid; gap: 10px; } .form label { display: grid; gap: 4px; }
 .panel input, .panel select { width: 100%; padding: 8px 10px; color: inherit; background: #09110f; border: 1px solid #3d5d51; border-radius: 8px; font: inherit; }
 .panel input[type="file"] { padding: 6px; }
+.form .pair { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 .model-row { display: grid; grid-template-columns: 7rem 1fr 7rem auto; gap: 8px; align-items: center; }
 .model-row span { letter-spacing: 0; text-transform: none; color: #edf5ef; font-size: .9rem; }
 .table-wrap.flat { padding: 0; border: 0; background: transparent; } .table-wrap.flat td button { padding: 4px 10px; font-size: .82rem; }
@@ -62,4 +63,5 @@ tr.current td { background: #173d30; }
 button.danger { background: #6b2a1c; border-color: #d9805f; } button.danger:hover { background: #8a3826; }
 #run-state.running { color: #86c9a7; font-weight: 700; }
 @media (max-width: 700px) { .summary { grid-template-columns: 1fr; } .request-actions { align-items: stretch; flex-direction: column; }
-  .model-row { grid-template-columns: 1fr 1fr; } .model-row span { grid-column: 1 / -1; } }
+  .model-row { grid-template-columns: 1fr 1fr; } .model-row span { grid-column: 1 / -1; }
+  .form .pair { grid-template-columns: 1fr; } }

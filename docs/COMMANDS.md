@@ -107,11 +107,14 @@ GitHub とやり取りするのはホストだけだ。箱には GitHub の資�
 
 ### 取り込む
 
-ホストで1行打つ。下の1から4をまとめて流す。クローンは `C:\dev\roop-engin\projects\<project>` に置く。
+ホストで1行打つ。下の1から4をまとめて流し、切り替えが終わるまで待つ。クローンは `C:\dev\roop-engin\projects\<project>` に置く。
+ダッシュボードの「取り込み」タブでも同じことができる。
 
 ```bash
-loop-import <project> <repo-url> <branch> [<base-branch>]
+loop-import <project> <repo-url> <branch> [<base-branch>] [--src <src-dir>] [--tests <tests-dir>]
 ```
+
+`--src` と `--tests` は書き込みの柵の場所で、省くと `src` と `tests`。
 
 手で打つときは次の順に流す。
 
@@ -257,9 +260,10 @@ loop go <requirements> --language cpp
 | プロジェクトを切り替える | プロジェクト | `loop project use <project>` |
 | 役ごとのモデルと effort を変える | 役のモデル | `/etc/loop/<役>.env` の `LOOP_MODEL` と `LOOP_EFFORT` を書き換える |
 | 写しを最新にする | ホストの写し | `loop-pull` |
+| 既存リポジトリのブランチを取り込む | 取り込み | `loop-import <project> <repo-url> <branch> [<base-branch>]` |
 
 箱は、これらを `loop dash` の1本で受ける。箱を更新したら、`provision.sh` を流し直して sudoers の
-規則を入れる。新しいプロジェクトの取り込みは、今までどおり `loop-import` で行う。
+規則を入れる。
 
 ### スマホや他の PC から見る
 
@@ -274,8 +278,8 @@ loop go <requirements> --language cpp
 Tailscale のログインを書く。どちらかが無ければ、tailnet からの要求はすべて拒まれる。
 `tailscale funnel` は使わない。インターネット全体に公開される。
 
-リモートから、予定レビューの承認、走行の開始、プロジェクトの切り替え、モデルの変更、写しの更新は
-できない。差し戻し、エスカレーションへの回答、走行の停止と続行はできる。
+リモートから、予定レビューの承認、走行の開始、プロジェクトの切り替え、モデルの変更、写しの更新、
+取り込みはできない。差し戻し、エスカレーションへの回答、走行の停止と続行はできる。
 
 設定の詳細: [host/dashboard/README.md](../host/dashboard/README.md)
 

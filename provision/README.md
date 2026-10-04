@@ -432,7 +432,8 @@ loop findings set                    # 指摘1件を書き換える。標準入�
 echo '{"mode": "trace", "index": 0, "title": "<題>", "evidence": "<根拠>"}' | loop findings set
 ```
 
-ダッシュボードは、走行の開始と停止、続行、プロジェクトの切り替え、役のモデルの変更を、SSH で
+ダッシュボードとホストの `loop-import` は、走行の開始と停止、続行、プロジェクトの切り替えと受け皿づくり
+（`loop project init`）、役のモデルの変更を、SSH で
 `sudo -n /usr/local/bin/loop dash` に頼む。要求は標準入力の JSON 1つで、`loop_dash.py` が形と値を
 確かめる。端末の無い SSH ではパスワードを訊けないので、`25-runner.sh` が `/etc/sudoers.d/loop-dash` に、
 保守ユーザーがこの1つだけをパスワード無しで流せる規則を置く。引数まで固定するので、ほかのコマンドには

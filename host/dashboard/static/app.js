@@ -540,6 +540,8 @@ function updateRunButtons() {
   document.querySelector("#start-run").disabled = !reachable || running || switching;
   document.querySelector("#continue-run").disabled = !reachable || running || switching;
   document.querySelector("#stop-run").disabled = !reachable || !running;
+  // 取り込みの最後は切り替えなので、走行中と切り替え中は箱が断る。
+  document.querySelector("#import").disabled = importing || !reachable || running || switching;
 }
 
 function renderControl(value) {
@@ -656,7 +658,41 @@ async function watchPull() {
   else if (value.finished) await refresh();
 }
 
-// 操作の4つの欄はタブで切り替える。選んだタブは、この端末のブラウザにだけ覚える。
+let importTimer = null, importing = false;
+const IMPORT_FIELDS = ["project", "url", "branch", "base", "src", "tests"];
+
+function renderImport(value) {
+  const state = document.querySelector("#import-state"), log = document.querySelector("#import-log");
+  importing = Boolean(value.running);
+  updateRunButtons();
+  log.hidden = !value.output?.length;
+  log.textContent = (value.output || []).join("\n");
+  state.textContent = value.error || (value.running ? `取り込み中（${value.project}）`
+    : value.finished ? `${value.ok ? "済み" : "失敗"}（${value.project}） / ${value.finished}` : "");
+}
+
+async function watchImport() {
+  clearTimeout(importTimer);
+  let value;
+  try { value = await api("/api/import"); } catch (error) { value = {error: error.message}; }
+  renderImport(value);
+  if (value.running) importTimer = setTimeout(watchImport, 2000);
+  else if (value.finished) { drawnProjects = ""; await refreshLive(); }
+}
+
+async function startImport(element) {
+  const body = Object.fromEntries(IMPORT_FIELDS.map(
+    name => [name, document.querySelector(`#import-${name}`).value.trim()]));
+  if (!body.project || !body.url || !body.branch) {
+    alert("プロジェクト名、リポジトリの URL、作業用ブランチを入れてください。"); return;
+  }
+  if (!confirm(`${body.url} の ${body.branch} を '${body.project}' として取り込み、そこへ切り替えます。今のプロジェクトは退避されます。よいですか？`)) return;
+  element.disabled = true;
+  try { renderImport(await api("/api/import", {method: "POST", body: JSON.stringify(body)})); watchImport(); }
+  catch (error) { alert(error.message); updateRunButtons(); }
+}
+
+// 操作の5つの欄はタブで切り替える。選んだタブは、この端末のブラウザにだけ覚える。
 const TAB_KEY = "loop-dashboard-tab";
 
 function selectTab(name) {
@@ -685,9 +721,9 @@ function setupControl() {
     for (const element of document.querySelectorAll(".local-only")) element.hidden = true;
     const note = document.querySelector("#control-note");
     note.hidden = false;
-    note.textContent = "リモートからは停止と続行だけができます。開始、プロジェクトの切り替え、モデルの変更、写しの更新はこの機械の前で。";
+    note.textContent = "リモートからは停止と続行だけができます。開始、プロジェクトの切り替え、モデルの変更、写しの更新、取り込みはこの機械の前で。";
   }
-  // リモートで隠した「ホストの写し」のタブを選ばないよう、隠したあとで開く。
+  // リモートで隠した「ホストの写し」と「取り込み」のタブを選ばないよう、隠したあとで開く。
   setupTabs();
   const start = document.querySelector("#start-run");
   start.onclick = () => startRun(start);
@@ -701,6 +737,8 @@ function setupControl() {
     try { renderPull(await api("/api/pull", {method: "POST", body: "{}"})); watchPull(); }
     catch (error) { alert(error.message); pull.disabled = false; }
   };
+  const doImport = document.querySelector("#import");
+  doImport.onclick = () => startImport(doImport);
   updateRunButtons();
 }
 
@@ -724,7 +762,7 @@ async function start() {
   await refreshLive();
   setInterval(refreshLive, 5000);
   loadSettings();
-  if (session.scope === "local") watchPull();
+  if (session.scope === "local") { watchPull(); watchImport(); }
 }
 
 document.querySelector("#refresh").onclick = refresh;

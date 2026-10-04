@@ -66,6 +66,22 @@ class Request(unittest.TestCase):
         self.refused({"action": "model", "role": "solver", "model": "", "effort": "ultra"})
         self.refused({"action": "model", "role": "runner", "model": "", "effort": ""})
 
+    def test_an_import_passes_the_project_the_branch_and_the_fences(self):
+        self.assertEqual(self.parse({"action": "init", "project": "game", "branch": "loop/x"}),
+                         ["init", "game", "loop/x", "", ""])
+        self.assertEqual(
+            self.parse({"action": "init", "project": "game", "branch": "feature/a.b_c-1",
+                        "src": "Assets/Source", "tests": "Assets/Tests"}),
+            ["init", "game", "feature/a.b_c-1", "Assets/Source", "Assets/Tests"])
+
+    def test_an_import_refuses_values_that_could_become_an_option_or_a_line(self):
+        for branch in ("", "-x", "a b", "a\nb", "$(id)", None, "a;b"):
+            self.refused({"action": "init", "project": "game", "branch": branch})
+        self.refused({"action": "init", "project": "CURRENT", "branch": "main"})
+        for src, tests in (("../x", ""), ("src", "src/t"), ("a b", ""), ("", 5), ("/abs", "")):
+            self.refused({"action": "init", "project": "game", "branch": "main",
+                          "src": src, "tests": tests})
+
     def test_anything_else_is_refused(self):
         self.refused([])
         self.refused({"action": "raw"})

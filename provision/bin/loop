@@ -220,6 +220,17 @@ switch_project() {
   echo "'$name' への切り替えを裏で始めた"
 }
 
+# 取り込むプロジェクトの空の bare を用意する。root で動く（cmd_dash から呼ぶ）。
+# 柵の場所は空なら渡さず、loop-project.sh の既定に任せる。
+init_project() {
+  local name="$1" branch="$2" src="$3" tests="$4" admin="$5"
+  local -a args=(init "$name" --branch "$branch")
+  switching && die "ダッシュボードがプロジェクトを切り替えている。終わるのを待つ"
+  [ -z "$src" ] || args+=(--src "$src")
+  [ -z "$tests" ] || args+=(--tests "$tests")
+  ADMIN_USER="$admin" bash "$PROJECT_SH" "${args[@]}"
+}
+
 # ホストのダッシュボードが流す入口。sudoers が保守ユーザーにこれだけをパスワード無しで
 # 許す（25-runner.sh）ので、root で動く。要求は標準入力の JSON 1つで、形と値は
 # loop_dash.py が確かめる。ここでは確かめ済みの行だけを使う。
@@ -241,6 +252,7 @@ cmd_dash() {
     continue) cmd_continue ;;
     stop)     cmd_stop ;;
     use)      switch_project "${req[1]}" "$admin" ;;
+    init)     init_project "${req[1]}" "${req[2]}" "${req[3]}" "${req[4]}" "$admin" ;;
     *)        die "知らない操作: $action" ;;
   esac
 }

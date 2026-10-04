@@ -32,6 +32,9 @@ EFFORTS = ("low", "medium", "high", "xhigh", "max")
 MODEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9._\[\]-]{0,99}")
 # loop-project.sh の valid_name と同じ規則。
 PROJECT = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}")
+# 取り込むブランチ。行にもオプションにもならない文字だけを通す。git の規則
+# （check-ref-format）は loop-project.sh の init が確かめる。
+BRANCH = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,199}")
 MAX_REQUIREMENTS = 200_000
 KEYS = {"model": "LOOP_MODEL", "effort": "LOOP_EFFORT"}
 
@@ -58,6 +61,29 @@ def check_role(value: object) -> str:
     return value
 
 
+def check_project(value: object) -> str:
+    if not isinstance(value, str) or not PROJECT.fullmatch(value) or value == "CURRENT":
+        raise Refused(f"プロジェクト名に使えない: {value!r}")
+    return value
+
+
+def check_branch(value: object) -> str:
+    if not isinstance(value, str) or not BRANCH.fullmatch(value):
+        raise Refused(f"ブランチ名に使えない: {value!r}")
+    return value
+
+
+def check_fence(src: object, tests: object) -> tuple[str, str]:
+    """柵の場所。両方とも空なら既定の src と tests。片方だけなら、もう片方は既定。"""
+    if not isinstance(src, str) or not isinstance(tests, str):
+        raise Refused("柵の場所は文字列で渡す")
+    if src or tests:
+        problems = loop.layout_problems({"src": src or "src", "tests": tests or "tests"})
+        if problems:
+            raise Refused("柵の場所に使えない: " + "; ".join(problems))
+    return src, tests
+
+
 def parse(request: object, work: str) -> list[str]:
     """要求を確かめ、`loop` に返す行を作る。要件の本文だけは作業ディレクトリに書く。"""
     if not isinstance(request, dict):
@@ -69,10 +95,12 @@ def parse(request: object, work: str) -> list[str]:
         return ["model", check_role(request.get("role")), check_model(request.get("model")),
                 check_effort(request.get("effort"))]
     if action == "use":
-        name = request.get("project")
-        if not isinstance(name, str) or not PROJECT.fullmatch(name) or name == "CURRENT":
-            raise Refused(f"プロジェクト名に使えない: {name!r}")
-        return ["use", name]
+        return ["use", check_project(request.get("project"))]
+    if action == "init":
+        # ホストの取り込みの3つ目の手順。空の bare を用意し、push を待つ。
+        src, tests = check_fence(request.get("src", ""), request.get("tests", ""))
+        return ["init", check_project(request.get("project")),
+                check_branch(request.get("branch")), src, tests]
     if action == "go":
         language, text = request.get("language"), request.get("requirements")
         if language not in loop.LANGUAGES:

@@ -29,7 +29,7 @@
   ローカルのみ。画面を見られない端末が「遊べた」と記録できてしまったら、
   *機械には画面が確認できないから人間に訊く* という関門そのものが無意味になる。
   差し戻し・エスカレーションへの回答・走行の停止と続行はどこからでもできる
-- 走行の開始、プロジェクトの切り替え、役のモデルの変更、写しの更新はローカルのみ。
+- 走行の開始、プロジェクトの切り替え、役のモデルの変更、写しの更新、取り込みはローカルのみ。
   利用枠と箱の状態を大きく動かす操作だからだ
 - 箱を書き換える操作は、どれも `sudo -n /usr/local/bin/loop dash` の1本を通る。
   要求は標準入力の JSON で渡し、値は箱の `loop_dash.py` が確かめる
@@ -67,7 +67,7 @@ python host/dashboard/server.py --project C:\dev\roop-engin\project
 
 画面のいちばん上の「操作」で、箱の操作を端末なしで済ませる。欄はタブで切り替える。
 選んだタブはブラウザの localStorage に覚え、次に開いたときもそのタブを出す。
-リモートでは「ホストの写し」のタブを出さない。
+リモートでは「ホストの写し」と「取り込み」のタブを出さない。
 
 | 欄 | できること | 箱で流れるもの | どこから |
 |---|---|---|---|
@@ -77,6 +77,7 @@ python host/dashboard/server.py --project C:\dev\roop-engin\project
 | プロジェクト | 一覧を見て切り替える | `loop project use` を一時ユニット `loop-switch` で | ローカル |
 | 役のモデル | 役ごとに `LOOP_MODEL` と `LOOP_EFFORT` を変える | `/etc/loop/<役>.env` の2行の書き換え | ローカル |
 | ホストの写し | 写しを箱の先まで進める | ホストの `loop-pull.cmd` | ローカル |
+| 取り込み | 既存リポジトリのブランチを新しいプロジェクトにして切り替える | `loop project init` と `loop project use` | ローカル |
 
 箱への要求は、どれも SSH で `sudo -n /usr/local/bin/loop dash` に標準入力の JSON で渡す。
 `25-runner.sh` が sudoers で保守ユーザーにこの1つだけをパスワード無しで許す。`loop dash` は
@@ -87,6 +88,7 @@ python host/dashboard/server.py --project C:\dev\roop-engin\project
 | `{"action": "go", "requirements": <本文>, "language": <言語>}` | 本文は root だけが入れる一時ディレクトリに書き、そこから `human/in/REQUIREMENTS.md` に置く。言語は `loop.py` の `LANGUAGES` のどれか |
 | `{"action": "continue"}` / `{"action": "stop"}` | 引数なし |
 | `{"action": "use", "project": <名前>}` | 名前は `loop-project.sh` と同じ規則 |
+| `{"action": "init", "project": <名前>, "branch": <ブランチ>, "src": <柵>, "tests": <柵>}` | ブランチは英数字で始まり、英数字と `. _ / -` だけ。柵は `loop.py` の `layout_problems` で確かめ、空なら既定 |
 | `{"action": "settings"}` | 役ごとの `LOOP_MODEL` と `LOOP_EFFORT`、選べる effort と言語を JSON で返す。資格情報の行は返さない |
 | `{"action": "model", "role": <役>, "model": <名前>, "effort": <effort>}` | 名前は英数字と `. _ - [ ]` だけ。effort は `low` / `medium` / `high` / `xhigh` / `max` か空 |
 
@@ -103,7 +105,25 @@ python host/dashboard/server.py --project C:\dev\roop-engin\project
 - 切り替えは一時ユニット `loop-switch` で裏に回す。初めてのプロジェクトはプロビジョニングで数分かかる
 - 出力は箱の `/srv/loop/logs/switch.log` に書き、`loop now` の `switch` が末尾20行を返す
 - 走行中と切り替え中は、開始も切り替えもできない。端末の `loop project` も切り替え中は断る
-- 新しいプロジェクトの取り込み（クローン、`init`、push）はホストの `loop-import` で行う
+
+### 取り込み
+
+`importer.py` をこのサーバのスレッドで流し、出力の末尾60行を画面に出す。同時に流せるのは1つだけ。
+`host\loop-import.cmd` も同じ `importer.py` を呼ぶので、手順は端末と画面で変わらない。
+
+1. リポジトリを `C:\dev\roop-engin\projects\<名前>` にクローンする。もうあれば、`origin` が同じで
+   未コミットの変更が無いことを確かめてから fetch する
+2. 作業用ブランチに切り替える。どこにも無ければ親ブランチ（省くと `origin` の既定）から作り、
+   親を `branch.<ブランチ>.loopBase` に記録する。PR の送り先になる
+3. `loop dash` の `init` で箱に空の bare を作る
+4. `loop-runner` でブランチを箱の bare に push する
+5. `loop dash` の `use` で切り替え、`loop now` の `switch` が終わるまで待つ
+
+- URL は `https://`、`ssh://`、`user@host:path` の形だけを通す。`file://` や `ext::` のように
+  ホストのファイルやコマンドに届く形は断る
+- 名前、ブランチ、柵は箱と同じ規則でホストでも確かめ、クローンする前に断る。git には引数配列で渡し、
+  URL の前に `--` を置く
+- 走行中と切り替え中はボタンを押せない。最後の切り替えを箱が断るからだ
 
 ### 写しの更新
 
