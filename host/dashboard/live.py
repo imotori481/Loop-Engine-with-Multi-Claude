@@ -83,9 +83,42 @@ class Live:
         request = {"mode": mode, "index": index, "title": title, "evidence": evidence}
         return self._act(["loop", "findings", "set"], json.dumps(request, ensure_ascii=False))
 
+    def _dash(self, request: dict[str, Any]) -> str:
+        """`loop dash` に要求を1つ渡す。sudoers が保守ユーザーにこれだけをパスワード無しで許す。
+
+        要求は標準入力の JSON で渡し、コマンドラインは固定のまま。何を受け付けるかは箱の
+        loop_dash.py が決める。
+        """
+        return self._act(["sudo", "-n", "/usr/local/bin/loop", "dash"],
+                         json.dumps(request, ensure_ascii=False))
+
     def continue_loop(self) -> str:
-        """`loop continue` を流す。sudoers が保守ユーザーにこれだけをパスワード無しで許す。"""
-        return self._act(["sudo", "-n", "/usr/local/bin/loop", "continue"])
+        return self._dash({"action": "continue"})
+
+    def stop_loop(self) -> str:
+        return self._dash({"action": "stop"})
+
+    def start_loop(self, requirements: str, language: str) -> str:
+        """`loop go`。要件の本文は箱の一時ディレクトリに書かれ、そこから置かれる。"""
+        return self._dash({"action": "go", "requirements": requirements, "language": language})
+
+    def use_project(self, name: str) -> str:
+        """`loop project use` を箱の一時ユニットで裏に回す。進みは `loop now` の switch に出る。"""
+        return self._dash({"action": "use", "project": name})
+
+    def settings(self) -> dict[str, Any]:
+        """役ごとの LOOP_MODEL と LOOP_EFFORT、選べる effort と言語。資格情報は返らない。"""
+        try:
+            value = json.loads(self._dash({"action": "settings"}))
+        except json.JSONDecodeError:
+            raise ValueError("the sandbox answered with something that is not JSON")
+        if not isinstance(value, dict):
+            raise ValueError("unexpected answer")
+        return value
+
+    def set_model(self, role: str, model: str, effort: str) -> str:
+        """/etc/loop/<役>.env の LOOP_MODEL と LOOP_EFFORT を書き換える。"""
+        return self._dash({"action": "model", "role": role, "model": model, "effort": effort})
 
     def _ask(self) -> dict[str, Any]:
         try:

@@ -336,6 +336,8 @@ sudo nano /etc/loop/solver.env
 | `LOOP_MODEL=` | 使うモデル。空ならアカウントの既定。例: planner は `claude-opus-5-5`、solver と critic は `claude-sonnet-5` |
 | `LOOP_EFFORT=` | `low` / `medium` / `high` / `xhigh` / `max`。空なら既定 |
 
+`LOOP_MODEL` と `LOOP_EFFORT` は、ダッシュボードの「役のモデル」からも変えられる。
+
 planner と critic も同じ手順で埋める。3役とも同じサブスクリプションの利用枠を使う。
 トークンが空の役があると、プロビジョニングの最後に `資格情報がまだ無い役` として名前が出る。
 
@@ -410,9 +412,11 @@ loop findings set                    # 指摘1件を書き換える。標準入�
 echo '{"mode": "trace", "index": 0, "title": "<題>", "evidence": "<根拠>"}' | loop findings set
 ```
 
-ダッシュボードは SSH で `sudo -n /usr/local/bin/loop continue` を流す。端末の無い SSH ではパスワードを
-訊けないので、`25-runner.sh` が `/etc/sudoers.d/loop-continue` に、保守ユーザーがこの1つだけを
-パスワード無しで流せる規則を置く。引数まで固定するので、ほかのコマンドには効かない。
+ダッシュボードは、走行の開始と停止、続行、プロジェクトの切り替え、役のモデルの変更を、SSH で
+`sudo -n /usr/local/bin/loop dash` に頼む。要求は標準入力の JSON 1つで、`loop_dash.py` が形と値を
+確かめる。端末の無い SSH ではパスワードを訊けないので、`25-runner.sh` が `/etc/sudoers.d/loop-dash` に、
+保守ユーザーがこの1つだけをパスワード無しで流せる規則を置く。引数まで固定するので、ほかのコマンドには
+効かない。要求の一覧は `host/dashboard/README.md` の「操作」にある。
 
 走行は systemd の一時ユニット `loop-run` として runner で動く。SSH が切れても止まらず、
 二重には起動できない。`loop stop` は3役の呼び出しも含めてまとめて止める。

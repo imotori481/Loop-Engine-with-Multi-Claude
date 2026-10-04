@@ -94,12 +94,46 @@ class ActOnTheSandbox(LiveView):
         with self.assertRaisesRegex(ValueError, "title が空"):
             self.live.rewrite_finding("trace", 0, "", "")
 
+    def dash_request(self, run):
+        """`loop dash` に渡った要求。コマンドは sudoers が許すものから動かない。"""
+        self.assertEqual(run.call_args.args[0][-4:], ["sudo", "-n", "/usr/local/bin/loop", "dash"])
+        self.assertIs(run.call_args.kwargs["shell"], False)
+        return json.loads(run.call_args.kwargs["input"])
+
     @patch("host.dashboard.live.subprocess.run")
-    def test_continue_runs_only_the_command_sudoers_allows(self, run):
+    def test_continue_and_stop_go_through_the_one_command_sudoers_allows(self, run):
         run.return_value = answered("裏で走らせた")
         self.live.continue_loop()
-        self.assertEqual(run.call_args.args[0][-4:],
-                         ["sudo", "-n", "/usr/local/bin/loop", "continue"])
+        self.assertEqual(self.dash_request(run), {"action": "continue"})
+        self.live.stop_loop()
+        self.assertEqual(self.dash_request(run), {"action": "stop"})
+
+    @patch("host.dashboard.live.subprocess.run")
+    def test_the_requirements_travel_on_stdin_and_never_on_the_command_line(self, run):
+        run.return_value = answered("裏で走らせた")
+        text = "# 要件\n$(rm -rf /)\n"
+        self.live.start_loop(text, "csharp")
+        self.assertEqual(self.dash_request(run),
+                         {"action": "go", "requirements": text, "language": "csharp"})
+        self.assertNotIn("rm -rf", " ".join(run.call_args.args[0]))
+
+    @patch("host.dashboard.live.subprocess.run")
+    def test_switching_and_model_changes_are_requests_too(self, run):
+        run.return_value = answered("ok")
+        self.live.use_project("game-2")
+        self.assertEqual(self.dash_request(run), {"action": "use", "project": "game-2"})
+        self.live.set_model("solver", "claude-opus-5-5", "high")
+        self.assertEqual(self.dash_request(run), {"action": "model", "role": "solver",
+                                                  "model": "claude-opus-5-5", "effort": "high"})
+
+    @patch("host.dashboard.live.subprocess.run")
+    def test_settings_are_read_as_json(self, run):
+        run.return_value = answered('{"roles": {"solver": {"model": "", "effort": ""}}}')
+        self.assertEqual(self.live.settings()["roles"]["solver"], {"model": "", "effort": ""})
+        self.assertEqual(self.dash_request(run), {"action": "settings"})
+        run.return_value = answered("sudo: a password is required", returncode=1)
+        with self.assertRaisesRegex(ValueError, "password"):
+            self.live.settings()
 
     @patch("host.dashboard.live.subprocess.run")
     def test_an_action_drops_the_cached_view(self, run):
@@ -108,7 +142,7 @@ class ActOnTheSandbox(LiveView):
         self.live.continue_loop()
         self.live.fetch()
         self.assertEqual([call.args[0][-1] for call in run.call_args_list],
-                         ["now", "continue", "now"])
+                         ["now", "dash", "now"])
 
 
 if __name__ == "__main__":

@@ -229,6 +229,22 @@ git push origin <pr-branch>
 「いまの作業」は5秒ごとに `ssh loop-dev loop now` を `BatchMode=yes` で流す。鍵にパスフレーズが
 あるなら、先に ssh-agent に載せておく。
 
+### 画面から操作する
+
+画面の「操作」で、次をコマンドなしで済ませる。
+
+| やりたいこと | 欄 | 同じことをするコマンド |
+|---|---|---|
+| 要件から走らせる | 走行 | `loop go <requirements> --language <言語>` |
+| 止まったところから続ける | 走行 | `loop continue` |
+| 止める | 走行 | `loop stop` |
+| プロジェクトを切り替える | プロジェクト | `loop project use <project>` |
+| 役ごとのモデルと effort を変える | 役のモデル | `/etc/loop/<役>.env` の `LOOP_MODEL` と `LOOP_EFFORT` を書き換える |
+| 写しを最新にする | ホストの写し | `loop-pull` |
+
+箱は、これらを `loop dash` の1本で受ける。箱を更新したら、`provision.sh` を流し直して sudoers の
+規則を入れる。新しいプロジェクトの取り込みは、今までどおり `loop-import` で行う。
+
 ### スマホや他の PC から見る
 
 | やりたいこと | コマンド |
@@ -242,7 +258,8 @@ git push origin <pr-branch>
 Tailscale のログインを書く。どちらかが無ければ、tailnet からの要求はすべて拒まれる。
 `tailscale funnel` は使わない。インターネット全体に公開される。
 
-リモートから、予定レビューの承認はできない。差し戻し、エスカレーションへの回答、停止はできる。
+リモートから、予定レビューの承認、走行の開始、プロジェクトの切り替え、モデルの変更、写しの更新は
+できない。差し戻し、エスカレーションへの回答、走行の停止と続行はできる。
 
 設定の詳細: [host/dashboard/README.md](../host/dashboard/README.md)
 

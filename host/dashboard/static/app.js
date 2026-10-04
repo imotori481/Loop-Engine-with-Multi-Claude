@@ -506,8 +506,177 @@ function renderLive(value) {
 }
 
 async function refreshLive() {
-  try { renderLive(await api("/api/live")); }
-  catch (error) { renderLive({error: error.message}); }
+  let value;
+  try { value = await api("/api/live"); }
+  catch (error) { value = {error: error.message}; }
+  renderLive(value);
+  renderControl(value);
+}
+
+// ---- 操作 -------------------------------------------------------------------
+
+const ROLE_LABEL = Object.fromEntries(ROLES.map(role => [role.key, role.label]));
+const PROJECT_STATE = {current: "使用中", parked: "退避中", new: "未構築"};
+// モデル欄の候補。ここに無い名前も打てる。
+const MODEL_OPTIONS = ["claude-fable-5-1", "claude-opus-5-5", "claude-sonnet-5-5",
+                       "claude-haiku-4-5-20251001", "opus", "sonnet", "haiku"];
+let liveState = {running: false, switching: false, reachable: false}, drawnProjects = "";
+
+// 箱への操作を1つ流す。押したボタンは終わるまで押せなくする。
+async function act(element, path, body, question) {
+  if (question && !confirm(question)) return;
+  element.disabled = true;
+  try {
+    const result = await api(path, {method: "POST", body: JSON.stringify(body || {})});
+    if (result.message) alert(result.message);
+    drawnCritique = ""; drawnProjects = "";
+    await refreshLive();
+  } catch (error) { alert(error.message); }
+  finally { updateRunButtons(); }
+}
+
+function updateRunButtons() {
+  const {running, switching, reachable} = liveState;
+  document.querySelector("#start-run").disabled = !reachable || running || switching;
+  document.querySelector("#continue-run").disabled = !reachable || running || switching;
+  document.querySelector("#stop-run").disabled = !reachable || !running;
+}
+
+function renderControl(value) {
+  const switching = Boolean(value.switch?.running);
+  liveState = {running: Boolean(value.running), switching, reachable: !value.error};
+  updateRunButtons();
+
+  const state = document.querySelector("#run-state");
+  state.classList.toggle("running", liveState.running);
+  state.textContent = value.error ? "箱に届きません"
+    : switching ? "プロジェクトを切り替えています"
+    : value.running ? `走っています（${value.project}）`
+    : `止まっています（${value.project}）${value.last ? ` / 最後: ${value.last}` : ""}`;
+
+  const box = document.querySelector("#switch");
+  box.hidden = !value.switch;
+  if (value.switch) {
+    document.querySelector("#switch-state").textContent =
+      switching ? "切り替え中。初めてのプロジェクトはプロビジョニングで数分かかります" : "最後の切り替えの出力";
+    document.querySelector("#switch-log").textContent = value.switch.log.join("\n");
+  }
+  renderProjects(value.projects || [], value.error);
+}
+
+function renderProjects(projects, error) {
+  const key = JSON.stringify([projects, error, liveState]);
+  if (key === drawnProjects) return;
+  drawnProjects = key;
+  const body = document.querySelector("#projects"); body.replaceChildren();
+  if (!projects.length) {
+    const row = document.createElement("tr"), cell = text("td", error ? "—" : "プロジェクトがありません", "goal");
+    cell.colSpan = 4; row.append(cell); body.append(row);
+    return;
+  }
+  for (const project of projects) {
+    const row = document.createElement("tr");
+    if (project.state === "current") row.className = "current";
+    const cell = document.createElement("td");
+    if (project.state !== "current" && session.scope === "local") {
+      const use = document.createElement("button"); use.textContent = "切り替える";
+      use.disabled = liveState.running || liveState.switching;
+      use.onclick = () => act(use, "/api/project", {project: project.name},
+        `'${project.name}' に切り替えます。今のプロジェクトは退避されます。よいですか？`);
+      cell.append(use);
+    }
+    row.append(text("td", project.name), text("td", PROJECT_STATE[project.state] || project.state),
+               text("td", project.branch || "?"), cell);
+    body.append(row);
+  }
+}
+
+async function loadSettings() {
+  const box = document.querySelector("#models");
+  let value;
+  try { value = await api("/api/settings"); } catch (error) { value = {error: error.message}; }
+  box.replaceChildren();
+  if (value.error) { box.append(text("p", `読めません: ${value.error}`, "why")); return; }
+  const language = document.querySelector("#language"), chosen = language.value;
+  language.replaceChildren(...value.languages.map(name => new Option(name, name)));
+  if (value.languages.includes(chosen)) language.value = chosen;
+  for (const [role, current] of Object.entries(value.roles)) box.append(modelRow(role, current, value.efforts));
+}
+
+function modelRow(role, current, efforts) {
+  const row = document.createElement("div"); row.className = "model-row";
+  row.append(text("span", ROLE_LABEL[role] || role));
+  if (!current) { row.append(text("p", `/etc/loop/${role}.env がありません`, "why")); return row; }
+  const model = document.createElement("input");
+  model.value = current.model; model.placeholder = "既定"; model.setAttribute("list", "model-options");
+  const effort = document.createElement("select");
+  effort.append(new Option("既定", ""), ...efforts.map(name => new Option(name, name)));
+  effort.value = current.effort;
+  row.append(model, effort);
+  if (session.scope !== "local") { model.disabled = effort.disabled = true; return row; }
+  const save = document.createElement("button"); save.textContent = "保存";
+  save.onclick = async () => {
+    save.disabled = true;
+    try {
+      await api("/api/model", {method: "POST", body: JSON.stringify(
+        {role, model: model.value.trim(), effort: effort.value})});
+      await loadSettings();
+    } catch (error) { alert(error.message); save.disabled = false; }
+  };
+  row.append(save);
+  return row;
+}
+
+async function startRun(element) {
+  const file = document.querySelector("#requirements").files[0];
+  if (!file) { alert("要件のファイルを選んでください。"); return; }
+  const language = document.querySelector("#language").value;
+  await act(element, "/api/start", {requirements: await file.text(), language},
+    `${file.name} を要件にして、${language} で計画づくりから走らせます。よいですか？`);
+}
+
+let pullTimer = null;
+
+function renderPull(value) {
+  const state = document.querySelector("#pull-state"), log = document.querySelector("#pull-log");
+  const button = document.querySelector("#pull");
+  button.disabled = Boolean(value.running);
+  log.hidden = !value.output?.length;
+  log.textContent = (value.output || []).join("\n");
+  state.textContent = value.error || (value.running ? "更新中"
+    : value.finished ? `${value.returncode === 0 ? "済み" : `失敗（${value.returncode}）`} / ${value.finished}` : "");
+}
+
+async function watchPull() {
+  clearTimeout(pullTimer);
+  let value;
+  try { value = await api("/api/pull"); } catch (error) { value = {error: error.message}; }
+  renderPull(value);
+  if (value.running) pullTimer = setTimeout(watchPull, 2000);
+  else if (value.finished) await refresh();
+}
+
+function setupControl() {
+  document.querySelector("#model-options").append(...MODEL_OPTIONS.map(name => new Option(name)));
+  if (session.scope !== "local") {
+    for (const element of document.querySelectorAll(".local-only")) element.hidden = true;
+    const note = document.querySelector("#control-note");
+    note.hidden = false;
+    note.textContent = "リモートからは停止と続行だけができます。開始、プロジェクトの切り替え、モデルの変更、写しの更新はこの機械の前で。";
+  }
+  const start = document.querySelector("#start-run");
+  start.onclick = () => startRun(start);
+  const resume = document.querySelector("#continue-run");
+  resume.onclick = () => act(resume, "/api/continue", {}, "止まったところから続けます。よいですか？");
+  const stop = document.querySelector("#stop-run");
+  stop.onclick = () => act(stop, "/api/stop", {}, "走行を止めます。途中のステップはそのまま残ります。よいですか？");
+  const pull = document.querySelector("#pull");
+  pull.onclick = async () => {
+    pull.disabled = true;
+    try { renderPull(await api("/api/pull", {method: "POST", body: "{}"})); watchPull(); }
+    catch (error) { alert(error.message); pull.disabled = false; }
+  };
+  updateRunButtons();
 }
 
 async function start() {
@@ -525,9 +694,12 @@ async function start() {
     element.onclick = async () => { try { await api("/api/launch", {method: "POST", body: JSON.stringify({launcher_id: item.id})}); } catch (error) { alert(error.message); } };
     launchers.append(element);
   }
+  setupControl();
   await refresh();
   await refreshLive();
   setInterval(refreshLive, 5000);
+  loadSettings();
+  if (session.scope === "local") watchPull();
 }
 
 document.querySelector("#refresh").onclick = refresh;

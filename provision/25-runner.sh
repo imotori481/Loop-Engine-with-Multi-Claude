@@ -21,16 +21,19 @@ install -o root -g root -m 644 "$SRC" "$DEST/loop.py"
 # 保守ユーザーが打つ `loop` コマンド。PATH の通った場所に置く。
 install -o root -g root -m 755 bin/loop /usr/local/bin/loop
 
-# ホストのダッシュボードは、クリティックの指摘を直したあと `loop continue` を SSH で
-# 流す。端末の無い SSH ではパスワードを訊けないので、保守ユーザーにこの1つだけを
-# パスワード無しで許す。引数まで固定するので、ほかのコマンドには効かない。
+# ホストのダッシュボードは、走行の開始と停止、続行、プロジェクトの切り替え、役のモデルの
+# 変更を SSH で `loop dash` に頼む。端末の無い SSH ではパスワードを訊けないので、保守
+# ユーザーにこの1つだけをパスワード無しで許す。引数まで固定するので、ほかのコマンドには
+# 効かない。要求は標準入力で渡り、loop_dash.py が確かめる。
 ADMIN_USER="${ADMIN_USER:-maint}"
-SUDOERS=/etc/sudoers.d/loop-continue
+SUDOERS=/etc/sudoers.d/loop-dash
 tmp="$(mktemp)"
-echo "$ADMIN_USER ALL=(root) NOPASSWD: /usr/local/bin/loop continue" > "$tmp"
+echo "$ADMIN_USER ALL=(root) NOPASSWD: /usr/local/bin/loop dash" > "$tmp"
 visudo -cqf "$tmp" || { rm -f "$tmp"; echo "25-runner: sudoers rule does not parse" >&2; exit 1; }
 install -o root -g root -m 440 "$tmp" "$SUDOERS"
 rm -f "$tmp"
+# `loop continue` だけを許していた規則。続行は `loop dash` に入った。
+rm -f /etc/sudoers.d/loop-continue
 
 # ---- 検査。runner の視点で確かめる ------------------------------------
 fail=0
@@ -51,9 +54,12 @@ fi
 if ! bash -n /usr/local/bin/loop; then
   echo "FAIL: /usr/local/bin/loop does not parse"; fail=1
 fi
-# パスワード無しで許すのは `loop continue` だけ。runner には許さない。
-if ! sudo -l -U "$ADMIN_USER" | grep -q "NOPASSWD: /usr/local/bin/loop continue"; then
-  echo "FAIL: $ADMIN_USER should be able to: sudo -n /usr/local/bin/loop continue"; fail=1
+# パスワード無しで許すのは `loop dash` だけ。runner には許さない。
+if ! sudo -l -U "$ADMIN_USER" | grep -q "NOPASSWD: /usr/local/bin/loop dash"; then
+  echo "FAIL: $ADMIN_USER should be able to: sudo -n /usr/local/bin/loop dash"; fail=1
+fi
+if sudo -l -U "$ADMIN_USER" | grep -q "NOPASSWD: /usr/local/bin/loop continue"; then
+  echo "FAIL: $ADMIN_USER should NOT keep: sudo -n /usr/local/bin/loop continue"; fail=1
 fi
 if sudo -l -U runner 2>/dev/null | grep -q "/usr/local/bin/loop"; then
   echo "FAIL: runner should NOT be able to: sudo /usr/local/bin/loop"; fail=1
