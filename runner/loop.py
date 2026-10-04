@@ -5882,6 +5882,46 @@ def prune_proposal() -> list[str]:
     return removed
 
 
+# validate_plan の L11 の文言。規則を2つ目に実装せず、リンタが言ったことを読む。
+L11_VIOLATION = re.compile(r"L11: step (\S+) provides `(.+)`, which no step requires")
+
+
+def wire_unused_provides(problems: list[str], text: str) -> tuple[str, list[dict]]:
+    """L11 だけで落ちた tasks.json を、ランナーが requires を足して直す。
+
+    L11 の多くは、後のステップが名前を使っているのに requires に書き忘れたものだ。
+    プランナーの直し方もそれで、そのために呼び出しを丸ごと1回使っていた
+    （取り込んだ Unity のプロジェクトの refine で、S3 の
+    `SaveManager.CopyTacticalFromSaveData` を S4 の requires に足しただけ）。
+    提供する側から消すことはしない。そのステップのテストや、後のステップの goal
+    が使っていれば、消すと壊れる。
+
+    足す先は、提供したステップに直接依存し（L3 は直接の依存しか数えない）、
+    goal か acceptance にその名前がそのまま現れるステップ。1つでも足す先の無い
+    名前があれば何もしない。直すかどうかの判断が要るので、プランナーに返す。
+    足した結果を採るかは呼び出し側が proposal_problems で決める。
+    """
+    found = [L11_VIOLATION.fullmatch(p) for p in problems]
+    if not found or not all(found):
+        return text, []
+    tasks = json.loads(text)
+    steps = {s["id"]: s for s in tasks["steps"]}
+    wired = []
+    for match in found:
+        sid, name = match.groups()
+        lines = [p for p in steps[sid]["contracts"]["provides"] if declared_name(p) == name]
+        word = re.compile(rf"(?<![\w.]){re.escape(name)}(?!\w)")
+        users = [s for s in tasks["steps"] if sid in s["depends_on"]
+                 and word.search(s["goal"] + "\n" + json.dumps(s["acceptance"], ensure_ascii=False))]
+        if not lines or not users:
+            return text, []
+        for user in users:
+            requires = user["contracts"].setdefault("requires", [])
+            requires.extend(line for line in lines if line not in requires)
+        wired.append({"step": sid, "name": name, "to": [u["id"] for u in users]})
+    return json.dumps(tasks, ensure_ascii=False, indent=2) + "\n", wired
+
+
 def proposal_problems(proposal: dict[str, str]) -> list[str]:
     """この提案のおかしな点すべて。ランナーが判定するとおりに返す。
 
@@ -5980,6 +6020,20 @@ def plan_with_retry(brief_for, tag: str, keep: dict[str, str] | None = None) -> 
                  f"runner deleted it" for n in removed]
         if removed:
             ledger("PLAN_PRUNED", attempt=attempt, removed=removed)
+
+        # L11 だけなら、ランナーが requires を足して直せることがある。直した計画が
+        # 同じ検査を通ったときだけ採る。out/ のファイルはプランナーの uid のもので
+        # 上書きできないので、PLAN_CARRIED と同じく消してから書く。
+        if problems and "tasks.json" in proposal:
+            wired_text, wired = wire_unused_provides(problems, proposal["tasks.json"])
+            if wired and not proposal_problems({**proposal, "tasks.json": wired_text}):
+                path = PLANNER_OUT / "tasks.json"
+                path.unlink()
+                path.write_text(wired_text, encoding="utf-8")
+                path.chmod(0o644)
+                ledger("PLAN_WIRED", attempt=attempt, wired=wired)
+                problems = []
+
         if not problems:
             if attempt > 1:
                 print(f"the plan passed on attempt {attempt}")

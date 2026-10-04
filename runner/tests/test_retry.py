@@ -14,6 +14,7 @@
     python3 -m unittest discover -s runner/tests
 """
 
+import json
 import sys
 import tempfile
 import unittest
@@ -124,6 +125,62 @@ class AStrayFileIsNotAViolation(RetryFixture):
         with self.assertRaises(loop.Halt):
             self.plan([lambda: (self.out / "task.json").write_text(
                 "{}", encoding="utf-8")], [[]])
+
+
+class AnUnusedProvideIsWiredByTheRunner(RetryFixture):
+    """L11 だけで落ちた計画は、後のステップが名前を使っていれば、ランナーが
+    requires を足して通す。プランナーを呼び直すのは、判断が要るときだけ。"""
+
+    L11 = "L11: step S1 provides `total`, which no step requires"
+
+    def write_plan(self, goal: str) -> None:
+        self.write_proposal()
+        tasks = {"steps": [
+            {"id": "S1", "kind": "unit", "goal": "Sum a list.", "depends_on": [],
+             "contracts": {"provides": ["def total(xs) -> int"], "requires": []},
+             "acceptance": [{"case": "normal", "given": "total([1, 2])", "then": "3"}]},
+            {"id": "S2", "kind": "integration", "goal": goal, "depends_on": ["S1"],
+             "contracts": {"provides": ["def report(xs) -> str"], "requires": []},
+             "acceptance": [{"case": "normal", "given": "report([1, 2])", "then": "'3'"}]},
+        ]}
+        (self.out / "tasks.json").write_text(json.dumps(tasks), encoding="utf-8")
+
+    def requires_of(self, step_id: str) -> list[str]:
+        tasks = json.loads((self.out / "tasks.json").read_text(encoding="utf-8"))
+        return next(s for s in tasks["steps"] if s["id"] == step_id)["contracts"]["requires"]
+
+    def test_a_name_a_dependent_step_uses_is_added_to_its_requires(self):
+        loop.LIMITS["revisions"] = 3
+        code, briefs = self.plan(
+            [lambda: self.write_plan("Format the sum from total(xs).")], [[self.L11], []])
+        self.assertEqual((code, len(briefs)), (0, 1))
+        self.assertEqual(self.requires_of("S2"), ["def total(xs) -> int"])
+        wired = [fields for event, fields in self.events if event == "PLAN_WIRED"]
+        self.assertEqual(wired, [{"attempt": 1, "wired": [
+            {"step": "S1", "name": "total", "to": ["S2"]}]}])
+
+    def test_a_name_no_step_uses_goes_back_to_the_planner(self):
+        # subtotal は total ではない。使う側が無ければ、消すか残すかはプランナーが決める。
+        loop.LIMITS["revisions"] = 3
+        code, briefs = self.plan(
+            [lambda: self.write_plan("Format the sum from subtotal(xs)."), lambda: None],
+            [[self.L11], []])
+        self.assertEqual((code, len(briefs)), (0, 2))
+        self.assertIn(self.L11, briefs[1])
+        self.assertEqual(self.requires_of("S2"), [])
+
+    def test_the_wiring_is_dropped_when_it_breaks_another_rule(self):
+        # 足した計画が別の規則で落ちるなら、プランナーには元の違反を返し、
+        # out/ の計画もプランナーが書いたままにする。
+        loop.LIMITS["revisions"] = 3
+        code, briefs = self.plan(
+            [lambda: self.write_plan("Format the sum from total(xs)."), lambda: None],
+            [[self.L11], ["L3: step S2 requires `total`, which no dependency provides"], []])
+        self.assertEqual((code, len(briefs)), (0, 2))
+        self.assertIn(self.L11, briefs[1])
+        self.assertNotIn("L3", briefs[1])
+        self.assertEqual(self.requires_of("S2"), [])
+        self.assertNotIn("PLAN_WIRED", [event for event, _ in self.events])
 
 
 class TheAttemptCeiling(RetryFixture):
