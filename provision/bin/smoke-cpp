@@ -1,0 +1,73 @@
+#!/usr/bin/env bash
+# C++ のテストがビルドされ、走り、junit のレポートを出すか。
+#
+#     sudo -u runner -H /srv/loop/bin/smoke-cpp
+#
+# 37-cpp.sh がプロビジョニングのたびに流す。ランナーと同じ形の CMakeLists.txt
+# （コードは静的ライブラリ、テストは gtest_main とつなぐ）で、通るテスト、
+# アサーションで落ちるテスト、スタブの例外で落ちるテストを1つずつ置く。3件走って
+# 2件落ちることを確かめ、落ちたテストの message をそのまま出す。ランナーは
+# 失敗の種類をそこから読む（cpp_failure_kind）ので、GoogleTest の版を変えたときに
+# 形が変わっていないかをここで見る。
+set -euo pipefail
+export LC_ALL=C LANG=C
+
+WORK="$(mktemp -d)"
+trap 'rm -rf "$WORK"' EXIT
+mkdir -p "$WORK/src/calc" "$WORK/tests" "$WORK/build"
+
+cat > "$WORK/src/calc/Calc.h" <<'EOF'
+#pragma once
+int add(int a, int b);
+int unwritten();
+EOF
+cat > "$WORK/src/calc/Calc.cpp" <<'EOF'
+#include "calc/Calc.h"
+#include <stdexcept>
+int add(int a, int b) { return a + b; }
+int unwritten() { throw std::logic_error("__stub__"); }
+EOF
+cat > "$WORK/tests/CalcTest.cpp" <<'EOF'
+#include <gtest/gtest.h>
+#include "calc/Calc.h"
+TEST(CalcTest, AddsTwoNumbers) { EXPECT_EQ(5, add(2, 3)); }
+TEST(CalcTest, FailsOnPurpose) { EXPECT_EQ(6, add(2, 3)); }
+TEST(CalcTest, HitsTheStub) { EXPECT_EQ(1, unwritten()); }
+EOF
+cat > "$WORK/build/CMakeLists.txt" <<EOF
+cmake_minimum_required(VERSION 3.16)
+project(LoopCpp CXX)
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+find_package(GTest REQUIRED)
+add_library(loop_code STATIC "$WORK/src/calc/Calc.cpp")
+target_include_directories(loop_code PUBLIC "$WORK/src" "$WORK")
+add_executable(loop_tests "$WORK/tests/CalcTest.cpp")
+target_link_libraries(loop_tests PRIVATE loop_code GTest::gtest_main)
+EOF
+
+cmake -S "$WORK/build" -B "$WORK/build/out" -G "Unix Makefiles" -DCMAKE_BUILD_TYPE=Debug >/dev/null
+cmake --build "$WORK/build/out" --parallel >/dev/null
+"$WORK/build/out/loop_tests" --gtest_output="xml:$WORK/report.xml" \
+  --gtest_also_run_disabled_tests --gtest_filter='CalcTest.*' >/dev/null || true
+
+python3 - "$WORK/report.xml" <<'PY'
+import sys
+import xml.etree.ElementTree as ET
+
+root = ET.parse(sys.argv[1]).getroot()
+tests = sum(int(s.get("tests", 0)) for s in root.iter("testsuite"))
+failures = sum(int(s.get("failures", 0)) for s in root.iter("testsuite"))
+for failure in root.iter("failure"):
+    print(f"  message: {failure.get('message')!r}")
+if (tests, failures) != (3, 2):
+    print(f"smoke-cpp: expected 3 tests and 2 failures, got {tests} and {failures}", file=sys.stderr)
+    sys.exit(1)
+messages = [f.get("message") or "" for f in root.iter("failure")]
+if not any('C++ exception with description "__stub__"' in m for m in messages):
+    print("smoke-cpp: the stub's exception is not reported in the form the runner reads",
+          file=sys.stderr)
+    sys.exit(1)
+print("smoke-cpp: ok")
+PY

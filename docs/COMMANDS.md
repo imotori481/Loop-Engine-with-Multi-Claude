@@ -52,6 +52,7 @@ PowerShell なら `.\host\loop.cmd <args>`、Git Bash なら `./host/loop.cmd <a
 |---|---|
 | 要件から最後まで走らせる | `loop go <requirements>` |
 | TypeScript で走らせる | `loop go <requirements> --language typescript` |
+| C++ で走らせる | `loop go <requirements> --language cpp` |
 | 状態を見る | `loop status` |
 | ログを追う（Ctrl-C で抜けても走行は続く） | `loop log` |
 | 止まったところから続ける | `loop continue` |
@@ -195,6 +196,21 @@ git push origin <pr-branch>
 - `.gitignore` に `node_modules/` があると `35-node.sh` が止まる
 - 依存パッケージは入らない。箱にあるのは pytest と vitest だけだ
 - 既存のファイルでは、スタブは計画が挙げた名前の宣言だけを差し替える。既存のテストは凍結されるので、振る舞いを変えるとそのテストが回帰として落ちる
+
+## C++ で作業させる
+
+```bash
+loop go <requirements> --language cpp
+```
+
+箱は標準の C++17 のロジックだけを g++ と GoogleTest で確かめる。DXライブラリや Windows の API は箱に無い。
+
+- `DxLib.h` や `windows.h` のように、標準でもリポジトリのものでもないヘッダを include するファイルはビルドから外す。外したファイルは計画づくりのブリーフに並ぶ
+- 描画、入力、音を扱うファイルもソルバーが書けるが、箱ではビルドも実行もしない。人が Visual Studio でビルドして画面を確かめる
+- `DxLib.h` を include するファイルがあるか、要件が DXライブラリに触れていれば、プランナーに DXライブラリの主な関数の早見表を渡す
+- 新しい `.cpp` と `.h` は Visual Studio のプロジェクト（`.vcxproj`）に入らない。CONTEXT.md の一覧を見て、人が足す
+- ソースは ASCII だけで書かせる。画面に日本語を出すなら、Visual Studio でソースの文字コードの扱い（`/utf-8` など）を決めてから人が書き足す
+- C++ の既存コードの宣言はまだプランナーに渡らない。スタブはソルバーが書き、ランナーは既存のファイルの残りが変わっていないかを確かめない
 
 ## 見る
 

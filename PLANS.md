@@ -18,6 +18,9 @@
 | 未着手 | C# の計画を箱で走らせる | 要件から緑まで届くことと、出来たコードが Unity に取り込めることを確かめる | 既存のコードの無い新しいプロジェクトで、`requirements/INCREMENTAL_CORE_CSHARP.md`（INCREMENTAL_CORE と同じ題材）を `loop go --language csharp`。Unity の参照は送らず、netstandard2.1 だけでコンパイルする。出来たコードとテストを人が Unity の `Assets/` に置き、コンパイルと EditMode テストを通す | `requirements/INCREMENTAL_CORE_CSHARP.md`、`docs/HANDOFF.md`、`README.md` |
 | 未着手 | thm で既存の C# を書き換える計画を走らせる | Unity のプロジェクトの既存のクラスを書き換え、既存の型を使うステップが緑まで届くことと、Unity でそのまま開けることを確かめる | thm の小さな要件で `loop go --language csharp`。書き換えないメンバーの本文が HEAD と同じであることを `git diff` で確かめ、人が Unity で開いてコンパイルと EditMode テストを通す | `docs/HANDOFF.md`、`README.md` |
 | 未着手 | 既存のファイルを書き換える計画を箱で走らせる | 取り込んだリポジトリで、既存の関数を書き換えるステップと、既存の型を使うステップが緑まで届くことを確かめる | TypeScript。`requirements/local/cart-fixture` のカートを取り込み、`requirements/local/cart-tax.md` で `loop go --language typescript`。書き換えない関数の本文が HEAD と同じであることを `git diff` で、差し込んだスタブが vitest でコンパイルできることを RED_GATE で確かめる | `docs/HANDOFF.md`、`README.md` |
+| 未着手 | C++ の計画を箱で走らせる | 要件から緑まで届くことと、出来たコードが DXライブラリのプロジェクトに取り込めることを確かめる | `37-cpp.sh` と `smoke-cpp` を箱で流し、GoogleTest の junit の `message` の形が `cpp_failure_kind` の読み方と合うかを見る。WinMain だけを持つ DXライブラリのプロジェクトを取り込み、小さな要件で `loop go --language cpp`。`main.cpp` がビルドから外れること、外したファイルとDXライブラリの早見表がブリーフに出ること、範囲外の添字で落ちたときの扱いを確かめる。出来たコードを人が Visual Studio のプロジェクトに足し、ビルドして動かす | `runner/loop.py`、`docs/HANDOFF.md`、`README.md` |
+| 未着手 | C++ のスタブを契約から書く | ソルバーに頼まずにビルドの通るスタブを置く。C++ は1ファイルでも壊れるとテストのプログラム全体がビルドできない | C# の `generate_csharp_stub` に倣い、契約の型の行とメンバー関数の行と自由関数の行からヘッダと `.cpp` を書く。本体は `CPP_STUB_BODY`、データメンバーは `{}` で初期化する | `runner/loop.py`、`runner/tests/test_cpp.py` |
+| 未着手 | C++ の既存コードを扱う | 取り込んだ C++ のプロジェクトで、既存の関数を書き換えるステップと、既存の型を使うステップを扱う | ヘッダから公開の宣言を読んで `existing_contracts` に渡し、スタブが provides の名前のほかを変えていないことを `top_level_units` で確かめる。プリプロセッサの条件とテンプレートの扱いを決める | `runner/loop.py`、`runner/tests/test_cpp.py` |
 
 ### 着手前に決めること
 
@@ -29,6 +32,7 @@
 
 ## 更新履歴
 
+- 2026/10/04: C++ を計画の言語に足し、箱では標準の C++17 のロジックだけを GoogleTest で確かめ、DXライブラリを include するファイルはビルドから外すことに決定。C++ の実走、スタブの生成、既存コードの扱いの作業を追加
 - 2026/09/30: 取り込んだ Unity のプロジェクトの実走で、ソルバーが既存のヘルパーを見つけられずに同じ処理の static 関数を足していたので、ソルバーのツールに Grep と Glob を追加。トークンの削減より成果物の品質を先にとる
 - 2026/09/30: 取り込んだ Unity のプロジェクトの実走で、C# の入れ子の型のスタブをソルバーに回していたために S1 が止まったので、ランナーが入れ子の型のスタブを書くように変更
 - 2026/09/30: 取り込んだ Unity のプロジェクトの実走で、TEST_WRITE のやり直しが既存のファイルを戻さない誤りと、reset が追跡されたファイルの無い柵を消す誤りを見つけて修正

@@ -247,7 +247,7 @@ cd /tmp && sudo ADMIN_USER=<保守ユーザー> bash /opt/loop-engine/provision/
 pull したあとも同じ行を流す。
 
 `05-isolation.sh` が WSL 隔離（Windows パス非マウント、WSLg、systemd、NAT）を、
-`35-node.sh` が Node 側の凍結を、`36-dotnet.sh` が .NET 側の凍結を、`40-perms.sh` が solver 視点の権限モデルを、
+`35-node.sh` が Node 側の凍結を、`36-dotnet.sh` が .NET 側の凍結を、`37-cpp.sh` が C++ のビルドを、`40-perms.sh` が solver 視点の権限モデルを、
 `45-agent-invoke.sh` が資格情報の柵を assert する。1つでも落ちたら異常終了する。
 `05-` を最初に走らせるのは、隔離が効いていないディストロには
 **プロビジョニングする意味が無い**（以降の全ステップが成功しつつ何も意味しなくなる）ため。
@@ -296,6 +296,26 @@ NUnit のテストで走らせ、junit のレポートから2件走って1件落
 
 ```bash
 sudo -u runner -H /srv/loop/bin/smoke-dotnet
+```
+
+`37-cpp.sh` は C++ の計画のための g++、make、CMake、GoogleTest を用意する。
+
+| もの | 場所 | 持ち主 |
+|---|---|---|
+| g++、make、CMake、GoogleTest（`libgtest-dev`） | Ubuntu の archive | apt |
+| ランナーが書く CMakeLists.txt とビルドの出力 | `/srv/loop/cpp/build` | runner、700 |
+
+- 箱でビルドするのは標準の C++17 だけ。DXライブラリや Windows の API は入れない
+- 標準でもリポジトリのものでもないヘッダ（`DxLib.h`、`windows.h` など）を include するファイルは、ランナーがビルドから外す。外したファイルは計画づくりのブリーフに並ぶ
+- CMakeLists.txt はプロジェクトの根に置かない。取り込んだプロジェクトのビルドの設定とぶつかる
+- `build` はコンパイルしたコードとテストを持つので、planner と critic から見えてはならない（BOOTSTRAP 1-1）
+
+最後に `smoke-cpp` を流す。ランナーと同じ形の CMakeLists.txt でビルドし、3件走って2件落ちたことを
+junit のレポートから読む。1件はアサーション、1件はスタブの例外（`std::logic_error("__stub__")`）で落とす。
+ランナーは失敗の種類を `message` から読むので、GoogleTest の版が変わったら形を見る。
+
+```bash
+sudo -u runner -H /srv/loop/bin/smoke-cpp
 ```
 
 Unity の参照アセンブリを置いたプロジェクト（ホストの `loop-unity-refs`）では、`probe-unity` で
@@ -368,7 +388,7 @@ sudo -u runner /srv/loop/bin/smoke-critic
 ホストからは `host\loop.cmd` で同じコマンドを呼べる（`host/README.md`）。
 
 ```bash
-loop go <要件>.md                     # TypeScript なら --language typescript
+loop go <要件>.md                     # 言語は --language typescript / csharp / cpp
 loop status                          # 走っているか、人への問い、台帳の末尾
 loop now                             # いまの作業を JSON で出す（ダッシュボードが読む）
 loop log                             # 走行ログを追う。Ctrl-C で抜けても走行は続く
