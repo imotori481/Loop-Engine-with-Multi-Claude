@@ -708,6 +708,9 @@ LANGUAGES = {
         # 20-layout.sh はどの言語の箱にも置く。ほかの言語の計画には見せない。
         "environment_files": frozenset({"conftest.py"}),
         "naming_note": "",
+        "stub_shape": "a stub that returns a wrong value of the right type",
+        "stub_note": "",
+        "fixable_crashes": None,
         "provides_pattern": re.compile(r"(?:def|class)\s+([A-Za-z_]\w*)"),
         "red_kinds": RED_KINDS,
         "source_suffix": ".py",
@@ -743,6 +746,9 @@ criteria above are prose and contain apostrophes ("the result's resource"),
 and one of those inside a single-quoted name ends the string: the file stops
 compiling and not one of your tests runs.
 """,
+        "stub_shape": "a stub that returns a wrong value of the right type",
+        "stub_note": "",
+        "fixable_crashes": None,
         "provides_pattern": re.compile(
             r"(?:function|class|interface|type|enum|const|let)\s+([A-Za-z_]\w*)"),
         "red_kinds": RED_KINDS,
@@ -812,6 +818,29 @@ A test is a C# method, and its name is an identifier: letters, digits and
 underscores only. Name it after the criterion in PascalCase with underscores
 (`Score_counts_every_row`); do not copy the criterion's prose into it.
 """,
+        # スタブのフィールドは宣言だけで、初期化子を持たない（CSHARP_STUB_BODY）。
+        # 取り込んだ Unity のプロジェクトの回で、配列のフィールドを足す S3 が、準備の
+        # 段の `d.arr[0] = 999` で NullReferenceException になり、R5 で2回止まった。
+        # 書き手はフィールドが null だと知らされていなかった。
+        "stub_shape": "a stub whose methods throw",
+        "stub_note": """
+THE STUB, IN C#. Every method and constructor this step provides throws
+`NotImplementedException("__stub__")`, and a test that dies on that exception
+counts as red. Every field and auto-property this step provides is declared
+WITHOUT its initialiser, so against the stub it holds its default: null for an
+array, a List, a string or any class; 0 or false for a value type.
+
+A test that indexes, iterates, reads `.Length` or `.Count` of, or calls a method
+on such a member while it is null dies with NullReferenceException. That is not
+a red test. It is a broken one, and the step is rejected. So before the first
+use of a reference-type member this step provides -- in the arrange part of a
+test as much as in its assertions -- write `Assert.IsNotNull(member, "<name>")`,
+and before an index, assert that the length is large enough.
+""",
+        # 上の誤りでテストが落ちたときは、書き手が直せる。スタブはランナーが契約から
+        # 書いたもので、落ちたのはテストの側だ。
+        "fixable_crashes": re.compile(
+            r"^System\.(?:NullReferenceException|IndexOutOfRangeException)$"),
         "provides_pattern": re.compile(
             r"\b(?:class|struct|enum|interface)\s+([A-Za-z_]\w*)"
             r"|([A-Za-z_]\w*\.[A-Za-z_]\w*)\s*(?:\(|\{|;|=|$|--|<)"),
@@ -1579,7 +1608,7 @@ limit 1) and then write the whole file.
 
 
 def brief_test_write(step: dict, context: str, broken: str = "",
-                     replaced: list[str] | None = None) -> str:
+                     replaced: list[str] | None = None, crashed: str = "") -> str:
     # goal は渡さない。テストは受け入れ条件から作るもので、これからソルバーに
     # 頼む実装の説明から作るものではない。
     acceptance = render_acceptance(step)
@@ -1595,10 +1624,9 @@ Write tests for the signatures above. Do not write an implementation.
 {chr(10).join(step["files_test"])}
 
 Write nothing outside those paths. The implementation does not exist yet, so
-every test you write must fail when run against a stub that returns a wrong
-value of the right type. Do not weaken a test to make it pass, and do not
-create the module under test.
-{replaced_tests_section(replaced or [], step["expected_tests"])}{naming_note()}{compile_failure_section(broken)}"""
+every test you write must fail when run against {LANGUAGE["stub_shape"]}.
+Do not weaken a test to make it pass, and do not create the module under test.
+{LANGUAGE["stub_note"]}{replaced_tests_section(replaced or [], step["expected_tests"])}{naming_note()}{compile_failure_section(broken)}{crash_section(crashed)}"""
 
 
 def compile_failure_section(broken: str) -> str:
@@ -1621,6 +1649,41 @@ Nothing you wrote ran. The file was discarded and you are writing it again.
 Read the line and column. Fix that, and check every other line for the same
 mistake before you finish -- whatever produced it once usually produced it in
 several places.
+"""
+
+
+def crashed_tests(run_: TestRun) -> str:
+    """スタブに対して、テスト自身の誤りで落ちたテストの名前と例外。無ければ空。
+
+    赤と認めない失敗が1つでもあり、そのすべてが言語の `fixable_crashes` に当たる
+    ときだけ返す。ほかの種類が混ざっていれば、壊れているのは契約かもしれず、
+    書き直しでは直らない。
+    """
+    fixable = LANGUAGE["fixable_crashes"]
+    bad = [(kind, detail) for kind, detail in zip(run_.failure_kinds, run_.failure_details)
+           if not LANGUAGE["red_kinds"].match(kind)]
+    if fixable is None or not bad or not all(fixable.match(kind) for kind, _ in bad):
+        return ""
+    return chr(10).join(detail for _, detail in bad)
+
+
+def crash_section(crashed: str) -> str:
+    """スタブに対して落ちたテストを、そのまま返す。compile_failure_section と同じ理由だ。"""
+    if not crashed:
+        return ""
+    return f"""
+# YOUR LAST ATTEMPT CRASHED AGAINST THE STUB
+
+The file compiled and ran, but these tests died on an exception of their own,
+not on an assertion and not on the stub's exception. A crash is not a red test.
+The file was discarded and you are writing it again.
+
+{crashed}
+
+In each of them, find the line that uses a member while it can still be null
+or too short -- often in the arrange part, before anything is asserted -- and
+put an assertion in front of it. Check every other test for the same pattern
+before you finish.
 """
 
 
@@ -3311,6 +3374,12 @@ Write no other file. A fourth filename is rejected without being read.
 # What you may change about a step that already exists
 The goal, the contracts, files_write, files_test, depends_on, max_attempts.
 That is: how the step is approached, and how it is described to the solver.
+
+The goal reaches only the solver that writes the implementation. The solver
+that writes the tests reads the contracts (invariants included) and the
+acceptance criteria, and never the goal. An instruction about how the tests
+must be written belongs in `contracts.invariants`; written into the goal, it
+reaches no one who writes a test.
 
 # What is rejected mechanically
 - changing any `acceptance` entry of a step that already exists
@@ -6645,10 +6714,14 @@ def run_step(step_id: str, unvalidated: bool = False) -> int:
         # 警告していた。ソルバーが無視できる指示は、コンパイラ自身の言葉を渡す
         # やり直しより価値が低い。
         #
+        # もう1つ、ランナーが書いたスタブに対してテストが自分の誤りで落ちたときも
+        # やり直す（crashed_tests）。スタブは契約から機械的に書いたもので、プランナー
+        # が goal をどう締めても、goal はテストの書き手に届かない。
+        #
         # ほかの理由ではやり直さない。意図したことだ。落ちるテストや、スタブに
         # 対して通るテストは、頼んだ内容の問題で、もう一度頼んでも同じ誤解を引き
         # 直すために払うだけだ。
-        broken = ""
+        broken = crashed = ""
         for write_attempt in range(1, LIMITS["test_writes"] + 1):
             set_writable(tests=True, src=False)
             # files_test のうち HEAD にあるものは、計画より前からあるテストで、この
@@ -6656,7 +6729,7 @@ def run_step(step_id: str, unvalidated: bool = False) -> int:
             replaced = sorted(head_sources(step["files_test"]))
             if replaced and write_attempt == 1:
                 ledger("TESTS_REPLACED", step=step_id, files=replaced)
-            call_solver("TEST_WRITE", brief_test_write(step, context, broken, replaced))
+            call_solver("TEST_WRITE", brief_test_write(step, context, broken, replaced, crashed))
             assert_touched("TEST_WRITE", step["files_test"])
             assert_written("TEST_WRITE", step["files_test"])
             ledger("TEST_WRITE", step=step_id, ok=True, attempt=write_attempt)
@@ -6688,8 +6761,19 @@ def run_step(step_id: str, unvalidated: bool = False) -> int:
             red = pytest_run(f"red-{write_attempt}", step["files_test"])
             broken = chr(10).join(k for k in red.failure_kinds
                                   if k.startswith("<did not compile"))
-            if not broken:
+            crashed = "" if broken or written is None else crashed_tests(red)
+            if not (broken or crashed):
                 break
+            if crashed:
+                # 最後の試行なら、ファイルを残したまま RED_GATE に渡す。R5 で止まり、
+                # 落ちたテストはエスカレーションに載る。
+                if write_attempt == LIMITS["test_writes"]:
+                    break
+                ledger("TEST_WRITE", step=step_id, ok=False, attempt=write_attempt,
+                       reason="tests crashed against the stub")
+                set_writable(tests=True, src=True)
+                restore_to_head(step["files_test"] + step["files_write"])
+                continue
 
             # コンパイルの確認はスタブの前ではなく後でなければならない。
             # TEST_WRITE の時点ではテスト対象のモジュールがまだ無いので、
@@ -6736,9 +6820,12 @@ def run_step(step_id: str, unvalidated: bool = False) -> int:
                 "passing: " + ", ".join(red.passed_names))
         bad = sorted({k for k in red.failure_kinds if not LANGUAGE["red_kinds"].match(k)})
         if bad:                                                            # R5
+            crashes = [detail for kind, detail in zip(red.failure_kinds, red.failure_details)
+                       if not LANGUAGE["red_kinds"].match(kind)]
             raise Halt("RED_GATE",
                        "R5: failures are not assertions -- the calls themselves are broken",
-                       "types seen: " + ", ".join(bad))
+                       ("types seen: " + ", ".join(bad) + chr(10) * 2
+                        + chr(10).join(crashes)).strip()[:4000])
         ledger("RED_GATE", step=step_id, tests=red.tests, failures=red.failures, ok=True)
 
         # --- REVIEW_GATE ------------------------------------------------

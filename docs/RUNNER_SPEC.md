@@ -390,6 +390,10 @@ vitest は**テストファイルごとに1つ**書く。VERIFY は `tests/` 全
 
 不合格時の扱い:
 - R5 違反（AttributeError 等）→ STUB をやり直させる（`stub_attempts` 上限 2）
+- C# で、ランナーが書いたスタブに対する R5 違反が `NullReferenceException` と `IndexOutOfRangeException`
+  だけ → 落ちたテストの名前と例外を載せて TEST_WRITE をやり直させる（`test_writes` 上限 3）。
+  最後の試行でも落ちれば、ファイルを残したまま R5 でエスカレーションする
+- R5 違反でエスカレーションするとき、`ESCALATION.md` の Detail に落ちたテストの名前と例外を載せる
 - R1 違反 → テストと `expected_tests` の不一致。**プランナーへエスカレーション**
 - R4 違反（スタブが通ってしまった）→ テストが自明。**プランナーへエスカレーション**
 
@@ -652,7 +656,8 @@ L14 と L15 はまさにそれを保証するために在る。
   `InvalidCastException` になる（実測）。R5 はこの印の付いた例外（`StubNotImplemented`）と
   アサーションだけを赤と認め、印の無い `NotImplementedException` は拒む。名前空間は柵の中の
   フォルダから作り、ほかのフォルダの型は `using` で持ち込む。契約に Unity の型が現れ、Unity の
-  参照があれば `using UnityEngine;` を足す
+  参照があれば `using UnityEngine;` を足す。TEST_WRITE のブリーフは、スタブのフィールドが既定値
+  （参照型なら null）であることを伝え、使う前に `Assert.IsNotNull` を置かせる
 - **C# の入れ子の型もランナーが書く。** 契約の `class Board.Cursor` と `int Board.Cursor.Position` は、
   Board の中の入れ子の型とそのメンバーを表す。入れ子の型は外側の型のメンバーの後ろに丸ごと置き、
   型の頭に `public` を付ける。C# の入れ子の型の既定は private だからだ。ソルバーに書かせると、
@@ -1425,6 +1430,7 @@ v1 の実装はこの表をまだ使っておらず、`0 / 1 / 2 / 3` の4値で
 
 ## 更新履歴
 
+- 2026/10/01: §4-1 に C# のスタブに対して落ちたテストの書き直しを追加し、§5 に C# のフィールドの既定値の伝達を追加
 - 2026/09/30: §5-1 と §5-3 に C# の入れ子の型のスタブを追加
 - 2026/09/29: §9 に `plan refine --resume` を追加
 - 2026/09/29: §6-6 に、終えた計画を退避して次の計画を起こす規則を追加
