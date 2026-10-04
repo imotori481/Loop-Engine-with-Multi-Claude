@@ -18,9 +18,14 @@
     <section>
       <div class="section-title"><h2>操作</h2></div>
       <p id="control-note" class="why" hidden></p>
-      <div class="control-grid">
-        <article class="panel">
-          <h3>走行</h3>
+      <div id="control-tabs" class="tabs" role="tablist">
+        <button role="tab" data-tab="run" aria-selected="true">走行</button>
+        <button role="tab" data-tab="projects-panel" aria-selected="false">プロジェクト</button>
+        <button role="tab" data-tab="models-panel" aria-selected="false">役のモデル</button>
+        <button role="tab" data-tab="pull-panel" aria-selected="false" class="local-only">ホストの写し</button>
+      </div>
+      <div class="tab-panels">
+        <article id="run" class="panel" role="tabpanel">
           <p id="run-state" class="why">読み込み中</p>
           <div id="start-form" class="form local-only">
             <label><span>要件</span><input id="requirements" type="file" accept=".md,.markdown,.txt"></label>
@@ -29,19 +34,16 @@
           </div>
           <div class="actions"><button id="continue-run" class="quiet">続ける（loop continue）</button><button id="stop-run" class="danger">停止（loop stop）</button></div>
         </article>
-        <article class="panel">
-          <h3>プロジェクト</h3>
+        <article id="projects-panel" class="panel" role="tabpanel" hidden>
           <div class="table-wrap flat"><table><thead><tr><th>名前</th><th>状態</th><th>ブランチ</th><th></th></tr></thead><tbody id="projects"></tbody></table></div>
           <div id="switch" hidden><p id="switch-state" class="why"></p><pre id="switch-log"></pre></div>
         </article>
-        <article class="panel">
-          <h3>役のモデル</h3>
+        <article id="models-panel" class="panel" role="tabpanel" hidden>
           <p class="why">/etc/loop/&lt;役&gt;.env の LOOP_MODEL と LOOP_EFFORT。空ならアカウントの既定。保存すると次の呼び出しから効く。</p>
           <div id="models" class="stack"><p class="why">読み込み中</p></div>
           <datalist id="model-options"></datalist>
         </article>
-        <article class="panel local-only">
-          <h3>ホストの写し</h3>
+        <article id="pull-panel" class="panel" role="tabpanel" hidden>
           <p class="why">loop-pull で、ホストの写しを箱の先まで進める。予定レビューと台帳の欄は写しを読む。</p>
           <div class="actions"><span id="pull-state"></span><button id="pull">写しを更新（loop-pull）</button></div>
           <pre id="pull-log" hidden></pre>

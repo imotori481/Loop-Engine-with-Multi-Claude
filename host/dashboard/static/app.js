@@ -656,6 +656,29 @@ async function watchPull() {
   else if (value.finished) await refresh();
 }
 
+// 操作の4つの欄はタブで切り替える。選んだタブは、この端末のブラウザにだけ覚える。
+const TAB_KEY = "loop-dashboard-tab";
+
+function selectTab(name) {
+  const tabs = [...document.querySelectorAll("#control-tabs [role=tab]")].filter(tab => !tab.hidden);
+  const chosen = tabs.find(tab => tab.dataset.tab === name) || tabs[0];
+  for (const tab of tabs) {
+    const selected = tab === chosen;
+    tab.setAttribute("aria-selected", selected);
+    document.getElementById(tab.dataset.tab).hidden = !selected;
+  }
+  try { localStorage.setItem(TAB_KEY, chosen.dataset.tab); } catch { /* 覚えられなくても切り替えはできる */ }
+}
+
+function setupTabs() {
+  for (const tab of document.querySelectorAll("#control-tabs [role=tab]")) {
+    tab.onclick = () => selectTab(tab.dataset.tab);
+  }
+  let remembered = null;
+  try { remembered = localStorage.getItem(TAB_KEY); } catch { /* 既定の「走行」を開く */ }
+  selectTab(remembered);
+}
+
 function setupControl() {
   document.querySelector("#model-options").append(...MODEL_OPTIONS.map(name => new Option(name)));
   if (session.scope !== "local") {
@@ -664,6 +687,8 @@ function setupControl() {
     note.hidden = false;
     note.textContent = "リモートからは停止と続行だけができます。開始、プロジェクトの切り替え、モデルの変更、写しの更新はこの機械の前で。";
   }
+  // リモートで隠した「ホストの写し」のタブを選ばないよう、隠したあとで開く。
+  setupTabs();
   const start = document.querySelector("#start-run");
   start.onclick = () => startRun(start);
   const resume = document.querySelector("#continue-run");

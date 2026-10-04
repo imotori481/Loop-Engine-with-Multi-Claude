@@ -44,7 +44,12 @@ tr.active td { background: #173d30; } td.goal { font-family: inherit; }
 .tip { position: absolute; pointer-events: none; background: #09110f; border: 1px solid #3d5d51; border-radius: 8px; padding: 8px 10px; font-size: .82rem; white-space: nowrap; }
 .tip span { color: #edf5ef; letter-spacing: 0; font-size: inherit; } .tip div { display: flex; gap: 8px; align-items: center; } .tip b { margin-left: auto; padding-left: 12px; font-family: Consolas, monospace; }
 details { margin-top: 14px; } summary { cursor: pointer; color: #9bb7a8; font-size: .88rem; } details .table-wrap { margin-top: 10px; padding: 0; border: 0; }
-.control-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 14px; }
+.tabs { display: flex; gap: 4px; border-bottom: 1px solid #29443a; overflow-x: auto; }
+.tabs button { background: transparent; border: 1px solid transparent; border-bottom: 0; border-radius: 10px 10px 0 0; color: #9bb7a8; padding: 9px 16px; font-weight: 600; white-space: nowrap; }
+.tabs button:hover { background: #101b18; color: #edf5ef; }
+.tabs button[aria-selected="true"] { background: #101b18dd; border-color: #29443a; color: #edf5ef; margin-bottom: -1px; border-bottom: 1px solid #101b18; }
+.tab-panels > .panel { border-top-left-radius: 0; border-top: 0; }
+.panel[hidden] { display: none; }
 .panel { display: grid; gap: 12px; align-content: start; } .panel h3 { margin: 0; }
 .panel pre { margin: 0; max-height: 220px; font-size: .8rem; background: #09110f; border: 1px solid #223a31; border-radius: 8px; padding: 10px; }
 .form { display: grid; gap: 10px; } .form label { display: grid; gap: 4px; }
@@ -57,4 +62,4 @@ tr.current td { background: #173d30; }
 button.danger { background: #6b2a1c; border-color: #d9805f; } button.danger:hover { background: #8a3826; }
 #run-state.running { color: #86c9a7; font-weight: 700; }
 @media (max-width: 700px) { .summary { grid-template-columns: 1fr; } .request-actions { align-items: stretch; flex-direction: column; }
-  .control-grid { grid-template-columns: 1fr; } .model-row { grid-template-columns: 1fr 1fr; } .model-row span { grid-column: 1 / -1; } }
+  .model-row { grid-template-columns: 1fr 1fr; } .model-row span { grid-column: 1 / -1; } }
