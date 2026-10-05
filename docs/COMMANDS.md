@@ -287,7 +287,15 @@ Tailscale のログインを書く。どちらかが無ければ、tailnet か�
 
 ### 更新する（箱）
 
-スクリプトやランナーを更新したら、pull してからプロビジョニングを流し直す。何度流しても同じ状態になる。
+スクリプトやランナーを更新したら、`loop update` を流す。このリポジトリを pull し、プロビジョニングを
+流し直す。何度流しても同じ状態になる。走行中とプロジェクトの切り替え中は断る。
+ホストからは `host\loop.cmd` で `loop update` と打つ。
+
+```bash
+loop update
+```
+
+`loop update` は最初のプロビジョニングが置く。それより前は次の2行を流す。
 
 ```bash
 sudo git -C /opt/loop-engine pull

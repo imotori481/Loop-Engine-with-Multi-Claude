@@ -216,7 +216,8 @@ sudo git clone -b develop <このリポジトリの https URL> /opt/loop-engine
 ```
 
 箱には GitHub の鍵を置かないので、https で取る。改行コードは `.gitattributes` で LF に
-なるので変換は要らない。スクリプトの更新は pull で取り込む:
+なるので変換は要らない。スクリプトの更新は、最初のプロビジョニングの後は `loop update` で
+取り込む（§2-10）。それより前は pull で取り込む:
 
 ```bash
 sudo git -C /opt/loop-engine pull
@@ -396,7 +397,10 @@ loop continue                        # 止まったところから続ける
 loop stop                            # 走行を止める
 loop findings                        # クリティックの指摘を出す
 loop findings set                    # 指摘1件を書き換える。標準入力に JSON を渡す
+loop update                          # このリポジトリを pull し、プロビジョニングを流し直す
 ```
+
+`loop update` は、走行中とプロジェクトの切り替え中は断る。pull は fast-forward だけを受ける。
 
 `loop go` は要件を `/srv/loop/human/in/REQUIREMENTS.md` に置き、次を順に裏で流す。
 

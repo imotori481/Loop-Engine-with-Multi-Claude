@@ -284,6 +284,16 @@ cmd_stop() {
   echo "    loop raw reset <ステップ>"
 }
 
+# このリポジトリを pull し、プロビジョニングを流し直す。プロビジョニングはこのファイル
+# 自身を置き直すので、exec で最後に渡す。bash はスクリプトを読みながら実行するため、
+# 置き直された後の行を読ませない。
+cmd_update() {
+  running && die "走っている間は更新できない。先に 'loop stop'"
+  switching && die "ダッシュボードがプロジェクトを切り替えている。終わるのを待つ"
+  sudo git -C "$ENGINE" pull --ff-only
+  exec sudo ADMIN_USER="$(id -un)" bash "$ENGINE/provision/provision.sh"
+}
+
 usage() {
   cat >&2 <<'EOF'
 使い方: loop <コマンド>
@@ -301,7 +311,8 @@ usage() {
   stop              走行を止める
   project <引数>    プロジェクトの一覧と切り替え。'loop project' で使い方を出す
   raw <引数>        loop.py をそのまま runner として前面で呼ぶ。'loop raw --help' で動詞の一覧
-  dash              ホストのダッシュボードの入口。'sudo -n /usr/local/bin/loop dash' で流し、
+  update            このリポジトリを pull し、プロビジョニングを流し直す
+  dash            ホストのダッシュボードの入口。'sudo -n /usr/local/bin/loop dash' で流し、
                     標準入力に要求の JSON を渡す
 EOF
   exit 2
@@ -320,7 +331,8 @@ case "${1:-}" in
     switching && die "ダッシュボードがプロジェクトを切り替えている。終わるのを待つ"
     sudo ADMIN_USER="$(id -un)" bash "$PROJECT_SH" "$@" ;;
   raw)      shift; as_runner python3 -u "$LOOP/runner/loop.py" "$@" ;;
-  dash)     [ $# -eq 1 ] || usage; cmd_dash ;;
+  update)   [ $# -eq 1 ] || usage; cmd_update ;;
+  dash)    [ $# -eq 1 ] || usage; cmd_dash ;;
   __work)   shift; work "$@" ;;
   *)        usage ;;
 esac
