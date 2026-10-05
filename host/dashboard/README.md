@@ -28,7 +28,7 @@
 - **リモートは「駄目だ」と言えるが「良い」とは言えない。** 予定レビューの承認は
   ローカルのみ。画面を見られない端末が「遊べた」と記録できてしまったら、
   *機械には画面が確認できないから人間に訊く* という関門そのものが無意味になる。
-  差し戻し・エスカレーションへの回答・走行の停止と続行はどこからでもできる
+  差し戻し・エスカレーションへの回答・走行の停止と続行・止まったステップのやり直しはどこからでもできる
 - 走行の開始、プロジェクトの切り替え、役のモデルの変更、写しの更新、取り込みはローカルのみ。
   利用枠と箱の状態を大きく動かす操作だからだ
 - 箱を書き換える操作は、どれも `sudo -n /usr/local/bin/loop dash` の1本を通る。
@@ -66,18 +66,20 @@ python host/dashboard/server.py --project C:\dev\roop-engin\project
 ## 操作
 
 画面のいちばん上の「操作」で、箱の操作を端末なしで済ませる。欄はタブで切り替える。
-選んだタブはブラウザの localStorage に覚え、次に開いたときもそのタブを出す。
+タブは作業の順に、取り込み、プロジェクト、役のモデル、走行、ホストの写しと並ぶ。
+選んだタブはブラウザの localStorage に覚え、次に開いたときもそのタブを出す。覚えたタブが無ければ「走行」を出す。
 リモートでは「ホストの写し」と「取り込み」のタブを出さない。
 
 | 欄 | できること | 箱で流れるもの | どこから |
 |---|---|---|---|
+| 取り込み | 既存リポジトリのブランチを新しいプロジェクトにして切り替える | `loop project init` と `loop project use` | ローカル |
+| プロジェクト | 一覧を見て切り替える | `loop project use` を一時ユニット `loop-switch` で | ローカル |
+| 役のモデル | 役ごとに `LOOP_MODEL` と `LOOP_EFFORT` を変える | `/etc/loop/<役>.env` の2行の書き換え | ローカル |
 | 走行 | 要件のファイルと言語を選んで開始 | `loop go` | ローカル |
 | 走行 | 止まったところから続ける | `loop continue` | どこからでも |
 | 走行 | 止める | `loop stop` | どこからでも |
-| プロジェクト | 一覧を見て切り替える | `loop project use` を一時ユニット `loop-switch` で | ローカル |
-| 役のモデル | 役ごとに `LOOP_MODEL` と `LOOP_EFFORT` を変える | `/etc/loop/<役>.env` の2行の書き換え | ローカル |
+| 走行 | 緑でないステップを選び、作業ツリーを最後の緑に戻す。走行中と切り替え中は断る | `loop raw reset <ステップ>` | どこからでも |
 | ホストの写し | 写しを箱の先まで進める | ホストの `loop-pull.cmd` | ローカル |
-| 取り込み | 既存リポジトリのブランチを新しいプロジェクトにして切り替える | `loop project init` と `loop project use` | ローカル |
 
 箱への要求は、どれも SSH で `sudo -n /usr/local/bin/loop dash` に標準入力の JSON で渡す。
 `25-runner.sh` が sudoers で保守ユーザーにこの1つだけをパスワード無しで許す。`loop dash` は
@@ -87,6 +89,7 @@ python host/dashboard/server.py --project C:\dev\roop-engin\project
 |---|---|
 | `{"action": "go", "requirements": <本文>, "language": <言語>}` | 本文は root だけが入れる一時ディレクトリに書き、そこから `human/in/REQUIREMENTS.md` に置く。言語は `loop.py` の `LANGUAGES` のどれか |
 | `{"action": "continue"}` / `{"action": "stop"}` | 引数なし |
+| `{"action": "reset", "step": <ID>}` | ID は英数字で始まり、英数字と `. _ -` だけ |
 | `{"action": "use", "project": <名前>}` | 名前は `loop-project.sh` と同じ規則 |
 | `{"action": "init", "project": <名前>, "branch": <ブランチ>, "src": <柵>, "tests": <柵>}` | ブランチは英数字で始まり、英数字と `. _ / -` だけ。柵は `loop.py` の `layout_problems` で確かめ、空なら既定 |
 | `{"action": "settings"}` | 役ごとの `LOOP_MODEL` と `LOOP_EFFORT`、選べる effort と言語を JSON で返す。資格情報の行は返さない |

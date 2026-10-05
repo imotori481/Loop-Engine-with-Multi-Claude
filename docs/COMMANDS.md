@@ -257,6 +257,7 @@ loop go <requirements> --language cpp
 | 要件から走らせる | 走行 | `loop go <requirements> --language <言語>` |
 | 止まったところから続ける | 走行 | `loop continue` |
 | 止める | 走行 | `loop stop` |
+| 途中で止まったステップを最後の緑に戻す | 走行 | `loop raw reset <step>` |
 | プロジェクトを切り替える | プロジェクト | `loop project use <project>` |
 | 役ごとのモデルと effort を変える | 役のモデル | `/etc/loop/<役>.env` の `LOOP_MODEL` と `LOOP_EFFORT` を書き換える |
 | 写しを最新にする | ホストの写し | `loop-pull` |
@@ -279,7 +280,7 @@ Tailscale のログインを書く。どちらかが無ければ、tailnet か�
 `tailscale funnel` は使わない。インターネット全体に公開される。
 
 リモートから、予定レビューの承認、走行の開始、プロジェクトの切り替え、モデルの変更、写しの更新、
-取り込みはできない。差し戻し、エスカレーションへの回答、走行の停止と続行はできる。
+取り込みはできない。差し戻し、エスカレーションへの回答、走行の停止と続行、止まったステップのやり直しはできる。
 
 設定の詳細: [host/dashboard/README.md](../host/dashboard/README.md)
 

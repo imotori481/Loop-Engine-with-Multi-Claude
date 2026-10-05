@@ -82,6 +82,11 @@ class Request(unittest.TestCase):
             self.refused({"action": "init", "project": "game", "branch": "main",
                           "src": src, "tests": tests})
 
+    def test_a_reset_passes_only_a_step_id_that_is_safe_as_a_file_name(self):
+        self.assertEqual(self.parse({"action": "reset", "step": "S12"}), ["reset", "S12"])
+        for step in ("", "-x", "../S1", "S1/x", "a b", "a\nb", "$(id)", None, 12):
+            self.refused({"action": "reset", "step": step})
+
     def test_anything_else_is_refused(self):
         self.refused([])
         self.refused({"action": "raw"})

@@ -198,6 +198,14 @@ def handler_for(state: DashboardState, launchers: Launchers, reach: Reach, token
                     act = live.continue_loop if path == "/api/continue" else live.stop_loop
                     self._json({"message": act()}, HTTPStatus.ACCEPTED)
                     return
+                if path == "/api/reset":
+                    # 止まったステップのやり直しも、どこからでもよい。続行の前の一手で、捨てるのは
+                    # そのステップのコミットしていない作業だけだ。
+                    if live is None:
+                        raise ValueError("live view is not configured")
+                    self._json({"message": live.reset_step(str(body.get("step", "")))},
+                               HTTPStatus.OK)
+                    return
                 if path in ("/api/start", "/api/project", "/api/model"):
                     # 走行の開始、プロジェクトの切り替え、役のモデルの変更は、利用枠と箱の
                     # 状態を大きく動かす。この機械の前でだけ。

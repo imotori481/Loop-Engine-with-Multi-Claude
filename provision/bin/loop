@@ -221,6 +221,15 @@ switch_project() {
   echo "'$name' への切り替えを裏で始めた"
 }
 
+# 止まったステップの作業ツリーを最後の緑に戻す（'loop raw reset' と同じ）。走行中に戻すと、
+# 走っているステップのファイルを消すので断る。root で動く（cmd_dash から呼ぶ）。
+reset_step() {
+  local id="$1"
+  running && die "走っている間はやり直せない。先に止める"
+  switching && die "プロジェクトを切り替えている。終わるのを待つ"
+  as_runner python3 -u "$LOOP/runner/loop.py" reset "$id"
+}
+
 # 取り込むプロジェクトの空の bare を用意する。root で動く（cmd_dash から呼ぶ）。
 # 柵の場所は空なら渡さず、loop-project.sh の既定に任せる。
 init_project() {
@@ -253,6 +262,7 @@ cmd_dash() {
     continue) cmd_continue ;;
     stop)     cmd_stop ;;
     use)      switch_project "${req[1]}" "$admin" ;;
+    reset)    reset_step "${req[1]}" ;;
     init)     init_project "${req[1]}" "${req[2]}" "${req[3]}" "${req[4]}" "$admin" ;;
     *)        die "知らない操作: $action" ;;
   esac

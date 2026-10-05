@@ -52,6 +52,7 @@ details { margin-top: 14px; } summary { cursor: pointer; color: #9bb7a8; font-si
 .panel[hidden] { display: none; }
 .panel { display: grid; gap: 12px; align-content: start; } .panel h3 { margin: 0; }
 .panel pre { margin: 0; max-height: 220px; font-size: .8rem; background: #09110f; border: 1px solid #223a31; border-radius: 8px; padding: 10px; }
+.actions select { flex: 1; min-width: 0; } .actions button { flex: none; }
 .form { display: grid; gap: 10px; } .form label { display: grid; gap: 4px; }
 .panel input, .panel select { width: 100%; padding: 8px 10px; color: inherit; background: #09110f; border: 1px solid #3d5d51; border-radius: 8px; font: inherit; }
 .panel input[type="file"] { padding: 6px; }

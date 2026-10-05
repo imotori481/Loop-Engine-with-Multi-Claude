@@ -107,6 +107,8 @@ class ActOnTheSandbox(LiveView):
         self.assertEqual(self.dash_request(run), {"action": "continue"})
         self.live.stop_loop()
         self.assertEqual(self.dash_request(run), {"action": "stop"})
+        self.live.reset_step("S12")
+        self.assertEqual(self.dash_request(run), {"action": "reset", "step": "S12"})
 
     @patch("host.dashboard.live.subprocess.run")
     def test_the_requirements_travel_on_stdin_and_never_on_the_command_line(self, run):

@@ -541,13 +541,31 @@ function updateRunButtons() {
   document.querySelector("#start-run").disabled = !reachable || running || switching;
   document.querySelector("#continue-run").disabled = !reachable || running || switching;
   document.querySelector("#stop-run").disabled = !reachable || !running;
+  document.querySelector("#reset-run").disabled =
+    !reachable || running || switching || !document.querySelector("#reset-step").options.length;
   // 取り込みの最後は切り替えなので、走行中と切り替え中は箱が断る。
   document.querySelector("#import").disabled = importing || !reachable || running || switching;
+}
+
+// やり直せるのは緑でないステップ。選んだものは5秒ごとの更新で変えない。
+// まだ選んでいなければ、作業中のステップを選ぶ。
+function renderResetSteps(steps) {
+  const select = document.querySelector("#reset-step"), chosen = select.value;
+  const open = steps.filter(step => step.state !== "green");
+  const key = JSON.stringify(open.map(step => step.id));
+  if (select.dataset.key === key) return;
+  select.dataset.key = key;
+  const short = goal => (goal || "").length > 40 ? `${goal.slice(0, 40)}…` : goal || "";
+  select.replaceChildren(...open.map(step => new Option(`${step.id}: ${short(step.goal)}`, step.id)));
+  const active = open.find(step => step.state === "active");
+  if (open.some(step => step.id === chosen)) select.value = chosen;
+  else if (active) select.value = active.id;
 }
 
 function renderControl(value) {
   const switching = Boolean(value.switch?.running);
   liveState = {running: Boolean(value.running), switching, reachable: !value.error};
+  renderResetSteps(value.now?.steps || []);
   updateRunButtons();
 
   const state = document.querySelector("#run-state");
@@ -713,7 +731,8 @@ function setupTabs() {
   }
   let remembered = null;
   try { remembered = localStorage.getItem(TAB_KEY); } catch { /* 既定の「走行」を開く */ }
-  selectTab(remembered);
+  // タブは作業の順に並ぶので、先頭は「取り込み」。覚えたタブが無ければ「走行」を開く。
+  selectTab(remembered || "run");
 }
 
 function setupControl() {
@@ -722,7 +741,7 @@ function setupControl() {
     for (const element of document.querySelectorAll(".local-only")) element.hidden = true;
     const note = document.querySelector("#control-note");
     note.hidden = false;
-    note.textContent = "リモートからは停止と続行だけができます。開始、プロジェクトの切り替え、モデルの変更、写しの更新、取り込みはこの機械の前で。";
+    note.textContent = "リモートからは停止、続行、ステップのやり直しだけができます。開始、プロジェクトの切り替え、モデルの変更、写しの更新、取り込みはこの機械の前で。";
   }
   // リモートで隠した「ホストの写し」と「取り込み」のタブを選ばないよう、隠したあとで開く。
   setupTabs();
@@ -732,6 +751,12 @@ function setupControl() {
   resume.onclick = () => act(resume, "/api/continue", {}, "止まったところから続けます。よいですか？");
   const stop = document.querySelector("#stop-run");
   stop.onclick = () => act(stop, "/api/stop", {}, "走行を止めます。途中のステップはそのまま残ります。よいですか？");
+  const reset = document.querySelector("#reset-run");
+  reset.onclick = () => {
+    const step = document.querySelector("#reset-step").value;
+    act(reset, "/api/reset", {step},
+      `${step} を最後の緑まで戻します。${step} のコミットしていない作業は消えます。よいですか？`);
+  };
   const pull = document.querySelector("#pull");
   pull.onclick = async () => {
     pull.disabled = true;

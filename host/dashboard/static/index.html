@@ -19,11 +19,11 @@
       <div class="section-title"><h2>操作</h2></div>
       <p id="control-note" class="why" hidden></p>
       <div id="control-tabs" class="tabs" role="tablist">
-        <button role="tab" data-tab="run" aria-selected="true">走行</button>
+        <button role="tab" data-tab="import-panel" aria-selected="false" class="local-only">取り込み</button>
         <button role="tab" data-tab="projects-panel" aria-selected="false">プロジェクト</button>
         <button role="tab" data-tab="models-panel" aria-selected="false">役のモデル</button>
+        <button role="tab" data-tab="run" aria-selected="true">走行</button>
         <button role="tab" data-tab="pull-panel" aria-selected="false" class="local-only">ホストの写し</button>
-        <button role="tab" data-tab="import-panel" aria-selected="false" class="local-only">取り込み</button>
       </div>
       <div class="tab-panels">
         <article id="run" class="panel" role="tabpanel">
@@ -34,6 +34,8 @@
             <button id="start-run">開始（loop go）</button>
           </div>
           <div class="actions"><button id="continue-run" class="quiet">続ける（loop continue）</button><button id="stop-run" class="danger">停止（loop stop）</button></div>
+          <p class="why">途中で切れたステップは、続ける前に最後の緑まで戻す。そのステップのコミットしていない作業は消える。</p>
+          <div class="actions"><select id="reset-step" aria-label="やり直すステップ"></select><button id="reset-run" class="quiet">やり直す（loop raw reset）</button></div>
         </article>
         <article id="projects-panel" class="panel" role="tabpanel" hidden>
           <div class="table-wrap flat"><table><thead><tr><th>名前</th><th>状態</th><th>ブランチ</th><th></th></tr></thead><tbody id="projects"></tbody></table></div>

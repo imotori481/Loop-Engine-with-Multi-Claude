@@ -35,6 +35,8 @@ PROJECT = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}")
 # 取り込むブランチ。行にもオプションにもならない文字だけを通す。git の規則
 # （check-ref-format）は loop-project.sh の init が確かめる。
 BRANCH = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,199}")
+# やり直すステップの ID。ランナーは凍結のマニフェストのファイル名に使うので、/ は通さない。
+STEP = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 MAX_REQUIREMENTS = 200_000
 KEYS = {"model": "LOOP_MODEL", "effort": "LOOP_EFFORT"}
 
@@ -73,6 +75,12 @@ def check_branch(value: object) -> str:
     return value
 
 
+def check_step(value: object) -> str:
+    if not isinstance(value, str) or not STEP.fullmatch(value):
+        raise Refused(f"ステップの ID に使えない: {value!r}")
+    return value
+
+
 def check_fence(src: object, tests: object) -> tuple[str, str]:
     """柵の場所。両方とも空なら既定の src と tests。片方だけなら、もう片方は既定。"""
     if not isinstance(src, str) or not isinstance(tests, str):
@@ -96,6 +104,8 @@ def parse(request: object, work: str) -> list[str]:
                 check_effort(request.get("effort"))]
     if action == "use":
         return ["use", check_project(request.get("project"))]
+    if action == "reset":
+        return ["reset", check_step(request.get("step"))]
     if action == "init":
         # ホストの取り込みの3つ目の手順。空の bare を用意し、push を待つ。
         src, tests = check_fence(request.get("src", ""), request.get("tests", ""))
