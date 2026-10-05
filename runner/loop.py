@@ -6702,8 +6702,9 @@ def cmd_plan_refine(modes: list[str], resume: bool = False) -> int:
     続くのを止める。改訂1回はプランナーの呼び出し1回で、TypeScript のブリーフでは
     28分かかった。
 
-    上限の後も指摘が残って止まるときは、どのみち人が `loop continue` を打つ。
-    そこで人が指摘を読み、title と evidence を書き換えられるようにする。
+    上限の後も指摘が残って止まるときと、改訂の途中でプランナーが判断を返して止まる
+    ときは、どのみち人が `loop continue` を打つ。そこで人が指摘を読み、title と
+    evidence を書き換えられるようにする。
     クリティックは計画と要件しか見ておらず、的を外すことがある。resume は人が
     書き換えた指摘でプランナーに1回だけ改訂させ、批評はもう回さない。書き換えが
     無ければ、何もせずに提案を残す。どちらも、その後は `plan apply` に進む。
@@ -6741,11 +6742,7 @@ def cmd_plan_refine(modes: list[str], resume: bool = False) -> int:
             return 0
 
         if round_no > cap:
-            REFINE_STATE.parent.mkdir(parents=True, exist_ok=True)
-            REFINE_STATE.write_text(json.dumps(
-                {"round": round_no, "tasks_sha256": text_sha256(tasks), "findings": by_mode},
-                ensure_ascii=False), encoding="utf-8")
-            write_critique_for_human(round_no, by_mode, waiting=True)
+            wait_for_human(round_no, tasks, by_mode)
             ledger("REFINE_CAP", round=round_no, findings=total)
             print(f"\n{total} finding(s) still standing after {cap} revision(s). "
                   f"The proposal is left as it is. Rewrite the title or the evidence "
@@ -6757,16 +6754,29 @@ def cmd_plan_refine(modes: list[str], resume: bool = False) -> int:
         # 上限の前の回は、クリティックの指摘のまま、人を待たずに改訂させる。
         write_critique_for_human(round_no, by_mode, waiting=False)
         code = revise_with_findings(requirements, tasks, by_mode, round_no)
+        if code == 3:
+            # プランナーが改訂せずに判断を返した。下書きは批評した時のものに戻っているので、
+            # 上限の後と同じく、人が指摘を書き換えて `loop continue` で1回だけ改訂させられる。
+            wait_for_human(round_no, tasks, by_mode)
         if code != 0:
             return code
 
     return 4   # 届かない。ループは必ず戻る
 
 
-def resume_refine(requirements: str, pending: Path) -> int:
-    """上限の後に残った指摘を、人が書き換えたものに替えて、1回だけ改訂させる。
+def wait_for_human(round_no: int, tasks: str, by_mode: dict[str, list[dict]]) -> None:
+    """批評した提案と指摘を控え、人が直せる写しを書く。resume_refine がこれを読む。"""
+    REFINE_STATE.parent.mkdir(parents=True, exist_ok=True)
+    REFINE_STATE.write_text(json.dumps(
+        {"round": round_no, "tasks_sha256": text_sha256(tasks), "findings": by_mode},
+        ensure_ascii=False), encoding="utf-8")
+    write_critique_for_human(round_no, by_mode, waiting=True)
 
-    批評はもう回さない。上限は使い切っていて、人が読んだ指摘に答えた改訂を、
+
+def resume_refine(requirements: str, pending: Path) -> int:
+    """人を待っている指摘を、人が書き換えたものに替えて、1回だけ改訂させる。
+
+    批評はもう回さない。人が読んだ指摘に答えた改訂を、
     人の読んでいない指摘でまた曲げさせない。書き換えが1つも無ければ改訂もしない。
     どちらも 0 で戻り、`loop continue` は提案を適用する。
     """

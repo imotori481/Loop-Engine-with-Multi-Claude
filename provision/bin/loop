@@ -76,15 +76,16 @@ apply_pending() {
   esac
 }
 
-# 上限まで改訂しても指摘が残れば 4 で止まる。人がダッシュボードか 'loop findings set' で
-# 指摘を書き換えてから 'loop continue' を流すと、--resume が書き換えた指摘で1回だけ
-# 改訂させる。書き換えが無ければ何もしない。どちらも、その後に提案を適用する。
+# 上限まで改訂しても指摘が残れば 4 で、改訂の途中でプランナーが判断を返せば 3 で止まる。
+# 人がダッシュボードか 'loop findings set' で指摘を書き換えてから 'loop continue' を流すと、
+# --resume が書き換えた指摘で1回だけ改訂させる。書き換えが無ければ何もしない。どちらも、
+# その後に提案を適用する。
 refine() {
   local rc=0
   step plan refine "$@" || rc=$?
   case "$rc" in
     0) ;;
-    3) finish 3 "plan refine の途中でプランナーが判断を返した。$LOOP/project/.runner/refine-escalation.md を読む" ;;
+    3) finish 3 "plan refine の途中でプランナーが判断を返した。$LOOP/project/.runner/refine-escalation.md を読み、答えを指摘に書き込むならダッシュボードか 'loop findings set'。次は 'loop continue'" ;;
     4) finish 4 "クリティックの指摘が残った。直すならダッシュボードか 'loop findings set'。直しても直さなくても、次は 'loop continue'" ;;
     *) finish "$rc" "plan refine が失敗した（終了コード $rc）" ;;
   esac
