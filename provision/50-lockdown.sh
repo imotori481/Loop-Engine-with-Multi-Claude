@@ -38,6 +38,11 @@ PermitRootLogin no
 EOF
 chmod 644 /etc/ssh/sshd_config.d/00-loop.conf
 
+# sshd は -t と -T でも /run/sshd を求める。作るのは ssh.service の RuntimeDirectory で、
+# サービスが止まると消え、/run は VM の起動し直しでも消える。ソケットで起きる ssh は
+# 接続が来るまでサービスを起こさないので、ここで無いことがある。
+install -d -o root -g root -m 755 /run/sshd
+
 sshd -t
 systemctl restart ssh
 
