@@ -401,6 +401,8 @@ loop update                          # このリポジトリを pull し、プ�
 ```
 
 `loop update` は、走行中とプロジェクトの切り替え中は断る。pull は fast-forward だけを受ける。
+`provision.sh` は全ステップが通ると、そのコミットを `/etc/loop/provisioned` に書く。`loop update` は
+pull の後のコミットがこれと同じならプロビジョニングを飛ばす。`--force` を付けると必ず流す。
 
 `loop go` は要件を `/srv/loop/human/in/REQUIREMENTS.md` に置き、次を順に裏で流す。
 

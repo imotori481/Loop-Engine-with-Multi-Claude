@@ -291,8 +291,13 @@ Tailscale のログインを書く。どちらかが無ければ、tailnet か�
 流し直す。何度流しても同じ状態になる。走行中とプロジェクトの切り替え中は断る。
 ホストからは `host\loop.cmd` で `loop update` と打つ。
 
+pull の後のコミットが、最後にプロビジョニングが通ったコミット（`/etc/loop/provisioned`）と同じなら、
+プロビジョニングを飛ばす。プロビジョニングが途中で落ちたときは記録が古いままなので、次の
+`loop update` が流し直す。コミットが同じでも流し直すときは `--force` を付ける。
+
 ```bash
 loop update
+loop update --force
 ```
 
 `loop update` は最初のプロビジョニングが置く。それより前は次の2行を流す。

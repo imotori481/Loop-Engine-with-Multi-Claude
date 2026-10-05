@@ -284,13 +284,27 @@ cmd_stop() {
   echo "    loop raw reset <ステップ>"
 }
 
-# このリポジトリを pull し、プロビジョニングを流し直す。プロビジョニングはこのファイル
-# 自身を置き直すので、exec で最後に渡す。bash はスクリプトを読みながら実行するため、
-# 置き直された後の行を読ませない。
+# このリポジトリを pull し、プロビジョニングを流し直す。最後にプロビジョニングが通った
+# コミット（provision.sh が書く）が今のコミットと同じなら、--force が無い限り飛ばす。
+# プロビジョニングはこのファイル自身を置き直すので、exec で最後に渡す。bash はスクリプトを
+# 読みながら実行するため、置き直された後の行を読ませない。
 cmd_update() {
+  local force=false head
+  [ $# -le 1 ] || die "使い方: loop update [--force]"
+  case "${1:-}" in
+    "") ;;
+    --force) force=true ;;
+    *) die "使い方: loop update [--force]" ;;
+  esac
   running && die "走っている間は更新できない。先に 'loop stop'"
   switching && die "ダッシュボードがプロジェクトを切り替えている。終わるのを待つ"
   sudo git -C "$ENGINE" pull --ff-only
+  # リポジトリは root のものなので、保守ユーザーの git は所有者の違いで断る。
+  head="$(sudo git -C "$ENGINE" rev-parse HEAD)"
+  if ! $force && [ "$head" = "$(cat "$ROLE_ENV/provisioned" 2>/dev/null || true)" ]; then
+    echo "このコミットはプロビジョニング済み。流し直すなら 'loop update --force'"
+    return 0
+  fi
   exec sudo ADMIN_USER="$(id -un)" bash "$ENGINE/provision/provision.sh"
 }
 
@@ -311,7 +325,8 @@ usage() {
   stop              走行を止める
   project <引数>    プロジェクトの一覧と切り替え。'loop project' で使い方を出す
   raw <引数>        loop.py をそのまま runner として前面で呼ぶ。'loop raw --help' で動詞の一覧
-  update            このリポジトリを pull し、プロビジョニングを流し直す
+  update [--force]  このリポジトリを pull し、プロビジョニングを流し直す。プロビジョニング済みの
+                    コミットなら、--force が無い限り飛ばす
   dash            ホストのダッシュボードの入口。'sudo -n /usr/local/bin/loop dash' で流し、
                     標準入力に要求の JSON を渡す
 EOF
@@ -331,7 +346,7 @@ case "${1:-}" in
     switching && die "ダッシュボードがプロジェクトを切り替えている。終わるのを待つ"
     sudo ADMIN_USER="$(id -un)" bash "$PROJECT_SH" "$@" ;;
   raw)      shift; as_runner python3 -u "$LOOP/runner/loop.py" "$@" ;;
-  update)   [ $# -eq 1 ] || usage; cmd_update ;;
+  update)   shift; cmd_update "$@" ;;
   dash)    [ $# -eq 1 ] || usage; cmd_dash ;;
   __work)   shift; work "$@" ;;
   *)        usage ;;

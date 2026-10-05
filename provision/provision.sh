@@ -23,6 +23,10 @@ for s in 05-isolation.sh 10-users.sh 15-authkeys.sh 20-layout.sh 25-runner.sh 30
   bash "$s"
 done
 
+# 全ステップが通ったコミットを残す。'loop update' は、これが今のコミットと同じなら
+# プロビジョニングを飛ばす。途中で落ちれば書かれないので、次の 'loop update' が流し直す。
+git -C .. rev-parse HEAD > /etc/loop/provisioned
+
 echo
 echo "=== プロビジョニング完了 ==="
 echo "次は3役の資格情報を /etc/loop/<役>.env に入れる（provision/README §2-9）。"
