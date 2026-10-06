@@ -213,6 +213,19 @@ SSH は3秒に1回までしか流さない。止めるときは `"live": {"enabl
 git -C <clone-dir> config branch.<branch>.loopBase <base-branch>
 ```
 
+### 下書きの PR
+
+全ステップが緑になる前の状態は、ホストの `loop-pr` で下書きの PR として出す。画面には無い。
+中身は `pullrequest.py` の `open_draft` で、手順は上の 1〜6 と同じ。違うのは次の点だ。
+
+- 承認は求めない。写しの HEAD、つまり最後に緑になったステップのコミットを出す。緑の判定には触れない
+- ブランチは `<branch>-draft`。承認で作り直す `<branch>-pr` とは分ける
+- `gh pr create` に `--draft` を付ける。本文には、写しの `plan/tasks.json` と台帳から、緑のステップと残りのステップを並べる
+- 同じ組の PR が開いていれば、push で中身を更新し、`gh pr edit` で本文のステップの一覧を書き直す
+- 緑のステップが1つも無ければ断る。全ステップが緑なら、予定レビューの承認に回すよう断る
+
+結果は `decisions.jsonl` に記録しない。残りが緑になって承認の PR が出たら、下書きは人が閉じる。
+
 ## トークン消費
 
 写しの `plan/ledger.jsonl` と、終えた計画の `plan/archive/<番号>/ledger.jsonl` にある `USAGE` を、

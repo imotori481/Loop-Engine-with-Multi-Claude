@@ -131,6 +131,52 @@ class Opening(Repositories):
             self.pulls().open(["S1"], "")
 
 
+class Drafting(Repositories):
+    def plan(self, *green):
+        plan = self.mirror / "plan"
+        (plan / "tasks.json").write_text(
+            '{"steps": [{"id": "S1"}, {"id": "S2"}, {"id": "S3"}]}', encoding="utf-8")
+        (plan / "ledger.jsonl").write_text("".join(
+            f'{{"event": "GREEN", "step": "{step}"}}\n' for step in green), encoding="utf-8")
+
+    def test_the_draft_goes_from_its_own_branch(self):
+        self.plan("S1")
+        result = self.pulls().open_draft()
+        self.assertEqual((result["head"], result["green"], result["remaining"]),
+                         ("feat-draft", ["S1"], ["S2", "S3"]))
+        files = git(self.origin, "ls-tree", "-r", "--name-only", "feat-draft").splitlines()
+        self.assertEqual(sorted(files), [".gitignore", "a.txt", "src/game.cs"])
+        self.assertEqual(git(self.origin, "rev-parse", "feat-draft^"), self.approved)
+        create = self.gh_calls[-1]
+        self.assertIn("--draft", create)
+        self.assertIn("S2, S3", create[create.index("--body") + 1])
+
+    def test_the_approval_pr_is_not_a_draft(self):
+        self.pulls().open(["S1"], "")
+        self.assertNotIn("--draft", self.gh_calls[-1])
+
+    def test_an_open_draft_gets_the_new_list_of_steps(self):
+        self.plan("S1", "S2")
+        self.gh_list = "https://github.com/o/r/pull/7\n"
+        result = self.pulls().open_draft()
+        self.assertFalse(result["created"])
+        edit = self.gh_calls[-1]
+        self.assertEqual(edit[:4], ["gh", "pr", "edit", "https://github.com/o/r/pull/7"])
+        self.assertIn("S3", edit[edit.index("--body") + 1])
+
+    def test_nothing_is_sent_before_the_first_green(self):
+        self.plan()
+        with self.assertRaisesRegex(PullRequestError, "no step is green"):
+            self.pulls().open_draft()
+        self.assertEqual(self.gh_calls, [])
+
+    def test_a_finished_plan_is_left_to_the_review(self):
+        self.plan("S1", "S2", "S3")
+        with self.assertRaisesRegex(PullRequestError, "Approve the review"):
+            self.pulls().open_draft()
+        self.assertEqual(self.gh_calls, [])
+
+
 class Names(unittest.TestCase):
     def test_the_repository_is_read_from_either_url_form(self):
         self.assertEqual(github_repo("https://github.com/o/r.git"), "o/r")

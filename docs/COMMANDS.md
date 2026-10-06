@@ -11,7 +11,7 @@
 起動と sshd の待機も先に済ませる。だから下の `loop` の行は、ホストと箱のどちらで打っても同じに動く。
 
 ホストで `loop` だけで打つには、`host` ディレクトリをユーザーの PATH に足す。PowerShell で1回だけ
-打ち、端末を開き直す。`loop-pull` と `loop-dashboard` も同じく名前だけで打てるようになる。
+打ち、端末を開き直す。`loop-pull`、`loop-pr`、`loop-dashboard` も同じく名前だけで打てるようになる。
 
 ```powershell
 $hostDir = "<repo-dir>\host"
@@ -168,6 +168,15 @@ git merge loop/<branch>
 ダッシュボードで予定レビューを承認すると、`<branch>-pr` から `<base-branch>` への PR が出る。
 先に `loop-pull` を流して、写しを箱の先まで進めておく。仕組みと前提は
 [host/dashboard/README.md](../host/dashboard/README.md) の「プルリクエスト」にある。
+
+全ステップが緑になる前に出すなら、`loop-pull` のあとに `loop-pr` を打つ。最後に緑になったステップまでが、
+`<branch>-draft` から `<base-branch>` への下書きの PR になる。本文には残りのステップが並ぶ。
+緑が増えたら、`loop-pull` と `loop-pr` をもう一度打てば同じ PR が更新される。
+
+| やりたいこと | コマンド |
+|---|---|
+| 途中の成果を下書きの PR に出す | `loop-pr` |
+| 写しの場所を指定して出す | `loop-pr --project <mirror-dir>` |
 
 `loop-import` より前に取り込んだプロジェクトは、親ブランチを1回だけ記録する。
 

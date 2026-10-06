@@ -14,6 +14,7 @@ WSL2 では起動と生存管理がホスト側の責務になった（`RUNNER_S
 | `loop-unity-refs.cmd` / `.ps1` | このリポジトリのまま（`host` を PATH に足す） | Unity のプロジェクトがコンパイルに使う参照アセンブリを箱へ送る |
 | `wsl-keepalive.vbs` | このリポジトリのまま（タスクが絶対パスで参照する） | VM を**窓を出さずに**生かし続ける。下の keepalive タスクの実体 |
 | `loop-pull.cmd` | このリポジトリのまま | **すべての** `repo*.git` と `projects/*/repo.git` をホストのミラーに引く。**VHDX を失っても残る唯一の複製** |
+| `loop-pr.cmd` | このリポジトリのまま（`host` を PATH に足す） | 全ステップが緑になる前の成果を、下書きの PR として出す |
 | `loop-dashboard.cmd` | このリポジトリのまま | 進捗、エスカレーション、予定レビューを扱うGUIを起動（`127.0.0.1:8443`） |
 
 **ASCII のみで書くこと。** PowerShell 5.1 と cmd.exe は BOM 無し UTF-8 を ANSI として
@@ -235,7 +236,7 @@ git clone loop-runner:/srv/loop/repo.git <置き場所>
 
 - 箱が作業するブランチは bare の HEAD から読む。手元のそのブランチは、早送りできるときだけ進める。早送りできないときと、手元の変更が邪魔をするときは `NOTE` を出して動かさない。写しは `loop/<ブランチ>` に入っているので、失敗とは数えない
 - ランナーのタグ（`step-S1` など）は `refs/loop-tags/` に入れる。`refs/tags/` に入れると、`git push --tags` で GitHub に届く
-- GitHub への push は、ダッシュボードで予定レビューを承認したときに PR として行う（`dashboard/README.md`）。手で出す手順は `docs/COMMANDS.md`
+- GitHub への push は、ダッシュボードで予定レビューを承認したときに PR として行う（`dashboard/README.md`）。全ステップが緑になる前は `loop-pr` で下書きの PR として出す。手で出す手順は `docs/COMMANDS.md`
 
 `/srv/loop/repo.git` が今のプロジェクトへのリンクのときも、`project` は今のプロジェクトの写しになる。
 作り直す先は、bare の HEAD が指すブランチだ。
@@ -268,6 +269,7 @@ git clone loop-runner:/srv/loop/repo.git <置き場所>
 
 ## 更新履歴
 
+- 2026/10/07: 途中の成果を下書きの PR として出す `loop-pr.cmd` を追加
 - 2026/09/27: `loop-import.cmd` が親ブランチを `branch.<branch>.loopBase` に記録するように変更
 - 2026/09/27: Unity の参照アセンブリを箱へ送る `loop-unity-refs` を追加
 - 2026/09/27: `loop-pull.cmd` がプロジェクトごとの写しを引くように変更
