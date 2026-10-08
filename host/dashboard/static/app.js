@@ -621,7 +621,19 @@ async function loadSettings() {
   const language = document.querySelector("#language"), chosen = language.value;
   language.replaceChildren(...value.languages.map(name => new Option(name, name)));
   if (value.languages.includes(chosen)) language.value = chosen;
+  frameworksByLanguage = value.frameworks || {};
+  fillFrameworks();
   for (const [role, current] of Object.entries(value.roles)) box.append(modelRow(role, current, value.efforts));
+}
+
+// 言語ごとの持ち込む先。先頭が言語の既定。
+let frameworksByLanguage = {};
+
+function fillFrameworks() {
+  const select = document.querySelector("#framework"), chosen = select.value;
+  const names = frameworksByLanguage[document.querySelector("#language").value] || [];
+  select.replaceChildren(...names.map((name, i) => new Option(i === 0 ? `${name}（既定）` : name, name)));
+  if (names.includes(chosen)) select.value = chosen;
 }
 
 function modelRow(role, current, efforts) {
@@ -652,8 +664,9 @@ async function startRun(element) {
   const file = document.querySelector("#requirements").files[0];
   if (!file) { alert("要件のファイルを選んでください。"); return; }
   const language = document.querySelector("#language").value;
-  await act(element, "/api/start", {requirements: await file.text(), language},
-    `${file.name} を要件にして、${language} で計画づくりから走らせます。よいですか？`);
+  const framework = document.querySelector("#framework").value;
+  await act(element, "/api/start", {requirements: await file.text(), language, framework},
+    `${file.name} を要件にして、${language}${framework ? `（${framework}）` : ""} で計画づくりから走らせます。よいですか？`);
 }
 
 let pullTimer = null;
@@ -747,6 +760,7 @@ function setupControl() {
   setupTabs();
   const start = document.querySelector("#start-run");
   start.onclick = () => startRun(start);
+  document.querySelector("#language").onchange = fillFrameworks;
   const resume = document.querySelector("#continue-run");
   resume.onclick = () => act(resume, "/api/continue", {}, "止まったところから続けます。よいですか？");
   const stop = document.querySelector("#stop-run");

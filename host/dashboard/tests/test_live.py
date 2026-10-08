@@ -114,9 +114,10 @@ class ActOnTheSandbox(LiveView):
     def test_the_requirements_travel_on_stdin_and_never_on_the_command_line(self, run):
         run.return_value = answered("裏で走らせた")
         text = "# 要件\n$(rm -rf /)\n"
-        self.live.start_loop(text, "csharp")
+        self.live.start_loop(text, "csharp", "unity")
         self.assertEqual(self.dash_request(run),
-                         {"action": "go", "requirements": text, "language": "csharp"})
+                         {"action": "go", "requirements": text, "language": "csharp",
+                          "framework": "unity"})
         self.assertNotIn("rm -rf", " ".join(run.call_args.args[0]))
 
     @patch("host.dashboard.live.subprocess.run")

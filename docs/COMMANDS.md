@@ -53,6 +53,7 @@ PowerShell なら `.\host\loop.cmd <args>`、Git Bash なら `./host/loop.cmd <a
 | 要件から最後まで走らせる | `loop go <requirements>` |
 | TypeScript で走らせる | `loop go <requirements> --language typescript` |
 | C++ で走らせる | `loop go <requirements> --language cpp` |
+| 持ち込む先を選んで走らせる | `loop go <requirements> --language <言語> --framework <持ち込む先>` |
 | 状態を見る | `loop status` |
 | ログを追う（Ctrl-C で抜けても走行は続く） | `loop log` |
 | 止まったところから続ける | `loop continue` |

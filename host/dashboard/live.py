@@ -102,9 +102,11 @@ class Live:
         """`loop raw reset <ステップ>`。止まったステップの作業ツリーを最後の緑に戻す。"""
         return self._dash({"action": "reset", "step": step})
 
-    def start_loop(self, requirements: str, language: str) -> str:
-        """`loop go`。要件の本文は箱の一時ディレクトリに書かれ、そこから置かれる。"""
-        return self._dash({"action": "go", "requirements": requirements, "language": language})
+    def start_loop(self, requirements: str, language: str, framework: str = "") -> str:
+        """`loop go`。要件の本文は箱の一時ディレクトリに書かれ、そこから置かれる。
+        持ち込む先が空なら、箱が言語の既定を選ぶ。"""
+        return self._dash({"action": "go", "requirements": requirements, "language": language,
+                           "framework": framework})
 
     def use_project(self, name: str) -> str:
         """`loop project use` を箱の一時ユニットで裏に回す。進みは `loop now` の switch に出る。"""

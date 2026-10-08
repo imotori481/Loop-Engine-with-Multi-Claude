@@ -3,7 +3,7 @@ setlocal
 REM ---------------------------------------------------------------
 REM  loop -- run the sandbox's `loop` command from the host.
 REM
-REM    loop go <requirements.md> [--language <lang>]
+REM    loop go <requirements.md> [--language <lang>] [--framework <name>]
 REM    loop continue | status | log | stop | update
 REM    loop project <list|current|init|use|adopt> ...
 REM    loop raw <loop.py arguments>

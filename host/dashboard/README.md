@@ -87,7 +87,7 @@ python host/dashboard/server.py --project C:\dev\roop-engin\project
 
 | 要求 | 中身 |
 |---|---|
-| `{"action": "go", "requirements": <本文>, "language": <言語>}` | 本文は root だけが入れる一時ディレクトリに書き、そこから `human/in/REQUIREMENTS.md` に置く。言語は `loop.py` の `LANGUAGES` のどれか |
+| `{"action": "go", "requirements": <本文>, "language": <言語>, "framework": <持ち込む先>}` | 本文は root だけが入れる一時ディレクトリに書き、そこから `human/in/REQUIREMENTS.md` に置く。言語は `loop.py` の `LANGUAGES` のどれか。持ち込む先はその言語の `FRAMEWORKS` のどれかで、空なら言語の既定 |
 | `{"action": "continue"}` / `{"action": "stop"}` | 引数なし |
 | `{"action": "reset", "step": <ID>}` | ID は英数字で始まり、英数字と `. _ -` だけ |
 | `{"action": "use", "project": <名前>}` | 名前は `loop-project.sh` と同じ規則 |

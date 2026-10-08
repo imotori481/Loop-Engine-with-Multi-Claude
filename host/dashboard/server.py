@@ -215,7 +215,8 @@ def handler_for(state: DashboardState, launchers: Launchers, reach: Reach, token
                         raise ValueError("live view is not configured")
                     if path == "/api/start":
                         message = live.start_loop(str(body.get("requirements", "")),
-                                                  str(body.get("language", "")))
+                                                  str(body.get("language", "")),
+                                                  str(body.get("framework", "")))
                     elif path == "/api/project":
                         message = live.use_project(str(body.get("project", "")))
                     else:

@@ -147,7 +147,7 @@ class BootstrapOverAPlan(unittest.TestCase):
             "ledger": lambda event, **f: None,
             "plan_with_retry": self.planner,
             "read_proposal": lambda: {},
-            "stamp_language": lambda name: None,
+            "stamp_language": lambda name, framework=None: None,
         }.items():
             p = mock.patch.object(loop, name, value)
             p.start()

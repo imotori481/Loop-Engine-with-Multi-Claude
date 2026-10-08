@@ -1073,12 +1073,13 @@ BOOTSTRAP.md §3 の記述に対し、ランナーが機構として動くため
 | `contracts.invariants` | 型だけでは意味が運べず、後続が誤解したまま green になる |
 | `acceptance` の構造化 | 正常/境界/異常の充足をリンタが検査できる |
 
-最上位（ステップの外）に置ける設定が5つある。いずれも省略可で、
+最上位（ステップの外）に置ける設定が6つある。いずれも省略可で、
 **既知のキーだけを読む** ── 綴りを間違えた設定が黙って無視されるのを防ぐため。
 
 ```json
 {
   "language":     "python",
+  "framework":    "none",
   "timeouts":     {"test": 120, "solver": 960, "planner": 1800},
   "limits":       {"escalations": 1, "attempts": 0},
   "policy":       {"retry": "repair"},
@@ -1118,6 +1119,19 @@ TypeScript であって素の JavaScript でないのは L14 のため。契約�
 **形**を述べなければならず、型構文を持たない言語ではそれができない。vitest は esbuild で
 `.ts` をそのまま実行するので、ビルド段も `tsc` も要らない ── **型はここでは
 「読まれるもの」であって、コンパイラが検査するものではない。**
+
+`framework` は、出来たコードを持ち込む先を選ぶ。値は言語ごとの閉じた一覧で、`loop.py` の
+`FRAMEWORKS` にある。省くと言語の既定になる。言語に属さない値は、`language` と同じく異常終了する。
+
+| 言語 | 持ち込む先（先頭が既定） | 変えるもの |
+|---|---|---|
+| `python` | `none` | なし |
+| `typescript` | `dom` | 根の `index.html`、`start(root)` の決まり、happy-dom についての事実 |
+| `csharp` | `unity` | netstandard2.1 と C# 9、Unity の参照アセンブリ、1ファイル1型の決まり、エンジンの事実 |
+| `cpp` | `dxlib` | MSVC と DXライブラリを前提にした決まり、DXライブラリの早見表 |
+
+`language` と同じく、ランナーが通った提案に刻む（`stamp_language`）。`plan bootstrap --framework`、
+`loop go --framework`、ダッシュボードの「持ち込む先」で選ぶ。`framework` を持たない計画は、言語の既定で読む。
 
 後ろの3つは**プランナーが書くものではない**（BOOTSTRAP_RULES にも書くなと明示してある）。
 どのソルバーが何回走るかは**プランが走る機械の性質**であって、プランの性質ではない。

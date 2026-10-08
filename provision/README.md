@@ -389,7 +389,7 @@ sudo -u runner /srv/loop/bin/smoke-critic
 ホストからは `host\loop.cmd` で同じコマンドを呼べる（`host/README.md`）。
 
 ```bash
-loop go <要件>.md                     # 言語は --language typescript / csharp / cpp
+loop go <要件>.md                     # 言語は --language typescript / csharp / cpp、持ち込む先は --framework
 loop status                          # 走っているか、人への問い、台帳の末尾
 loop now                             # いまの作業を JSON で出す（ダッシュボードが読む）
 loop log                             # 走行ログを追う。Ctrl-C で抜けても走行は続く

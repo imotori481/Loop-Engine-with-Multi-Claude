@@ -113,15 +113,21 @@ def parse(request: object, work: str) -> list[str]:
                 check_branch(request.get("branch")), src, tests]
     if action == "go":
         language, text = request.get("language"), request.get("requirements")
+        framework = request.get("framework", "")
         if language not in loop.LANGUAGES:
             raise Refused(f"知らない言語: {language!r}")
+        # 空なら言語の既定。返す行には、いつも名前を入れる。
+        if framework == "":
+            framework = loop.LANGUAGES[language]["framework"]
+        if framework not in loop.FRAMEWORKS[language]:
+            raise Refused(f"{language} の持ち込む先に無い: {framework!r}")
         if not isinstance(text, str) or not text.strip():
             raise Refused("要件が空")
         if len(text) > MAX_REQUIREMENTS:
             raise Refused(f"要件が長すぎる。{MAX_REQUIREMENTS} 字まで")
         with open(os.path.join(work, "requirements.md"), "w", encoding="utf-8") as handle:
             handle.write(text)
-        return ["go", language]
+        return ["go", language, framework]
     raise Refused(f"知らない操作: {action!r}")
 
 
@@ -150,7 +156,12 @@ def settings(directory: str) -> dict:
             roles[role] = read_role(os.path.join(directory, f"{role}.env"))
         except OSError:
             roles[role] = None
-    return {"roles": roles, "efforts": list(EFFORTS), "languages": sorted(loop.LANGUAGES)}
+    # 持ち込む先は言語ごとの一覧で、先頭が言語の既定。
+    frameworks = {language: [loop.LANGUAGES[language]["framework"]]
+                  + sorted(set(loop.FRAMEWORKS[language]) - {loop.LANGUAGES[language]["framework"]})
+                  for language in loop.LANGUAGES}
+    return {"roles": roles, "efforts": list(EFFORTS), "languages": sorted(loop.LANGUAGES),
+            "frameworks": frameworks}
 
 
 def set_model(directory: str, role: str, model: str, effort: str) -> None:

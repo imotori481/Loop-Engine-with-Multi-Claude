@@ -40,8 +40,22 @@ class Request(unittest.TestCase):
     def test_the_requirements_go_to_a_file_and_never_into_a_line(self):
         text = "# 要件\n$(rm -rf /)\n"
         self.assertEqual(self.parse({"action": "go", "requirements": text, "language": "csharp"}),
-                         ["go", "csharp"])
+                         ["go", "csharp", "unity"])
         self.assertEqual((self.work / "requirements.md").read_text(encoding="utf-8"), text)
+
+    def test_a_framework_left_empty_becomes_the_language_s_own(self):
+        # ダッシュボードは選ばれていない持ち込む先を空で送る。loop には名前で渡す。
+        self.assertEqual(self.parse({"action": "go", "requirements": "x", "language": "cpp",
+                                     "framework": ""}), ["go", "cpp", "dxlib"])
+        self.assertEqual(self.parse({"action": "go", "requirements": "x",
+                                     "language": "typescript", "framework": "dom"}),
+                         ["go", "typescript", "dom"])
+
+    def test_a_framework_must_belong_to_the_language(self):
+        self.refused({"action": "go", "requirements": "x", "language": "csharp",
+                      "framework": "dom"})
+        self.refused({"action": "go", "requirements": "x", "language": "csharp",
+                      "framework": "unity\n--from /etc/shadow"})
 
     def test_a_run_needs_a_known_language_and_some_requirements(self):
         self.refused({"action": "go", "requirements": "x", "language": "cobol"})
@@ -115,6 +129,9 @@ class RoleSettings(unittest.TestCase):
         self.assertEqual(value["roles"]["solver"], {"model": "", "effort": ""})
         self.assertIsNone(value["roles"]["critic"])
         self.assertIn("csharp", value["languages"])
+        # 持ち込む先は言語ごとで、先頭が既定。ダッシュボードはそれを既定と書く。
+        self.assertEqual(value["frameworks"]["csharp"][0], "unity")
+        self.assertEqual(sorted(value["frameworks"]), value["languages"])
         self.assertNotIn("sk-secret", json.dumps(value))
 
     def test_a_change_rewrites_two_lines_and_keeps_the_rest(self):

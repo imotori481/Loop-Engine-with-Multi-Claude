@@ -272,6 +272,21 @@ class StampingTheLanguage(Language):
         self.assertEqual(written["language"], "typescript")
         self.assertEqual(written["steps"], [])
 
+    def test_the_framework_lands_beside_the_language(self):
+        (self.out / "tasks.json").write_text('{"version": 1, "steps": []}',
+                                             encoding="utf-8")
+        loop.stamp_language("csharp", "unity")
+        written = json.loads((self.out / "tasks.json").read_text(encoding="utf-8"))
+        self.assertEqual((written["language"], written["framework"]), ("csharp", "unity"))
+
+    def test_a_plan_from_before_frameworks_is_not_given_one(self):
+        # 改訂は計画が持つ値を刻み直す。持っていなければ、言語の既定で読まれ続ける。
+        (self.out / "tasks.json").write_text('{"version": 1, "steps": []}',
+                                             encoding="utf-8")
+        loop.stamp_language("csharp", None)
+        written = json.loads((self.out / "tasks.json").read_text(encoding="utf-8"))
+        self.assertNotIn("framework", written)
+
     def test_an_escalation_leaves_nothing_to_stamp(self):
         # プランナーは計画を書かず ESCALATE.md だけで答えることがある。書き込みで
         # 計画をこしらえてはならない。

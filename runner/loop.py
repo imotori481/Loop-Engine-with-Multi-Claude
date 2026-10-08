@@ -6167,8 +6167,9 @@ with them and no partial credit: fix all of them, then stop.
 """
 
 
-def stamp_language(name: str) -> None:
-    """受け入れた提案に、ランナー自身の行為として言語を書き込む。
+def stamp_language(name: str, framework: str | None = None) -> None:
+    """受け入れた提案に、ランナー自身の行為として言語と持ち込む先を書き込む。
+    持ち込む先は、渡されたときだけ書く。それより前の計画は言語の既定で読まれる。
 
     プランナーはこれを書かない。solver_tiers を書かないのと同じ理由だ。この機械が
     どの言語を持つかは箱の性質で、プロジェクトがどれを使うかは、誰かに計画を頼む
@@ -6187,7 +6188,9 @@ def stamp_language(name: str) -> None:
     if not isinstance(tasks, dict):
         return
     tasks["language"] = name
-    body = (json.dumps(tasks, ensure_ascii=False, indent=2) + chr(10)).encode("utf-8")
+    if framework:
+        tasks["framework"] = framework
+    body =(json.dumps(tasks, ensure_ascii=False, indent=2) + chr(10)).encode("utf-8")
     # O_CREAT を付けずに書く。これは細かい話ではない。out/ はスティッキーで
     # グループが書け、ファイルは `planner` のものだ。カーネルの
     # fs.protected_regular（ここでは 2）は、まさにその形のディレクトリで、他人の
@@ -6747,6 +6750,7 @@ def revise_with_findings(requirements: str, tasks: str,
                          by_mode: dict[str, list[dict]], round_no: int) -> int:
     """指摘をプランナーに渡し、保留中の提案を改訂させる。0 なら改訂できた。"""
     language = json.loads(tasks).get("language", "python")
+    framework = json.loads(tasks).get("framework")
     report = render_findings(by_mode)
     ledger("PLAN_REFINE", round=round_no, findings=sum(len(f) for f in by_mode.values()))
     # 改訂前の提案を控える。plan_with_retry は最初に out/ を空にするので、
@@ -6781,7 +6785,7 @@ def revise_with_findings(requirements: str, tasks: str,
         return 3
     # プランナーはファイル全体を書き直すので、言語の印を付け直す。これは
     # プランナーではなくランナーの印で、失った計画は黙って Python と読まれる。
-    stamp_language(language)
+    stamp_language(language, framework)
     return 0
 
 
@@ -6996,7 +7000,8 @@ def archive_plan() -> str | None:
     return None
 
 
-def cmd_plan_bootstrap(source: str | None, language: str = "python") -> int:
+def cmd_plan_bootstrap(source: str | None, language: str = "python",
+                       framework: str | None = None) -> int:
     """人間が書いた要件のファイルから、最初の計画をプランナーに頼む。
 
     計画が生まれる唯一の経路で、あえてほかのプランナー呼び出しと同じ形にして
@@ -7027,15 +7032,17 @@ def cmd_plan_bootstrap(source: str | None, language: str = "python") -> int:
     # コマンドとツールキットを報告し、配置の段落はソースファイルがそもそもどんな
     # ものかをプランナーに伝える。違う言語向けに書いたブリーフからは、どの
     # ステップも誤った計画が出てくる。
-    load_settings({"language": language})
+    # 持ち込む先も同じだ。指定が無ければ言語の既定になり、計画にはその名前を刻む。
+    load_settings({"language": language, "framework": framework})
 
     requirements = path.read_text(encoding="utf-8")
-    ledger("PLAN_BOOTSTRAP", source=str(path), language=language)
+    ledger("PLAN_BOOTSTRAP", source=str(path), language=language,
+           framework=LANGUAGE["framework"])
     code = plan_with_retry(
         lambda feedback: brief_plan_bootstrap(requirements, feedback),
         "PLAN_BOOTSTRAP_DRAFT")
     if code == 0 and ESCALATE_NAME not in read_proposal():
-        stamp_language(language)
+        stamp_language(language, LANGUAGE["framework"])
     return code
 
 
@@ -7864,6 +7871,11 @@ def main() -> int:
     boot_cmd.add_argument("--language", default="python", choices=sorted(LANGUAGES),
                           help="which toolchain the plan is written for; the "
                                "runner stamps it into the plan (default: python)")
+    boot_cmd.add_argument("--framework", default=None,
+                          choices=sorted({name for names in FRAMEWORKS.values()
+                                          for name in names}),
+                          help="where the code is taken to (unity, dxlib, ...); it must "
+                               "belong to --language (default: the language's own)")
     propose_cmd = plan_sub.add_parser(
         "propose", help="ask the planner to revise the plan in answer to ESCALATION.md")
     propose_cmd.add_argument("--step", default=None,
@@ -7914,7 +7926,7 @@ def main() -> int:
             return cmd_reset(args.step_id)
         if args.cmd == "plan":
             if args.plan_cmd == "bootstrap":
-                return cmd_plan_bootstrap(args.source, args.language)
+                return cmd_plan_bootstrap(args.source, args.language, args.framework)
             if args.plan_cmd == "propose":
                 return cmd_plan_propose(args.step)
             if args.plan_cmd == "refine":

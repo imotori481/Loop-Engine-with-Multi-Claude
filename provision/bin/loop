@@ -102,12 +102,12 @@ run_all() {
 }
 
 work() {
-  local log="$1" mode="$2" language="${3:-python}" rc=0
+  local log="$1" mode="$2" language="${3:-python}" framework="${4:-}" rc=0
   exec >>"$log" 2>&1
   echo "=== loop $mode 開始 ($(date '+%F %T')) プロジェクト=$(project_name)"
 
   if [ "$mode" = go ]; then
-    step plan bootstrap --language "$language" || rc=$?
+    step plan bootstrap --language "$language" ${framework:+--framework "$framework"} || rc=$?
     [ "$rc" -eq 0 ] || finish "$rc" "plan bootstrap が失敗した（終了コード $rc）"
     if [ -f "$LOOP/planner/out/ESCALATE.md" ]; then
       finish 3 "プランナーが計画を書かずに判断を返した。$LOOP/planner/out/ESCALATE.md を読む"
@@ -126,7 +126,7 @@ work() {
 # ---- 保守ユーザーが打つ側 ----------------------------------------------------
 
 start() {
-  local mode="$1" language="${2:-}" log
+  local mode="$1" language="${2:-}" framework="${3:-}" log
   running && die "もう走っている。追うなら 'loop log'、止めるなら 'loop stop'"
   switching && die "プロジェクトを切り替えている。終わるのを待つ"
   log="$LOGS/$(project_name)-$(date +%Y%m%d-%H%M%S).log"
@@ -134,28 +134,29 @@ start() {
   as_runner ln -sfn "$(basename "$log")" "$(latest_log)"
   sudo systemd-run --quiet --collect --unit="$UNIT" \
     --uid=runner --gid=runner --working-directory=/tmp \
-    "$SELF" __work "$log" "$mode" ${language:+"$language"}
+    "$SELF" __work "$log" "$mode" ${language:+"$language"} ${framework:+"$framework"}
   echo "裏で走らせた。ログ: $log"
   echo "追うなら 'loop log'、状態を見るなら 'loop status'"
 }
 
 cmd_go() {
-  local requirements="" language="python"
+  local requirements="" language="python" framework=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --language) [ $# -ge 2 ] || die "--language に値が無い"; language="$2"; shift 2 ;;
+      --framework) [ $# -ge 2 ] || die "--framework に値が無い"; framework="$2"; shift 2 ;;
       -*) die "知らないオプション: $1" ;;
       *) [ -z "$requirements" ] || die "要件のファイルは1つだけ渡す"; requirements="$1"; shift ;;
     esac
   done
-  [ -n "$requirements" ] || die "使い方: loop go <要件>.md [--language <言語>]"
+  [ -n "$requirements" ] || die "使い方: loop go <要件>.md [--language <言語>] [--framework <持ち込む先>]"
   [ -f "$requirements" ] || die "ファイルが無い: $requirements"
   [ -d "$(dirname "$REQUIREMENTS")" ] || die "$(dirname "$REQUIREMENTS") が無い。プロジェクトは作ってある？"
   running && die "もう走っている。先に 'loop stop'"
 
   sudo install -o root -g humanw -m 644 "$requirements" "$REQUIREMENTS"
   echo "要件を置いた: $REQUIREMENTS"
-  start go "$language"
+  start go "$language" "$framework"
 }
 
 cmd_continue() {
@@ -258,7 +259,7 @@ cmd_dash() {
   case "$action" in
     settings) python3 "$DASH_PY" settings "$ROLE_ENV" ;;
     model)    python3 "$DASH_PY" set-model "$ROLE_ENV" "${req[1]}" "${req[2]}" "${req[3]}" ;;
-    go)       cmd_go "$work/requirements.md" --language "${req[1]}" ;;
+    go)       cmd_go "$work/requirements.md" --language "${req[1]}" --framework "${req[2]}" ;;
     continue) cmd_continue ;;
     stop)     cmd_stop ;;
     use)      switch_project "${req[1]}" "$admin" ;;
@@ -323,8 +324,9 @@ usage() {
   cat >&2 <<'EOF'
 使い方: loop <コマンド>
 
-  go <要件>.md [--language <言語>]
-                    要件を置き、計画づくりから全ステップまでを裏で流す
+  go <要件>.md [--language <言語>] [--framework <持ち込む先>]
+                    要件を置き、計画づくりから全ステップまでを裏で流す。持ち込む先を
+                    省くと言語の既定になる
   continue          直したクリティックの指摘があればプランナーに渡し、適用待ちの
                     提案を適用して、全ステップを裏で流す
   status            プロジェクト、走っているか、人への問い、台帳の末尾を出す
