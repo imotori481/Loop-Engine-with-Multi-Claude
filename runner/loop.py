@@ -699,10 +699,14 @@ ANNOTATION = re.compile(r"(?:->|:)\s*([A-Za-z_][\w.]*)\s*([\[<]?)")
 # 振る舞いの分岐は拡張子ではなく `name` で見る。データで済む差は項目にする。
 # `environment_files` は、その言語のために箱が根に置くファイルだ。箱は計画の
 # 言語を知らずに全部を置くので、ほかの言語の計画には見せない（environment_facts）。
-LANGUAGES = {
+#
+# ここにあるのは言語そのものの差だけだ。コードを持ち込む先（Unity、DXライブラリ、
+# ブラウザのページ）の差は FRAMEWORKS にあり、`default_framework` がその既定を選ぶ。
+LANGUAGE_BASES = {
     "python": {
         "name": "python",
         "label": "Python",
+        "default_framework": "none",
         "test_runner": PYTEST,
         "wiring": "conftest.py",
         # 20-layout.sh はどの言語の箱にも置く。ほかの言語の計画には見せない。
@@ -737,9 +741,10 @@ learn it.""",
     "typescript": {
         "name": "typescript",
         "label": "TypeScript",
+        "default_framework": "dom",
         "test_runner": VITEST,
         "wiring": "vitest.config.mjs",
-        "environment_files": frozenset({"index.html", "vitest.config.mjs"}),
+        "environment_files": frozenset({"vitest.config.mjs"}),
         "naming_note": """
 Name your tests with DOUBLE quotes or backticks, never single quotes. The
 criteria above are prose and contain apostrophes ("the result's resource"),
@@ -781,35 +786,19 @@ directly in {TESTS}/. vitest resolves it and esbuild strips the types; there is
 no build step and no tsc, so a type is something the next step READS, not
 something a compiler checks.
 
-THE PAGE ALREADY EXISTS AND YOU DO NOT WRITE IT. `index.html` sits at the
-repository root, which is outside the write fence, so it belongs to the
-environment rather than to any step. It is four lines and it does exactly one
-thing:
-
-    import { start } from "/{SRC}/main.ts";
-    start(document.getElementById("app"));
-
-So the plan MUST end with a step whose files_write includes `{SRC}/main.ts`, and
-that module MUST export `start(root: HTMLElement): void`. Nothing else about
-the page is yours to decide. Everything `start` does is ordinary code under
-{SRC}/: it is under the fence, the tests can reach it, and its criteria are
-written against what it puts in the document -- what the element contains,
-which buttons exist, which of them are disabled, and what changes when one is
-clicked.
-
-Say all of this in CONTEXT.md; the solver has no other way to learn it.""",
+""",
     },
-    # C# は Unity に持ち込むコードのためにある。コードは netstandard2.1、テストは
-    # net8.0 の NUnit 3（Unity の Test Framework と同じ系統）で、36-dotnet.sh が凍結した
-    # フィードだけから restore する。csproj はランナーが /srv/loop/dotnet/build に
-    # 書く（dotnet_projects）。取り込んだ Unity のプロジェクトの根に置くと、IDE が
-    # Unity の csproj と一緒に拾ってしまう。
+    # テストは net8.0 の NUnit 3 で、36-dotnet.sh が凍結したフィードだけから restore
+    # する。csproj はランナーが /srv/loop/dotnet/build に書く（dotnet_projects）。
+    # 取り込んだ Unity のプロジェクトの根に置くと、IDE が Unity の csproj と一緒に
+    # 拾ってしまう。コードの側の対象とC#の版は FRAMEWORKS が決める。
     #
     # C# の宣言は型の中にあるので、契約の名前は型（`Board`）とメンバー
     # （`Board.Score`）の2つの単位を持つ。provides_pattern の2つの組がそれだ。
     "csharp": {
         "name": "csharp",
         "label": "C#",
+        "default_framework": "unity",
         "test_runner": Path("/usr/bin/dotnet"),
         "wiring": None,
         "environment_files": frozenset(),
@@ -871,35 +860,6 @@ and before an index, assert that the length is large enough.
         "shape_bracket": "<",
         "shape_example": "List<Cell>, Dictionary<string, int>, (Board board, int score)",
         "name_boundary": r"[\w]",
-        "layout_note": """Every source file is `.cs` under {SRC}/, e.g. `{SRC}/Logic/Board.cs`, and
-every test file is `.cs` under {TESTS}/. The code compiles as one assembly
-(netstandard2.1, C# 9) and the tests as another that references it, so a test
-uses the code through `using <its namespace>;` -- there are no file imports.
-
-One public type per file, and the file is named after the type
-(`Board.cs` holds `Board`). Unity requires this of every MonoBehaviour and it
-costs nothing elsewhere. A new file's namespace follows its folder under {SRC}/
-(`{SRC}/Logic/Board.cs` -> `namespace Logic`). A file that already exists keeps
-the namespace it has: a declaration read from it ends in `-- namespace <name>`,
-and code that uses it writes `using <name>;`.
-
-Tests use NUnit 3: `using NUnit.Framework;`, a public class with `[Test]`
-methods, and `Assert.AreEqual(expected, actual)` or `Assert.That(actual,
-Is.EqualTo(expected))`. Every test class is inside a namespace, and its name
-is the file's name (`{TESTS}/BoardTests.cs` holds `BoardTests`): the runner
-selects a step's tests by that class name.
-
-C# 9 is the ceiling: no `record struct`, no file-scoped `namespace X;`, no
-`global using`, no `required` members. They do not compile here or in Unity.
-
-A contract line names the file and then the declaration. A type:
-    {SRC}/Logic/Board.cs: class Board { public int Width; public int Height; }
-A member, written with its type in front of its name:
-    {SRC}/Logic/Board.cs: static int Board.Score(Board board)
-The name of the first is `Board` and of the second `Board.Score`; requires and
-provides match on those names.
-
-Say all of this in CONTEXT.md; the solver has no other way to learn it.""",
     },
     # C++ は、箱では標準の C++17 のロジックだけを g++ と GoogleTest で確かめる。
     # DXライブラリや Windows の API は Linux に無い。それを include するファイルは
@@ -912,6 +872,7 @@ Say all of this in CONTEXT.md; the solver has no other way to learn it.""",
     "cpp": {
         "name": "cpp",
         "label": "C++",
+        "default_framework": "dxlib",
         "test_runner": Path("/usr/bin/g++"),
         "wiring": None,
         "environment_files": frozenset(),
@@ -966,7 +927,104 @@ assertions -- write `ASSERT_GE(v.size(), n)`, and index with `.at()`.
         "shape_bracket": "<",
         "shape_example": "std::vector<Cell>, std::map<std::string, int>, std::pair<Board, int>",
         "name_boundary": r"[\w]",
-        "layout_note": """Every header is `.h` and every source file is `.cpp`, under {SRC}/: the header
+    },
+}
+
+# --------------------------------------------------------------------------
+# コードを持ち込む先
+# --------------------------------------------------------------------------
+#
+# 同じ言語でも、出来たコードを持ち込む先で変わるものがある。コードの側の対象と
+# 言語の版、ファイルの置き方の決まり、箱に無い画面やエンジンについての事実、
+# 箱が根に置くページ。それをここに置き、言語の項目に重ねる（compose_language）。
+#
+# 名前は閉じた一覧にする。箱は凍結したツールチェーンだけで走り、egress は閉じて
+# いる。ライブラリの名前を自由に書けても、フィードに無いものは restore できない。
+#
+#   layout_note        言語の layout_note の後ろに続ける
+#   environment_files  言語のものに足す
+#   facts              (実行環境の1行, UI の1行, 画面についての段落) を返す
+#   page               根のページを見せる文を返す。ページの無い先は持たない
+FRAMEWORKS = {
+    "python": {
+        # 持ち込む先を持たない。画面の事実は tkinter が読み込めるかで決まる。
+        "none": {
+            "facts": lambda: python_facts(),
+        },
+    },
+    "typescript": {
+        # ブラウザのページ。箱が根に index.html を置き、テストは happy-dom の DOM で走る。
+        "dom": {
+            "environment_files": frozenset({"index.html"}),
+            "layout_note": """THE PAGE ALREADY EXISTS AND YOU DO NOT WRITE IT. `index.html` sits at the
+repository root, which is outside the write fence, so it belongs to the
+environment rather than to any step. It is four lines and it does exactly one
+thing:
+
+    import { start } from "/{SRC}/main.ts";
+    start(document.getElementById("app"));
+
+So the plan MUST end with a step whose files_write includes `{SRC}/main.ts`, and
+that module MUST export `start(root: HTMLElement): void`. Nothing else about
+the page is yours to decide. Everything `start` does is ordinary code under
+{SRC}/: it is under the fence, the tests can reach it, and its criteria are
+written against what it puts in the document -- what the element contains,
+which buttons exist, which of them are disabled, and what changes when one is
+clicked.
+
+Say all of this in CONTEXT.md; the solver has no other way to learn it.""",
+            "facts": lambda: dom_facts(),
+            "page": lambda: dom_page_text(),
+        },
+    },
+    "csharp": {
+        # Unity に持ち込むコード。コードは netstandard2.1 で C# 9 まで、テストは
+        # Unity の Test Framework と同じ系統の NUnit 3。loop-unity-refs が参照を
+        # 送っていれば、それでコンパイルする（unity_refs）。送っていなくても、
+        # Unity に置ける形で書く。
+        "unity": {
+            "dotnet_target": "netstandard2.1",
+            "dotnet_langversion": "9.0",
+            "unity_refs": True,
+            "layout_note": """Every source file is `.cs` under {SRC}/, e.g. `{SRC}/Logic/Board.cs`, and
+every test file is `.cs` under {TESTS}/. The code compiles as one assembly
+(netstandard2.1, C# 9) and the tests as another that references it, so a test
+uses the code through `using <its namespace>;` -- there are no file imports.
+
+One public type per file, and the file is named after the type
+(`Board.cs` holds `Board`). Unity requires this of every MonoBehaviour and it
+costs nothing elsewhere. A new file's namespace follows its folder under {SRC}/
+(`{SRC}/Logic/Board.cs` -> `namespace Logic`). A file that already exists keeps
+the namespace it has: a declaration read from it ends in `-- namespace <name>`,
+and code that uses it writes `using <name>;`.
+
+Tests use NUnit 3: `using NUnit.Framework;`, a public class with `[Test]`
+methods, and `Assert.AreEqual(expected, actual)` or `Assert.That(actual,
+Is.EqualTo(expected))`. Every test class is inside a namespace, and its name
+is the file's name (`{TESTS}/BoardTests.cs` holds `BoardTests`): the runner
+selects a step's tests by that class name.
+
+C# 9 is the ceiling: no `record struct`, no file-scoped `namespace X;`, no
+`global using`, no `required` members. They do not compile here or in Unity.
+
+A contract line names the file and then the declaration. A type:
+    {SRC}/Logic/Board.cs: class Board { public int Width; public int Height; }
+A member, written with its type in front of its name:
+    {SRC}/Logic/Board.cs: static int Board.Score(Board board)
+The name of the first is `Board` and of the second `Board.Score`; requires and
+provides match on those names.
+
+Say all of this in CONTEXT.md; the solver has no other way to learn it.""",
+            "facts": lambda: ("Runtime: .NET 8 for the tests; the code is built as netstandard2.1",
+                              *unity_facts()),
+        },
+    },
+    "cpp": {
+        # DXライブラリで Windows に持ち込むコード。DXライブラリを include するファイルは
+        # ビルドから外す（cpp_sources）。DXライブラリを使わない C++ の計画もこの形で
+        # 走り、早見表は DXライブラリを使うと分かったときだけ見せる（cpp_facts）。
+        "dxlib": {
+            "layout_note": """Every header is `.h` and every source file is `.cpp`, under {SRC}/: the header
 declares (`{SRC}/logic/Board.h`) and the source file of the same name defines
 (`{SRC}/logic/Board.cpp`). Every header starts with `#pragma once`. Include a
 project header by its path under {SRC}/ -- `#include "logic/Board.h"` -- from
@@ -997,12 +1055,37 @@ The names are `Board`, `Board::score` and `countLines`; requires and provides
 match on those names.
 
 Say all of this in CONTEXT.md; the solver has no other way to learn it.""",
+            "facts": lambda: ("Standard: C++17, built with CMake; tests: GoogleTest",
+                              *cpp_facts()),
+        },
     },
 }
 
-# tasks.json の最上位の "language" で選ぶ。既定は Python。これができる前に
-# 書かれた計画は、すべて Python を前提にしているからだ。
+
+def compose_language(language: str, framework: str | None = None) -> dict:
+    """言語の項目に、持ち込む先の項目を重ねる。framework が None なら言語の既定。"""
+    base = LANGUAGE_BASES[language]
+    name = framework or base["default_framework"]
+    overlay = FRAMEWORKS[language][name]
+    return {**base, **overlay, "framework": name,
+            "layout_note": base.get("layout_note", "") + overlay.get("layout_note", ""),
+            "environment_files": base["environment_files"]
+            | overlay.get("environment_files", frozenset()),
+            "page": overlay.get("page")}
+
+
+# 言語ごとの既定の組み合わせ。計画が "framework" を言わなければ、これで走る。
+LANGUAGES = {name: compose_language(name) for name in LANGUAGE_BASES}
+
+# tasks.json の最上位の "language" と "framework" で選ぶ。既定は Python。これが
+# できる前に書かれた計画は、すべて Python を前提にしているからだ。
 LANGUAGE = dict(LANGUAGES["python"])
+
+
+def use_language(language: str, framework: str | None = None) -> None:
+    """LANGUAGE を、その言語と持ち込む先の組み合わせにする。"""
+    LANGUAGE.clear()
+    LANGUAGE.update(compose_language(language, framework))
 
 # pytest は失敗の本文を必ず "<file>:<line>: <ExceptionName>" で終える。例外の
 # クラスが実際に読めるのはその最後の行だ。failure_kind を参照。
@@ -1106,23 +1189,29 @@ DOTNET_ENV = {
 }
 
 
-def dotnet_projects() -> dict[Path, str]:
-    """ランナーが書く2つの csproj。柵の場所、凍結したフィードの版、Unity の参照から作る。
+def unity_refs() -> bool:
+    """Unity の参照アセンブリでコンパイルするか。Unity に持ち込む計画で、
+    loop-unity-refs が参照を送ったときだけそうする。"""
+    return bool(LANGUAGE.get("unity_refs")) and (UNITY_REFS / "refs").is_dir()
 
-    プロジェクトの根には置かない（36-dotnet.sh の冒頭を参照）。コードは
-    netstandard2.1（Unity が読める形）、テストは net8.0 の NUnit 3。Unity の参照が
+
+def dotnet_projects() -> dict[Path, str]:
+    """ランナーが書く2つの csproj。柵の場所、凍結したフィードの版、持ち込む先から作る。
+
+    プロジェクトの根には置かない（36-dotnet.sh の冒頭を参照）。コードの対象と C# の
+    版は持ち込む先が決め（FRAMEWORKS）、テストは net8.0 の NUnit 3。Unity の参照が
     あれば、コードはそれでコンパイルし、テストは実行のためにそれを出力に写す。
     """
     versions = dict(item.split("=", 1) for item in
                     (DOTNET_TOOLS / "feed" / ".versions").read_text(encoding="utf-8").split())
-    refs = sorted((UNITY_REFS / "refs").glob("*.dll")) if (UNITY_REFS / "refs").is_dir() else []
+    refs = sorted((UNITY_REFS / "refs").glob("*.dll")) if unity_refs() else []
     if refs:
         langversion = (UNITY_REFS / "langversion.txt").read_text(encoding="utf-8").strip()
         defines = ";".join(line.strip() for line in
                            (UNITY_REFS / "defines.txt").read_text(encoding="utf-8").splitlines()
                            if line.strip())
     else:
-        langversion, defines = "9.0", ""
+        langversion, defines = LANGUAGE["dotnet_langversion"], ""
 
     def references(private: bool) -> str:
         return "".join(
@@ -1137,7 +1226,7 @@ def dotnet_projects() -> dict[Path, str]:
     <NoWarn>$(NoWarn);CS0414;CS0649;CS0169;CS0436;MSB3277</NoWarn>"""
     code = f"""<Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
-    <TargetFramework>netstandard2.1</TargetFramework>
+    <TargetFramework>{LANGUAGE["dotnet_target"]}</TargetFramework>
     <AssemblyName>LoopCode</AssemblyName>
 {common}
   </PropertyGroup>
@@ -2481,14 +2570,14 @@ def generate_csharp_stub(step: dict, requires: list[str],
         namespaces.setdefault(m.group(1), ns)
         known.setdefault(declared_name(line).split(".")[0], ns)
 
-    unity = (UNITY_REFS / "refs").is_dir() and any(
+    unity = unity_refs() and any(
         CSHARP_UNITY_TYPES.search(line) for line in step["contracts"]["provides"] + requires)
     files: dict[str, str] = {}
     for path in step["files_write"]:
         if path in originals:
             merged = csharp_merge_stub(
                 originals[path], [types[name] for name in order if types[name]["path"] == path],
-                known, (UNITY_REFS / "refs").is_dir())
+                known, unity_refs())
             if merged is None:
                 return None
             files[path] = merged
@@ -3121,8 +3210,8 @@ def adopt_language(tasks: dict) -> None:
     """
     language = tasks.get("language") if isinstance(tasks, dict) else None
     if language in LANGUAGES:
-        LANGUAGE.clear()
-        LANGUAGE.update(LANGUAGES[language])
+        framework = tasks.get("framework")
+        use_language(language, framework if framework in FRAMEWORKS[language] else None)
 
 
 def validate_plan(tasks: dict) -> list[str]:
@@ -4606,7 +4695,7 @@ def csharp_defines() -> set[str]:
     """テストのビルドで定義されるシンボル。Unity の参照があれば、その定義も足す
     （dotnet_projects と同じもの）。"""
     defines = set(CSHARP_BASE_DEFINES)
-    if (UNITY_REFS / "refs").is_dir():
+    if unity_refs():
         try:
             defines |= {line.strip() for line in (UNITY_REFS / "defines.txt")
                         .read_text(encoding="utf-8").splitlines() if line.strip()}
@@ -5418,8 +5507,107 @@ def csharp_units(text: str, provided: set[str]) -> dict[str, str] | None:
     return units
 
 
-def csharp_facts() -> tuple[str, str]:
-    """C# の計画に伝える、UI とエンジンについての事実。(1行の要約, 段落)。
+def tool_version(binary: Path) -> str:
+    """ツールが名乗る版の1行目。走らなければそう書く。"""
+    try:
+        proc = run([str(binary), "--version"])
+        return (proc.stdout + proc.stderr).strip().splitlines()[0]
+    except (OSError, IndexError):
+        return "(not installed)"
+
+
+def python_facts() -> tuple[str, str, str]:
+    """Python の計画に伝える、インタプリタと画面についての事実。
+
+    書き写さずに集める。これは効き目が大きい。「窓が開く」のような条件は TclError
+    で落ちるテストになり、それは本物の赤で、RED_GATE をきれいに通る。ソルバーが何を
+    書いても緑にならないので、ステップはすべての段の試行を使い、エスカレーション
+    まで使い、その原因はどれにも見えるところに無い。
+    """
+    interpreter = PROJECT / ".venv" / "bin" / "python"
+
+    def imports(module: str) -> bool:
+        try:
+            return run([str(interpreter), "-c", f"import {module}"]).returncode == 0
+        except OSError:
+            return False
+
+    runtime = f"Interpreter: {tool_version(interpreter)}"
+    toolkit = ("GUI toolkit: "
+               + ("tkinter imports" if imports("tkinter")
+                  else "tkinter does NOT import"))
+    screen = "" if os.environ.get("DISPLAY", "") else """There is no screen here and there will not be one. Code that opens a window
+raises an error about the display, so an acceptance criterion about what appears
+on screen becomes a test that fails and that no implementation can fix.
+
+Every criterion you write has to be checkable by pytest with no display. If the
+requirements ask for a user interface, put whatever constructs it in its own
+step, keep that step as thin as you can, and write its criteria in terms of the
+functions it calls and the state it passes on -- not in terms of what is drawn.
+A human checks the screen afterwards; the runner never can.
+"""
+    return runtime, toolkit, screen
+
+
+def dom_facts() -> tuple[str, str, str]:
+    """ブラウザのページに持ち込む計画に伝える、DOM についての事実。"""
+    runtime = f"Runtime: {tool_version(Path('node'))}"
+    toolkit = ("User interface: the DOM, via happy-dom. Every test file is "
+               "given a `document` with no display behind it.")
+    screen = """There is no screen, and there does not need to be one. happy-dom builds a
+document in memory, so a test can construct the interface, read what it says,
+click a button and assert what changed. THE USER INTERFACE IS CHECKABLE HERE --
+do not push it out of reach of the tests.
+
+This is worth saying plainly because the previous attempt at this was written
+for a toolkit that could not be driven without a screen. The plan quite
+reasonably confined the interface to one function nobody could test, and what
+shipped was a window in which every button was disabled from the first frame:
+ten steps green, forty-two tests passing, and nothing the player could press.
+Write criteria about what is on the screen and what happens when it is used.
+`element.click()` works, and so does reading `textContent` and `disabled`.
+"""
+    return runtime, toolkit, screen
+
+
+def dom_page_text() -> str:
+    """根の index.html を、説明ではなく全文で見せる。無ければ何も言わない。
+
+    文章の説明は、それに向けて書くプランナーには足りたが、出来上がった計画を読む
+    クリティックには足りなかった。最初の本番の批評は、index.html を作るものも
+    start() を呼ぶものも無いと2度報告した。計画は index.html を作らない。作るのは
+    環境で、誰もクリティックにそれを伝えていなかった。5件の指摘のうち2件が、
+    ずっと根にあったファイルについてのものだった。
+    """
+    page = PROJECT / "index.html"
+    if not page.is_file():
+        return ""
+    # 開発サーバで開けることも環境の持ち物だ。run 8 の S10 は、Vite が index.html を
+    # 変換した結果に /src/main.ts が含まれることを確かめる条件を持っていた。Vite は
+    # インラインのモジュールスクリプトを別のモジュールに切り出すので、含まれない。
+    # どの実装でも変わらず、ソルバーは時間切れまで考えた。開けることは箱の検査が
+    # 確かめ、計画には start が何を組み立てるかだけを書かせる。
+    return ("""
+`index.html` at the root, which the environment provides and no step writes.
+It is what a person opens, and it is already wired:
+
+"""
+            f"{page.read_text(encoding='utf-8')}") + layout_text("""
+Opening the page through a development server (Vite, for example) is also the
+environment's job. The server serves index.html, and index.html loads `start`
+from {SRC}/main.ts; that path is checked when the machine is provisioned. If the
+requirements say the page must open from a dev server, a step that exports
+`start` satisfies it. Write criteria about what `start` puts in the document.
+
+Do not write criteria that start a development server, transform index.html, or
+check what a server sends back. That output is decided by the server, not by
+any code a step writes: no implementation can change it, and the step spends
+every attempt on it.
+""")
+
+
+def unity_facts() -> tuple[str, str]:
+    """Unity に持ち込む計画に伝える、UI とエンジンについての事実。(1行の要約, 段落)。
 
     Unity の参照があるとき（loop-unity-refs）の中身は、thm で probe-unity が測った
     結果だ。エンジン本体の無い .NET 8 では、C# だけで書かれた計算は動き、エンジンの
@@ -5427,7 +5615,7 @@ def csharp_facts() -> tuple[str, str]:
     ことすらできない。そのテストは赤ではなく壊れた呼び出しになり、R5 が拒む。
     それを計画を書く前に知らせる。
     """
-    if not (UNITY_REFS / "refs").is_dir():
+    if not unity_refs():
         return ("User interface: none. There is no display and no UI toolkit.",
                 """There is no screen here. Every criterion has to be checkable by calling code
 and comparing what it returns. If the requirements ask for a user interface,
@@ -5582,24 +5770,16 @@ def environment_facts(plan: dict | None = None, short: bool = False) -> str:
     その問題への本当の答えは、下のやり直しのループだ。ブリーフが言い忘れたことも、
     リンタが捕まえ、プランナーに伝わる。
     """
-    def version(binary: Path) -> str:
-        try:
-            proc = run([str(binary), "--version"])
-            return (proc.stdout + proc.stderr).strip().splitlines()[0]
-        except (OSError, IndexError):
-            return "(not installed)"
-
-    typescript = LANGUAGE["name"] == "typescript"
-
     skip = {".git", ".venv", ".runner", "plan", "__pycache__", ".pytest_cache",
             "node_modules"}
     # 箱は計画の言語を知らないので、すべての言語の環境のファイルを根に置く。
     # ほかの言語のものを見せると、クリティックは的外れな指摘を出す。Python の計画に
     # index.html を見せると「人が開く index.html からこの計画のコードに届かない」と
-    # 指摘し、プランナーはそれに答えられない。計画の言語のものだけを見せる。
-    for other in LANGUAGES.values():
-        if other["name"] != LANGUAGE["name"]:
-            skip |= other["environment_files"]
+    # 指摘し、プランナーはそれに答えられない。計画の言語と持ち込む先のものだけを見せる。
+    for files in [base["environment_files"] for base in LANGUAGE_BASES.values()] + [
+            overlay.get("environment_files", frozenset())
+            for overlays in FRAMEWORKS.values() for overlay in overlays.values()]:
+        skip |= files - LANGUAGE["environment_files"]
     # 根の直下と、ステップが書く2つのディレクトリの中だけを並べる。取り込んだ
     # リポジトリの残り（Unity なら Assets/ の下の画像や音や .meta）は、どのステップも
     # 書かず、並べるとブリーフが数万トークンになる。
@@ -5729,53 +5909,6 @@ more, not shown line by line. They also exist before the first step runs:
         except (OSError, KeyError, ValueError):
             wiring_text = "(not available: the .NET toolchain is not installed)"
 
-    # 起動のつなぎを、説明ではなく全文で見せる。文章の説明は、それに向けて書く
-    # プランナーには足りたが、出来上がった計画を読むクリティックには足りなかった。
-    # 最初の本番の批評は、index.html を作るものも start() を呼ぶものも無いと2度
-    # 報告した。計画は index.html を作らない。作るのは環境で、誰もクリティックに
-    # それを伝えていなかった。5件の指摘のうち2件が、ずっと根にあったファイルに
-    # ついてのものだった。
-    page = PROJECT / "index.html"
-    page_text = ("""
-`index.html` at the root, which the environment provides and no step writes.
-It is what a person opens, and it is already wired:
-
-"""
-                 f"{page.read_text(encoding='utf-8')}"
-                 ) if typescript and page.is_file() else ""
-
-    # 開発サーバで開けることも環境の持ち物だ。run 8 の S10 は、Vite が index.html を
-    # 変換した結果に /src/main.ts が含まれることを確かめる条件を持っていた。Vite は
-    # インラインのモジュールスクリプトを別のモジュールに切り出すので、含まれない。
-    # どの実装でも変わらず、ソルバーは時間切れまで考えた。開けることは箱の検査が
-    # 確かめ、計画には start が何を組み立てるかだけを書かせる。
-    if page_text:
-        page_text += layout_text("""
-Opening the page through a development server (Vite, for example) is also the
-environment's job. The server serves index.html, and index.html loads `start`
-from {SRC}/main.ts; that path is checked when the machine is provisioned. If the
-requirements say the page must open from a dev server, a step that exports
-`start` satisfies it. Write criteria about what `start` puts in the document.
-
-Do not write criteria that start a development server, transform index.html, or
-check what a server sends back. That output is decided by the server, not by
-any code a step writes: no implementation can change it, and the step spends
-every attempt on it.
-""")
-
-    # ここのほかのものと同じ理由で、書き写さずに集める。ただし、これは効き目が
-    # 大きい。「窓が開く」のような条件は TclError で落ちるテストになり、それは
-    # 本物の赤で、RED_GATE をきれいに通る。ソルバーが何を書いても緑にならない
-    # ので、ステップはすべての段の試行を使い、エスカレーションまで使い、その原因は
-    # どれにも見えるところに無い。
-    interpreter = PROJECT / ".venv" / "bin" / "python"
-
-    def imports(module: str) -> bool:
-        try:
-            return run([str(interpreter), "-c", f"import {module}"]).returncode == 0
-        except OSError:
-            return False
-
     display = os.environ.get("DISPLAY", "")
     argv, _ = test_argv(["<the step's files_test>"], STATE / "report.xml")
     command = " ".join(a.replace(str(PROJECT) + "/", "") for a in argv)
@@ -5796,50 +5929,14 @@ tests, to check its work by running something, or to install anything: it will
 try, be refused, and spend part of its attempt on it.
 """
 
-    if LANGUAGE["name"] == "csharp":
-        runtime = "Runtime: .NET 8 for the tests; the code is built as netstandard2.1"
-        toolkit, screen = csharp_facts()
-    elif LANGUAGE["name"] == "cpp":
-        runtime = "Standard: C++17, built with CMake; tests: GoogleTest"
-        toolkit, screen = cpp_facts()
-    elif typescript:
-        runtime = f"Runtime: {version(Path('node'))}"
-        toolkit = ("User interface: the DOM, via happy-dom. Every test file is "
-                   "given a `document` with no display behind it.")
-        screen = """There is no screen, and there does not need to be one. happy-dom builds a
-document in memory, so a test can construct the interface, read what it says,
-click a button and assert what changed. THE USER INTERFACE IS CHECKABLE HERE --
-do not push it out of reach of the tests.
-
-This is worth saying plainly because the previous attempt at this was written
-for a toolkit that could not be driven without a screen. The plan quite
-reasonably confined the interface to one function nobody could test, and what
-shipped was a window in which every button was disabled from the first frame:
-ten steps green, forty-two tests passing, and nothing the player could press.
-Write criteria about what is on the screen and what happens when it is used.
-`element.click()` works, and so does reading `textContent` and `disabled`.
-"""
-    else:
-        runtime = f"Interpreter: {version(interpreter)}"
-        toolkit = ("GUI toolkit: "
-                   + ("tkinter imports" if imports("tkinter")
-                      else "tkinter does NOT import"))
-        screen = "" if display else """There is no screen here and there will not be one. Code that opens a window
-raises an error about the display, so an acceptance criterion about what appears
-on screen becomes a test that fails and that no implementation can fix.
-
-Every criterion you write has to be checkable by pytest with no display. If the
-requirements ask for a user interface, put whatever constructs it in its own
-step, keep that step as thin as you can, and write its criteria in terms of the
-functions it calls and the state it passes on -- not in terms of what is drawn.
-A human checks the screen afterwards; the runner never can.
-"""
+    runtime, toolkit, screen = LANGUAGE["facts"]()
+    page_text = LANGUAGE["page"]() if LANGUAGE["page"] else ""
 
     return f"""# The environment, as it actually is right now
 
 Language: {LANGUAGE["label"]}
 {runtime}
-Test runner: {version(LANGUAGE["test_runner"])}
+Test runner: {tool_version(LANGUAGE["test_runner"])}
 
 Graphical display: {f"DISPLAY={display}" if display else "NONE. DISPLAY is not set"}
 {toolkit}
@@ -7087,13 +7184,18 @@ def load_settings(tasks: dict) -> None:
     # 言語。知らない値は既定に落とさず拒む。"js" を求めて黙って Python になった
     # 計画は、誤ったテストランナーで誤った拡張子に対して確かめられ、どの関門も
     # 読んでもいないファイルについて自信をもって報告する。
+    # 持ち込む先も同じ理由で拒む。言語を言わない計画は、いまの言語の先を選ぶ。
     language = tasks.get("language")
-    if language is not None:
+    framework = tasks.get("framework")
+    if language is not None or framework is not None:
+        language = LANGUAGE["name"] if language is None else language
         if language not in LANGUAGES:
             raise SystemExit(f"language must be one of {sorted(LANGUAGES)}, "
                              f"not {language!r}")
-        LANGUAGE.clear()
-        LANGUAGE.update(LANGUAGES[language])
+        if framework is not None and framework not in FRAMEWORKS[language]:
+            raise SystemExit(f"framework for {language} must be one of "
+                             f"{sorted(FRAMEWORKS[language])}, not {framework!r}")
+        use_language(language, framework)
 
 
 def publish(what: str) -> None:

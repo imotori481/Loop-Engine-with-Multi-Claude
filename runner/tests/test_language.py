@@ -59,6 +59,38 @@ class WhichLanguage(Language):
         self.assertEqual(sorted(LANGUAGES), ["cpp", "csharp", "python", "typescript"])
 
 
+class WhereTheCodeGoes(Language):
+    """持ち込む先は言語に重ねる。計画が言わなければ、言語の既定で走る。"""
+
+    def test_a_plan_that_names_no_framework_takes_the_language_s_default(self):
+        # これができる前に書かれた C# の計画は、すべて Unity に持ち込むものだ。
+        self.speak("csharp")
+        self.assertEqual(LANGUAGE["framework"], "unity")
+        self.assertEqual(LANGUAGE["dotnet_target"], "netstandard2.1")
+
+    def test_a_framework_is_checked_against_its_language(self):
+        # 持ち込む先は言語ごとの閉じた一覧だ。TypeScript のページは C# の先ではない。
+        with self.assertRaises(SystemExit):
+            load_settings({"language": "csharp", "framework": "dom"})
+
+    def test_a_framework_alone_keeps_the_current_language(self):
+        self.speak("typescript")
+        load_settings({"framework": "dom"})
+        self.assertEqual((LANGUAGE["name"], LANGUAGE["framework"]), ("typescript", "dom"))
+
+    def test_the_page_belongs_to_the_framework_not_the_language(self):
+        # index.html は DOM に持ち込む先のもので、vitest.config.mjs は言語のものだ。
+        self.speak("typescript")
+        self.assertEqual(LANGUAGE["environment_files"],
+                         frozenset({"index.html", "vitest.config.mjs"}))
+        self.assertIn("THE PAGE ALREADY EXISTS", LANGUAGE["layout_note"])
+        self.assertNotIn("THE PAGE", loop.LANGUAGE_BASES["typescript"]["layout_note"])
+
+    def test_validating_a_plan_takes_its_framework(self):
+        loop.adopt_language({"language": "cpp", "framework": "dxlib"})
+        self.assertEqual(LANGUAGE["framework"], "dxlib")
+
+
 class TheCommandThatProducesAVerdict(Language):
     def test_python_runs_pytest_from_the_frozen_venv(self):
         self.speak("python")
