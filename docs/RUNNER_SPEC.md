@@ -1127,7 +1127,7 @@ TypeScript であって素の JavaScript でないのは L14 のため。契約�
 |---|---|---|
 | `python` | `none` | なし |
 | `typescript` | `dom` | 根の `index.html`、`start(root)` の決まり、happy-dom についての事実 |
-| `csharp` | `unity` | netstandard2.1 と C# 9、Unity の参照アセンブリ、1ファイル1型の決まり、エンジンの事実 |
+| `csharp` | `unity`、`promete` | unity: SDK 8、netstandard2.1 と C# 9、Unity の参照アセンブリ、1ファイル1型の決まり、エンジンの事実。promete: SDK 10、net10.0 と C# 14、暗黙の using と nullable、Promete 2.1.0 の参照、ヘッドレスで動くものの事実 |
 | `cpp` | `dxlib` | MSVC と DXライブラリを前提にした決まり、DXライブラリの早見表 |
 
 `language` と同じく、ランナーが通った提案に刻む（`stamp_language`）。`plan bootstrap --framework`、

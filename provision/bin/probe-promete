@@ -1,0 +1,251 @@
+#!/usr/bin/env bash
+# Promete 2.1.0 のどこまでが、箱のテストで動くかを測る。関門ではなく測定なので、
+# 結果が悪くても落ちない。落ちるのは、測る道具がそろっていないときだけ。
+#
+#     sudo -u runner -H /srv/loop/bin/probe-promete
+#
+# ランナーと同じ形で測る（loop.py の FRAMEWORKS["csharp"]["promete"]）。コードの
+# プロジェクトが Promete を参照してシーンを持ち、テストのプロジェクトがコードを参照する。
+# どちらも net10.0 で、SDK 10、NUnit 3。画面も GPU も無く、アプリはヘッドレスで作る。
+#
+# 測るのは3つ。
+#
+#   1. 計算と、ノードの木。Vector や Container は C# だけで書かれているはずだ
+#   2. ヘッドレスのアプリ。フレームを進める、時間、テクスチャをメモリから作る、
+#      既定のフォント、Text ノード、プラグイン（キーボード、ConsoleLayer、
+#      コルーチン、オーディオ）
+#   3. シーン。シーンはソースジェネレータが登録する。ライブラリは自分のシーンだけを
+#      登録し、ProjectReference はジェネレータを渡さない。コードのプロジェクトの
+#      シーンを、テストから読み込めるかを、UseScenesFrom の有無で測る
+#
+# 結果は loop.py の promete_facts に書く（テストで確かめられない振る舞いの条件を
+# 書かせない）。全文は /srv/loop/logs/probe-promete-<日時>.log に残す。
+set -euo pipefail
+
+TOOLS="${LOOP_DOTNET_TOOLS:-/srv/loop/dotnet}"
+export DOTNET_CLI_TELEMETRY_OPTOUT=1 DOTNET_NOLOGO=1 DOTNET_SKIP_FIRST_TIME_EXPERIENCE=1
+
+[ -r "$TOOLS/nuget.config" ] || { echo "probe-promete: no $TOOLS/nuget.config; run 36-dotnet.sh" >&2; exit 2; }
+versions="$(cat "$TOOLS/feed/.versions")"
+version_of() { tr ' ' '\n' <<<"$versions" | sed -n "s/^$1=//p"; }
+[ -n "$(version_of Promete)" ] || { echo "probe-promete: Promete is not in $TOOLS/feed; run 36-dotnet.sh" >&2; exit 2; }
+
+WORK="$(mktemp -d)"
+trap 'rm -rf "$WORK"' EXIT
+LOG="/srv/loop/logs/probe-promete-$(date +%Y%m%d-%H%M%S).log"
+: > "$LOG" 2>/dev/null || LOG="$WORK/probe.log"
+
+mkdir -p "$WORK/src" "$WORK/tests" "$WORK/code" "$WORK/test"
+cat > "$WORK/global.json" <<'EOF'
+{"sdk": {"version": "10.0.100", "rollForward": "latestFeature", "allowPrerelease": false}}
+EOF
+
+cat > "$WORK/src/ProbeScenes.cs" <<'EOF'
+using Promete;
+using Promete.Input;
+
+namespace Probe;
+
+public class CountingScene : Scene
+{
+    public static int Started;
+    public static int Updated;
+    public override void OnStart() => Started++;
+    public override void OnUpdate() => Updated++;
+}
+
+public class KeyScene(Keyboard keyboard) : Scene
+{
+    public static bool? UpHeld;
+    public override void OnUpdate() => UpHeld = keyboard.Up.IsPressed;
+}
+EOF
+
+cat > "$WORK/tests/PrometeApi.cs" <<'EOF'
+using System.Collections;
+using System.Drawing;
+using NUnit.Framework;
+using Probe;
+using Promete;
+using Promete.Audio;
+using Promete.Coroutines;
+using Promete.Graphics.Fonts;
+using Promete.Headless;
+using Promete.Input;
+using Promete.Nodes;
+
+namespace Probe.Tests;
+
+public class PrometeApi
+{
+    // 1. 計算とノードの木
+    [Test] public void VectorMath() => Assert.AreEqual(5f, (new Vector(2, 0) + new Vector(3, 0)).X);
+    [Test] public void AngleDegrees() => Assert.AreEqual(90f, 90.Degrees.ToDegrees(), 1e-4f);
+    [Test] public void RectIntersect() =>
+        Assert.IsTrue(new Rect((0, 0), (10, 10)).Intersect(new Rect((5, 5), (10, 10))));
+    [Test] public void ContainerTree()
+    {
+        var parent = new Container();
+        var child = new Container();
+        parent.Add(child);
+        Assert.AreEqual(1, parent.Count);
+        Assert.AreSame(parent, child.Parent);
+    }
+    [Test] public void SpriteWithoutTexture()
+    {
+        var sprite = new Sprite { Location = (1, 2) };
+        Assert.AreEqual(1f, sprite.Location.X);
+    }
+
+    // 2. ヘッドレスのアプリ
+    [Test] public void HeadlessNextFrame()
+    {
+        using var app = PrometeApp.Create().BuildWithHeadless();
+        var ran = false;
+        app.NextFrame(() => ran = true);
+        app.OnUpdate();
+        Assert.IsTrue(ran);
+    }
+    [Test] public void HeadlessTime()
+    {
+        using var app = PrometeApp.Create().BuildWithHeadless();
+        app.OnUpdate();
+        Assert.That(app.Time.DeltaTime, Is.GreaterThanOrEqualTo(0f));
+    }
+    [Test] public void TextureFromMemory()
+    {
+        using var app = PrometeApp.Create().BuildWithHeadless();
+        var texture = app.TextureFactory.Create(new byte[4 * 4 * 4], (4, 4));
+        Assert.AreEqual(4, texture.Size.X);
+    }
+    [Test] public void TextureSolid()
+    {
+        using var app = PrometeApp.Create().BuildWithHeadless();
+        Assert.AreEqual(4, app.TextureFactory.CreateSolid(Color.Red, (4, 4)).Size.X);
+    }
+    [Test] public void DefaultFont() => Assert.IsNotNull(Font.GetDefault());
+    [Test] public void TextNode()
+    {
+        using var app = PrometeApp.Create().BuildWithHeadless();
+        Assert.AreEqual("hi", new Text("hi").Content);
+    }
+    [Test] public void KeyboardPlugin()
+    {
+        using var app = PrometeApp.Create().Use<Keyboard>().BuildWithHeadless();
+        app.OnUpdate();
+        Assert.IsFalse(app.GetPlugin<Keyboard>().Up.IsPressed);
+    }
+    [Test] public void ConsoleLayerPlugin()
+    {
+        using var app = PrometeApp.Create().Use<ConsoleLayer>().BuildWithHeadless();
+        app.GetPlugin<ConsoleLayer>().Print("probe");
+        app.OnUpdate();
+    }
+    [Test] public void Coroutine()
+    {
+        using var app = PrometeApp.Create().Use<CoroutineManager>().BuildWithHeadless();
+        var done = false;
+        IEnumerator Run() { yield return null; yield return null; done = true; }
+        app.GetPlugin<CoroutineManager>().Start(Run());
+        for (var i = 0; i < 5; i++) app.OnUpdate();
+        Assert.IsTrue(done);
+    }
+    [Test] public void AudioPlayerPlugin()
+    {
+        using var app = PrometeApp.Create().Use<AudioPlayer>().BuildWithHeadless();
+        Assert.IsNotNull(app.GetPlugin<AudioPlayer>());
+    }
+
+    // 3. シーン
+    [Test] public void SceneFromCodeWithoutUseScenesFrom()
+    {
+        using var app = PrometeApp.Create().BuildWithHeadless();
+        CountingScene.Started = CountingScene.Updated = 0;
+        app.LoadScene<CountingScene>();
+        app.OnUpdate();
+        Assert.AreEqual((1, 1), (CountingScene.Started, CountingScene.Updated));
+    }
+    [Test] public void SceneFromCodeWithUseScenesFrom()
+    {
+        using var app = PrometeApp.Create().UseScenesFrom<CountingScene>().BuildWithHeadless();
+        CountingScene.Started = CountingScene.Updated = 0;
+        app.LoadScene<CountingScene>();
+        app.OnUpdate();
+        Assert.AreEqual((1, 1), (CountingScene.Started, CountingScene.Updated));
+    }
+    [Test] public void SceneWithInjectedKeyboard()
+    {
+        using var app = PrometeApp.Create().Use<Keyboard>().UseScenesFrom<KeyScene>().BuildWithHeadless();
+        KeyScene.UpHeld = null;
+        app.LoadScene<KeyScene>();
+        app.OnUpdate();
+        Assert.AreEqual(false, KeyScene.UpHeld);
+    }
+}
+EOF
+
+cat > "$WORK/code/Code.csproj" <<EOF
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <LangVersion>14.0</LangVersion>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="$WORK/src/**/*.cs" />
+    <PackageReference Include="Promete" Version="$(version_of Promete)" />
+  </ItemGroup>
+</Project>
+EOF
+cat > "$WORK/test/Tests.csproj" <<EOF
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <LangVersion>14.0</LangVersion>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="$WORK/tests/**/*.cs" />
+    <ProjectReference Include="../code/Code.csproj" />
+    <PackageReference Include="NUnit" Version="$(version_of NUnit)" />
+    <PackageReference Include="NUnit3TestAdapter" Version="$(version_of NUnit3TestAdapter)" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="$(version_of Microsoft.NET.Test.Sdk)" />
+    <PackageReference Include="JunitXml.TestLogger" Version="$(version_of JunitXml.TestLogger)" />
+  </ItemGroup>
+</Project>
+EOF
+
+echo "Promete $(version_of Promete), $(cd "$WORK" && dotnet --version)"
+echo
+echo "== ヘッドレスのテストで Promete の API を呼ぶ"
+REPORT="$WORK/probe.xml"
+{ cd "$WORK" \
+    && dotnet restore "$WORK/test/Tests.csproj" --configfile "$TOOLS/nuget.config" \
+    && dotnet test "$WORK/test/Tests.csproj" --no-restore --logger "junit;LogFilePath=$REPORT"; } \
+  >"$WORK/probe.log" 2>&1 || true
+cat "$WORK/probe.log" >>"$LOG"
+if [ ! -s "$REPORT" ]; then
+  echo "  FAILED: the probe did not run; see $LOG"
+  grep -E 'error' "$WORK/probe.log" | sort -u | head -20 | sed 's/^/    /'
+else
+  python3 - "$REPORT" <<'PY'
+import sys
+import xml.etree.ElementTree as ET
+for case in ET.parse(sys.argv[1]).getroot().iter("testcase"):
+    name = case.get("name", "?").split(".")[-1]
+    failure = case.find("failure")
+    if failure is None:
+        print(f"  works    {name}")
+    else:
+        first = (failure.get("message") or "").strip().splitlines()
+        print(f"  FAILS    {name}: {first[0][:150] if first else '(no message)'}")
+PY
+fi
+
+echo
+echo "full log: $LOG"

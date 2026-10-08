@@ -37,7 +37,7 @@ AI の役は、Windows から切り離した専用の WSL2 の中で動く。ブ
 |---|---|---|
 | Python | pytest | ロジック |
 | TypeScript | vitest + happy-dom | ロジックと、ボタンを押して表示が変わるまでの UI |
-| C# | NUnit（.NET 8）。コードは netstandard2.1 / C# 9 でビルド | ロジック。Unity のプロジェクトなら、その参照アセンブリでコンパイルする |
+| C# | NUnit。Unity は .NET 8 で、コードは netstandard2.1 / C# 9 でビルド。Promete は .NET 10 / C# 14 で、Promete 2.1.0 を参照する | ロジック。Unity のプロジェクトなら、その参照アセンブリでコンパイルする。Promete ならヘッドレスのアプリでノードとフレームを進める処理まで |
 | C++ | GoogleTest（C++17） | 標準のロジック。DXライブラリや Windows の API を使うファイルはビルドから外す |
 
 ### 既存リポジトリで作業させる

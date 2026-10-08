@@ -3,10 +3,14 @@
 #
 #     sudo -u runner -H /srv/loop/bin/smoke-dotnet
 #
-# 36-dotnet.sh がプロビジョニングのたびに流す。コードは netstandard2.1（Unity が
-# 読める形）、テストは net8.0 の NUnit 3 で、ランナーが使うのと同じ組み合わせ。
-# 通るテストと落ちるテストを1つずつ置き、2件走って1件落ちることを確かめる。
-# 落ちたテストの type と message をそのまま出す。ランナーは例外の型をそこから
+# 36-dotnet.sh がプロビジョニングのたびに流す。ランナーが使う2つの組み合わせを確かめる
+# （loop.py の FRAMEWORKS["csharp"]）。
+#
+#   unity    SDK 8。コードは netstandard2.1（Unity が読める形）、テストは net8.0
+#   promete  SDK 10。コードは net10.0 で Promete を参照し、テストも net10.0
+#
+# どちらも NUnit 3 で、通るテストと落ちるテストを1つずつ置き、2件走って1件落ちることを
+# 確かめる。落ちたテストの type と message をそのまま出す。ランナーは例外の型をそこから
 # 読むので、ロガーの版を変えたときに形が変わっていないかをここで見る。
 set -euo pipefail
 
@@ -19,58 +23,50 @@ version_of() { tr ' ' '\n' <<<"$versions" | sed -n "s/^$1=//p"; }
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
-mkdir -p "$WORK/src" "$WORK/tests" "$WORK/code" "$WORK/test"
 
-cat > "$WORK/src/Calc.cs" <<'EOF'
-namespace Smoke
-{
-    public static class Calc
-    {
-        public static int Add(int a, int b) => a + b;
-    }
-}
+fail=0
+note() { echo "  $1"; }
+bad()  { echo "  FAIL: $1"; fail=1; }
+
+# smoke <名前> <SDK> <コードの対象> <テストの対象> <C# の版> <暗黙の using> <コードのパッケージ>
+# 本文は $WORK/<名前>/src と $WORK/<名前>/tests に置いてから呼ぶ。
+smoke() {
+  local name="$1" sdk="$2" code_target="$3" test_target="$4" langversion="$5" implicit="$6"
+  local package="$7" dir="$WORK/$1" packages=""
+  [ -z "$package" ] || packages="<PackageReference Include=\"$package\" Version=\"$(version_of "$package")\" />"
+  echo "== $name"
+  mkdir -p "$dir/code" "$dir/test"
+  # ランナーと同じく、SDK は global.json で選び、dotnet はそのディレクトリで呼ぶ。
+  cat > "$dir/global.json" <<EOF
+{"sdk": {"version": "$sdk.100", "rollForward": "latestFeature", "allowPrerelease": false}}
 EOF
-cat > "$WORK/tests/CalcTests.cs" <<'EOF'
-using NUnit.Framework;
-
-namespace Smoke.Tests
-{
-    public class CalcTests
-    {
-        [Test]
-        public void AddsTwoNumbers() => Assert.AreEqual(5, Calc.Add(2, 3));
-
-        [Test]
-        public void FailsOnPurpose() => Assert.AreEqual(6, Calc.Add(2, 3));
-    }
-}
-EOF
-
-# 2つの csproj は別のディレクトリに置く。同じディレクトリだと obj/ を分け合い、
-# restore の結果が互いを上書きする。
-cat > "$WORK/code/Code.csproj" <<EOF
+  # 2つの csproj は別のディレクトリに置く。同じディレクトリだと obj/ を分け合い、
+  # restore の結果が互いを上書きする。
+  cat > "$dir/code/Code.csproj" <<EOF
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
-    <TargetFramework>netstandard2.1</TargetFramework>
-    <LangVersion>9.0</LangVersion>
+    <TargetFramework>$code_target</TargetFramework>
+    <LangVersion>$langversion</LangVersion>
+    <ImplicitUsings>$implicit</ImplicitUsings>
     <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
   </PropertyGroup>
   <ItemGroup>
-    <Compile Include="$WORK/src/**/*.cs" />
+    <Compile Include="$dir/src/**/*.cs" />
+    $packages
   </ItemGroup>
 </Project>
 EOF
-cat > "$WORK/test/Tests.csproj" <<EOF
+  cat > "$dir/test/Tests.csproj" <<EOF
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
-    <TargetFramework>net8.0</TargetFramework>
-    <LangVersion>9.0</LangVersion>
-    <ImplicitUsings>disable</ImplicitUsings>
+    <TargetFramework>$test_target</TargetFramework>
+    <LangVersion>$langversion</LangVersion>
+    <ImplicitUsings>$implicit</ImplicitUsings>
     <IsPackable>false</IsPackable>
     <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
   </PropertyGroup>
   <ItemGroup>
-    <Compile Include="$WORK/tests/**/*.cs" />
+    <Compile Include="$dir/tests/**/*.cs" />
     <ProjectReference Include="../code/Code.csproj" />
     <PackageReference Include="NUnit" Version="$(version_of NUnit)" />
     <PackageReference Include="NUnit3TestAdapter" Version="$(version_of NUnit3TestAdapter)" />
@@ -80,28 +76,26 @@ cat > "$WORK/test/Tests.csproj" <<EOF
 </Project>
 EOF
 
-fail=0
-note() { echo "  $1"; }
-bad()  { echo "  FAIL: $1"; fail=1; }
-
-echo "dotnet: $(dotnet --version)"
-if dotnet restore "$WORK/test/Tests.csproj" --configfile "$TOOLS/nuget.config" >"$WORK/restore.log" 2>&1; then
-  note "ok: restored from $TOOLS/feed alone"
-else
-  cat "$WORK/restore.log"
-  bad "restore failed with only the frozen feed as a source"
-fi
-
-REPORT="$WORK/report.xml"
-if [ "$fail" -eq 0 ]; then
-  # 1件落とすので、終了コードは 0 にならない。判定はレポートから読む。
-  dotnet test "$WORK/test/Tests.csproj" --no-restore \
-    --logger "junit;LogFilePath=$REPORT" >"$WORK/test.log" 2>&1 || true
-  if [ ! -s "$REPORT" ]; then
-    cat "$WORK/test.log"
-    bad "no junit report at $REPORT"
+  local before="$fail"
+  note "dotnet: $(cd "$dir" && dotnet --version)"
+  if (cd "$dir" && dotnet restore "$dir/test/Tests.csproj" --configfile "$TOOLS/nuget.config") \
+       >"$dir/restore.log" 2>&1; then
+    note "ok: restored from $TOOLS/feed alone"
   else
-    counts="$(python3 - "$REPORT" <<'PY'
+    cat "$dir/restore.log"
+    bad "$name: restore failed with only the frozen feed as a source"
+  fi
+
+  local report="$dir/report.xml" counts
+  if [ "$fail" -eq "$before" ]; then
+    # 1件落とすので、終了コードは 0 にならない。判定はレポートから読む。
+    (cd "$dir" && dotnet test "$dir/test/Tests.csproj" --no-restore \
+       --logger "junit;LogFilePath=$report") >"$dir/test.log" 2>&1 || true
+    if [ ! -s "$report" ]; then
+      cat "$dir/test.log"
+      bad "$name: no junit report at $report"
+    else
+      counts="$(python3 - "$report" <<'PY'
 import sys
 import xml.etree.ElementTree as ET
 root = ET.parse(sys.argv[1]).getroot()
@@ -116,13 +110,73 @@ for case in cases:
 print(tests, failures)
 PY
 )"
-    if [ "$counts" = "2 1" ]; then
-      note "ok: 2 tests ran and 1 failed, read from the junit report"
-    else
-      bad "expected '2 1' (tests failures), got '$counts'"
+      if [ "$counts" = "2 1" ]; then
+        note "ok: 2 tests ran and 1 failed, read from the junit report"
+      else
+        bad "$name: expected '2 1' (tests failures), got '$counts'"
+      fi
     fi
   fi
-fi
+}
+
+# ---- unity ------------------------------------------------------------------
+mkdir -p "$WORK/unity/src" "$WORK/unity/tests"
+cat > "$WORK/unity/src/Calc.cs" <<'EOF'
+namespace Smoke
+{
+    public static class Calc
+    {
+        public static int Add(int a, int b) => a + b;
+    }
+}
+EOF
+cat > "$WORK/unity/tests/CalcTests.cs" <<'EOF'
+using NUnit.Framework;
+
+namespace Smoke.Tests
+{
+    public class CalcTests
+    {
+        [Test]
+        public void AddsTwoNumbers() => Assert.AreEqual(5, Calc.Add(2, 3));
+
+        [Test]
+        public void FailsOnPurpose() => Assert.AreEqual(6, Calc.Add(2, 3));
+    }
+}
+EOF
+smoke unity 8.0 netstandard2.1 net8.0 9.0 disable ""
+
+# ---- promete ----------------------------------------------------------------
+# コードが Promete の型を使い、テストがそれを呼ぶ。Promete の参照が推移的に
+# テストまで届くことと、ネイティブを要しない型が net10.0 のテストで動くことを見る。
+mkdir -p "$WORK/promete/src" "$WORK/promete/tests"
+cat > "$WORK/promete/src/Calc.cs" <<'EOF'
+using Promete;
+
+namespace Smoke;
+
+public static class Calc
+{
+    public static Vector Add(Vector a, Vector b) => a + b;
+}
+EOF
+cat > "$WORK/promete/tests/CalcTests.cs" <<'EOF'
+using NUnit.Framework;
+using Promete;
+
+namespace Smoke.Tests;
+
+public class CalcTests
+{
+    [Test]
+    public void AddsTwoVectors() => Assert.AreEqual(5f, Calc.Add(new Vector(2, 0), new Vector(3, 0)).X);
+
+    [Test]
+    public void FailsOnPurpose() => Assert.AreEqual(6f, Calc.Add(new Vector(2, 0), new Vector(3, 0)).X);
+}
+EOF
+smoke promete 10.0 net10.0 net10.0 14.0 enable Promete
 
 if [ "$fail" -eq 0 ]; then
   echo "smoke-dotnet: ok"

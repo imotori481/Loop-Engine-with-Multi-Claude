@@ -983,8 +983,13 @@ Say all of this in CONTEXT.md; the solver has no other way to learn it.""",
         # 送っていれば、それでコンパイルする（unity_refs）。送っていなくても、
         # Unity に置ける形で書く。
         "unity": {
+            "dotnet_sdk": "8.0",
             "dotnet_target": "netstandard2.1",
+            "dotnet_test_target": "net8.0",
             "dotnet_langversion": "9.0",
+            "dotnet_implicit_usings": "disable",
+            "dotnet_nullable": "disable",
+            "dotnet_packages": (),
             "unity_refs": True,
             "layout_note": """Every source file is `.cs` under {SRC}/, e.g. `{SRC}/Logic/Board.cs`, and
 every test file is `.cs` under {TESTS}/. The code compiles as one assembly
@@ -1017,6 +1022,54 @@ provides match on those names.
 Say all of this in CONTEXT.md; the solver has no other way to learn it.""",
             "facts": lambda: ("Runtime: .NET 8 for the tests; the code is built as netstandard2.1",
                               *unity_facts()),
+        },
+        # Promete（2D のゲームエンジン）に持ち込むコード。2.1.0 は net10.0 だけを持つので、
+        # コードもテストも net10.0 で、SDK は 10。C# の版は Promete 自身のテストに合わせる。
+        # Promete のプロジェクトは暗黙の using と nullable を有効にして書かれているので、
+        # 取り込んだコードを同じ設定でコンパイルする。
+        "promete": {
+            "dotnet_sdk": "10.0",
+            "dotnet_target": "net10.0",
+            "dotnet_test_target": "net10.0",
+            "dotnet_langversion": "14.0",
+            "dotnet_implicit_usings": "enable",
+            "dotnet_nullable": "enable",
+            "dotnet_packages": ("Promete",),
+            "layout_note": """Every source file is `.cs` under {SRC}/, e.g. `{SRC}/Logic/Board.cs`, and
+every test file is `.cs` under {TESTS}/. The code compiles as one assembly
+(net10.0, C# 14, implicit usings and nullable reference types on) that
+references the Promete 2.1.0 package, and the tests as another that references
+the code, so a test uses the code through `using <its namespace>;` -- there are
+no file imports.
+
+One public type per file, and the file is named after the type
+(`Board.cs` holds `Board`). A new file's namespace follows its folder under
+{SRC}/ (`{SRC}/Logic/Board.cs` -> namespace `Logic`). A file that already exists
+keeps the namespace it has: a declaration read from it ends in
+`-- namespace <name>`, and code that uses it writes `using <name>;`.
+
+Tests use NUnit 3: `using NUnit.Framework;`, a public class with `[Test]`
+methods, and `Assert.AreEqual(expected, actual)` or `Assert.That(actual,
+Is.EqualTo(expected))`. Every test class is inside a namespace, and its name
+is the file's name (`{TESTS}/BoardTests.cs` holds `BoardTests`): the runner
+selects a step's tests by that class name.
+
+Promete here is version 2, and older examples show version 1. A scene takes the
+plugins it uses through its constructor (`public class MainScene(Keyboard
+keyboard) : Scene`) and reads the screen through `View` and the clock through
+`Time`. `IWindow` and a scene's `Window` property are the version 1 API: do not
+use them.
+
+A contract line names the file and then the declaration. A type:
+    {SRC}/Logic/Board.cs: class Board { public int Width; public int Height; }
+A member, written with its type in front of its name:
+    {SRC}/Logic/Board.cs: static int Board.Score(Board board)
+The name of the first is `Board` and of the second `Board.Score`; requires and
+provides match on those names.
+
+Say all of this in CONTEXT.md; the solver has no other way to learn it.""",
+            "facts": lambda: ("Runtime: .NET 10 for the code and the tests; Promete 2.1.0",
+                              *promete_facts()),
         },
     },
     "cpp": {
@@ -1195,12 +1248,26 @@ def unity_refs() -> bool:
     return bool(LANGUAGE.get("unity_refs")) and (UNITY_REFS / "refs").is_dir()
 
 
-def dotnet_projects() -> dict[Path, str]:
-    """ランナーが書く2つの csproj。柵の場所、凍結したフィードの版、持ち込む先から作る。
+def dotnet_global_json() -> str:
+    """build に置く global.json。持ち込む先の SDK に固定する。
 
-    プロジェクトの根には置かない（36-dotnet.sh の冒頭を参照）。コードの対象と C# の
-    版は持ち込む先が決め（FRAMEWORKS）、テストは net8.0 の NUnit 3。Unity の参照が
-    あれば、コードはそれでコンパイルし、テストは実行のためにそれを出力に写す。
+    箱には SDK が2つある（36-dotnet.sh）。dotnet は作業ディレクトリから global.json を
+    探し、無ければいちばん新しい SDK を使う。Unity の計画を SDK 8 のまま走らせる
+    ために、dotnet は build で呼び、ここに置いたものを読ませる。
+    """
+    return json.dumps({"sdk": {"version": f"{LANGUAGE['dotnet_sdk']}.100",
+                               "rollForward": "latestFeature", "allowPrerelease": False}},
+                      indent=2) + "\n"
+
+
+def dotnet_projects() -> dict[Path, str]:
+    """ランナーが書く2つの csproj と global.json。柵の場所、凍結したフィードの版、
+    持ち込む先から作る。
+
+    プロジェクトの根には置かない（36-dotnet.sh の冒頭を参照）。コードとテストの対象、
+    C# の版、SDK、使うパッケージは持ち込む先が決め（FRAMEWORKS）、テストは NUnit 3。
+    Unity の参照があれば、コードはそれでコンパイルし、テストは実行のためにそれを
+    出力に写す。
     """
     versions = dict(item.split("=", 1) for item in
                     (DOTNET_TOOLS / "feed" / ".versions").read_text(encoding="utf-8").split())
@@ -1221,9 +1288,12 @@ def dotnet_projects() -> dict[Path, str]:
     common = f"""    <LangVersion>{langversion}</LangVersion>
     <DefineConstants>$(DefineConstants);{defines}</DefineConstants>
     <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
-    <Nullable>disable</Nullable>
-    <ImplicitUsings>disable</ImplicitUsings>
+    <Nullable>{LANGUAGE["dotnet_nullable"]}</Nullable>
+    <ImplicitUsings>{LANGUAGE["dotnet_implicit_usings"]}</ImplicitUsings>
     <NoWarn>$(NoWarn);CS0414;CS0649;CS0169;CS0436;MSB3277</NoWarn>"""
+    # 持ち込む先のパッケージはコードが参照し、テストはコードを通して受け取る。
+    packages = "".join(f'\n    <PackageReference Include="{name}" Version="{versions[name]}" />'
+                       for name in LANGUAGE["dotnet_packages"])
     code = f"""<Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <TargetFramework>{LANGUAGE["dotnet_target"]}</TargetFramework>
@@ -1231,7 +1301,7 @@ def dotnet_projects() -> dict[Path, str]:
 {common}
   </PropertyGroup>
   <ItemGroup>
-    <Compile Include="{SRC}/**/*.cs" />
+    <Compile Include="{SRC}/**/*.cs" />{packages}
   </ItemGroup>
   <ItemGroup>{references(False)}
   </ItemGroup>
@@ -1239,7 +1309,7 @@ def dotnet_projects() -> dict[Path, str]:
 """
     tests = f"""<Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
-    <TargetFramework>net8.0</TargetFramework>
+    <TargetFramework>{LANGUAGE["dotnet_test_target"]}</TargetFramework>
     <AssemblyName>LoopTests</AssemblyName>
     <IsPackable>false</IsPackable>
 {common}
@@ -1257,14 +1327,16 @@ def dotnet_projects() -> dict[Path, str]:
 </Project>
 """
     return {DOTNET_BUILD / "code" / "Code.csproj": code,
-            DOTNET_BUILD / "tests" / "Tests.csproj": tests}
+            DOTNET_BUILD / "tests" / "Tests.csproj": tests,
+            DOTNET_BUILD / "global.json": dotnet_global_json()}
 
 
 def prepare_dotnet() -> str | None:
     """csproj を書き、中身が変わったときだけ restore する。できなければ理由を返す。
 
     restore はフィードだけから行う（nuget.config がほかのソースを消す）。csproj が
-    変わるのは、柵の場所か Unity の参照かフィードの版が変わったときだけだ。
+    変わるのは、柵の場所か持ち込む先か Unity の参照かフィードの版が変わったときだけだ。
+    dotnet は build で呼ぶ。そこの global.json が SDK を決める（dotnet_global_json）。
     """
     try:
         projects = dotnet_projects()
@@ -1281,7 +1353,7 @@ def prepare_dotnet() -> str | None:
         try:
             proc = run([str(LANGUAGE["test_runner"]), "restore", str(tests),
                         "--configfile", str(DOTNET_TOOLS / "nuget.config")],
-                       env=DOTNET_ENV, timeout=TIMEOUTS["test"])
+                       cwd=DOTNET_BUILD, env=DOTNET_ENV, timeout=TIMEOUTS["test"])
         except subprocess.TimeoutExpired:
             return f"dotnet restore did not finish within {TIMEOUTS['test']}s"
         if proc.returncode != 0:
@@ -1647,7 +1719,8 @@ def pytest_run(tag: str, files_test: list[str]) -> TestRun:
         if failed:
             return failed
     try:
-        proc = run(argv, env=env, timeout=seconds)
+        # C# は build で呼ぶ。そこの global.json が SDK を決める（dotnet_global_json）。
+        proc = run(argv, cwd=DOTNET_BUILD if csharp else PROJECT, env=env, timeout=seconds)
     except subprocess.TimeoutExpired:
         # 失敗ではなくエラーとして報告する。実際そうで、スイートは判定をまったく
         # 出していない。RED_GATE では R2 がそのまま拒み、VERIFY は失敗した試行と
@@ -5129,7 +5202,9 @@ def csharp_outline(text: str) -> dict | None:
             declared = CSHARP_TYPE_HEAD.match(head)
             if space:
                 if open_ is None:
-                    return False    # ファイル単位の namespace は C# 10 で、ここでは使えない
+                    # ファイル単位の namespace（C# 10。Promete のコードはこの形で書く）。
+                    # ファイルの残りがその中にある。ほかの namespace の中には書けない。
+                    return not namespace and walk(stop, hi, space.group(1))
                 if not walk(open_ + 1, close, ".".join(filter(None, [namespace, space.group(1)]))):
                     return False
             elif re.match(r"(?:global\s+)?using\b", head):
@@ -5507,13 +5582,25 @@ def csharp_units(text: str, provided: set[str]) -> dict[str, str] | None:
     return units
 
 
-def tool_version(binary: Path) -> str:
+def tool_version(binary: Path, cwd: Path = PROJECT) -> str:
     """ツールが名乗る版の1行目。走らなければそう書く。"""
     try:
-        proc = run([str(binary), "--version"])
+        proc = run([str(binary), "--version"], cwd=cwd)
         return (proc.stdout + proc.stderr).strip().splitlines()[0]
     except (OSError, IndexError):
         return "(not installed)"
+
+
+def test_runner_version() -> str:
+    """テストのコマンドの版。C# は、テストを走らせるときと同じく build の global.json が
+    選ぶ SDK の版を出す。箱でなければ（build が無ければ）、ほかの言語と同じに聞く。"""
+    if LANGUAGE["name"] == "csharp" and DOTNET_BUILD.is_dir():
+        try:
+            (DOTNET_BUILD / "global.json").write_text(dotnet_global_json(), encoding="utf-8")
+            return tool_version(LANGUAGE["test_runner"], DOTNET_BUILD)
+        except OSError:
+            pass
+    return tool_version(LANGUAGE["test_runner"])
 
 
 def python_facts() -> tuple[str, str, str]:
@@ -5651,6 +5738,36 @@ Do not write criteria about a MonoBehaviour, a scene, a prefab or what appears
 on screen. The test cannot create them: it fails with an exception rather than
 an assertion, and RED_GATE rejects the step (R5). A human checks those in
 Unity afterwards.
+""")
+
+
+def promete_facts() -> tuple[str, str]:
+    """Promete に持ち込む計画に伝える、エンジンについての事実。(1行の要約, 段落)。
+
+    動くと書いたものは、Promete 自身のテスト（NodeTests、NextFrameTests、
+    ScenelessRunTests）がヘッドレスで確かめているものだけだ。箱での実測は
+    probe-promete が出す。測っていないものは、使えないものとして扱わせる。
+    """
+    return ("Promete 2.1.0: the package is here and the code compiles against it. There is "
+            "no window and no GPU; tests use Promete's headless backend.",
+            """There is no screen and no GPU here. The code is compiled against Promete, and
+the tests run on plain .NET 10. Promete has a headless backend for exactly
+this, so a test can do more than call plain C#:
+
+    works:   Vector, VectorInt, Rect, RectInt and Angle arithmetic; building a
+             node tree with Container and reading Count, Parent, Location and
+             Size; an app built with `PrometeApp.Create().BuildWithHeadless()`,
+             whose `OnUpdate()` advances one frame (an action passed to
+             `app.NextFrame(...)` runs at the start of the next one)
+    treat as unavailable: loading a texture, a font or a sound from a file;
+             drawing; real keyboard, mouse or gamepad input
+
+So put the behaviour a criterion checks in plain classes, or in nodes and
+scenes driven frame by frame through a headless app, and pass input in as
+plain values -- which key is held, where the pointer is. A test that needs a
+texture, a font, a sound or a real key press fails with an exception rather
+than an assertion, and RED_GATE rejects the step (R5). What is drawn and heard
+is checked by a person afterwards.
 """)
 
 
@@ -5936,7 +6053,7 @@ try, be refused, and spend part of its attempt on it.
 
 Language: {LANGUAGE["label"]}
 {runtime}
-Test runner: {tool_version(LANGUAGE["test_runner"])}
+Test runner: {test_runner_version()}
 
 Graphical display: {f"DISPLAY={display}" if display else "NONE. DISPLAY is not set"}
 {toolkit}

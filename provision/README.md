@@ -281,19 +281,24 @@ Vite はインラインのモジュールスクリプトを `/index.html?html-pr
 
 | もの | 場所 | 持ち主 |
 |---|---|---|
-| .NET 8 SDK | Ubuntu の archive の `dotnet-sdk-8.0` | apt |
-| NUnit 3、NUnit3TestAdapter、Microsoft.NET.Test.Sdk、JunitXml.TestLogger と推移的な依存 | `/srv/loop/dotnet/feed`（`.nupkg` を並べたフォルダ） | root。誰も書けない |
+| .NET 8 SDK と .NET 10 SDK | Ubuntu の archive の `dotnet-sdk-8.0` と `dotnet-sdk-10.0` | apt |
+| NUnit 3、NUnit3TestAdapter、Microsoft.NET.Test.Sdk、JunitXml.TestLogger、Promete 2.1.0 と推移的な依存 | `/srv/loop/dotnet/feed`（`.nupkg` を並べたフォルダ） | root。誰も書けない |
 | ソースをフィードだけにする設定 | `/srv/loop/dotnet/nuget.config`（`<clear/>` のあとにフィードだけ） | root |
 | ランナーが書く csproj とビルドの出力 | `/srv/loop/dotnet/build` | runner、700 |
 
 - 版はスクリプトの冒頭で固定する。フィードに出るのは版を変えたときだけなので、egress を閉じた後に流し直してもネットワークは要らない
 - NUnit は 3 系にする。Unity の Test Framework の NUnit は 3 系で、4 系は `Assert.AreEqual` を `ClassicAssert` に移した
+- SDK は持ち込む先で選ぶ。Unity は 8、Promete は 10 で、ランナーは `build` に置いた `global.json` でそれを固定し、dotnet を `build` で呼ぶ
 - csproj はプロジェクトの根に置かない。取り込んだ Unity のプロジェクトでは、IDE が Unity の生成した csproj と一緒に拾ってしまう
 - `build` はコンパイルしたコードとテストを持つので、planner と critic から見えてはならない（BOOTSTRAP 1-1）
 
-最後に `smoke-dotnet` を流す。フィードだけで restore し、netstandard2.1 のコードを net8.0 の
-NUnit のテストで走らせ、junit のレポートから2件走って1件落ちたことを読む。落ちたテストの
-`type` と `message` も出す。ランナーは例外の型をそこから読むので、ロガーの版を変えたら形を見る。
+最後に `smoke-dotnet` を流す。ランナーが使う2つの組み合わせを、フィードだけで restore して走らせる。
+
+- unity: SDK 8 で、netstandard2.1 のコードを net8.0 の NUnit のテストで走らせる
+- promete: SDK 10 で、Promete を参照する net10.0 のコードを net10.0 の NUnit のテストで走らせる
+
+どちらも junit のレポートから2件走って1件落ちたことを読む。落ちたテストの `type` と `message` も出す。
+ランナーは例外の型をそこから読むので、ロガーの版を変えたら形を見る。
 
 ```bash
 sudo -u runner -H /srv/loop/bin/smoke-dotnet
@@ -330,6 +335,18 @@ sudo -u runner -H /srv/loop/bin/probe-unity
 2. エンジン本体の無い .NET 8 の上で、`Vector3` や `Mathf` の計算、`Debug.Log` のようなネイティブ呼び出し、`GameObject` と MonoBehaviour と ScriptableObject の生成が動くか
 
 全文は `/srv/loop/logs/probe-unity-<日時>.log` に残る。
+
+Promete に持ち込む計画では、`probe-promete` でヘッドレスのテストに何ができるかを測る。これも測定で、結果が悪くても落ちない。
+
+```bash
+sudo -u runner -H /srv/loop/bin/probe-promete
+```
+
+1. `Vector` や `Angle` の計算と、`Container` のノードの木
+2. ヘッドレスのアプリで、フレームを進める、時間、メモリからのテクスチャ、既定のフォント、`Text` ノード、キーボード、`ConsoleLayer`、コルーチン、オーディオが動くか
+3. コードのプロジェクトのシーンを、テストから `UseScenesFrom` の有無で読み込めるか
+
+結果はランナーの `promete_facts` に書く。全文は `/srv/loop/logs/probe-promete-<日時>.log` に残る。
 
 ### 2-9. 資格情報を入れる（箱）
 
@@ -972,6 +989,7 @@ VirtualBox 構成の手順は `c4374f4` から拾える。
 
 ## 更新履歴
 
+- 2026/10/08: Promete のために .NET 10 SDK と Promete 2.1.0 を §2-8 の凍結に足し、`smoke-dotnet` を2つの組み合わせにし、`probe-promete` を追加
 - 2026/09/28: 3役の起動でツールとシステムプロンプトを絞ることと、その確かめ方を §2-9 に追加
 - 2026/09/27: Unity の参照アセンブリの置き場（§2-11）と、それで測る `probe-unity`（§2-8）を追加
 - 2026/09/27: .NET を凍結する `36-dotnet.sh` と `smoke-dotnet` を §2-8 に追加
