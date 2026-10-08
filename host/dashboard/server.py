@@ -206,8 +206,8 @@ def handler_for(state: DashboardState, launchers: Launchers, reach: Reach, token
                     self._json({"message": live.reset_step(str(body.get("step", "")))},
                                HTTPStatus.OK)
                     return
-                if path in ("/api/start", "/api/project", "/api/model"):
-                    # 走行の開始、プロジェクトの切り替え、役のモデルの変更は、利用枠と箱の
+                if path in ("/api/start", "/api/project", "/api/project/remove", "/api/model"):
+                    # 走行の開始、プロジェクトの切り替えと削除、役のモデルの変更は、利用枠と箱の
                     # 状態を大きく動かす。この機械の前でだけ。
                     if scope != LOCAL:
                         raise ValueError("this can only be done at the machine itself")
@@ -219,6 +219,8 @@ def handler_for(state: DashboardState, launchers: Launchers, reach: Reach, token
                                                   str(body.get("framework", "")))
                     elif path == "/api/project":
                         message = live.use_project(str(body.get("project", "")))
+                    elif path == "/api/project/remove":
+                        message = live.remove_project(str(body.get("project", "")))
                     else:
                         message = live.set_model(str(body.get("role", "")),
                                                  str(body.get("model", "")),

@@ -242,6 +242,14 @@ init_project() {
   ADMIN_USER="$admin" bash "$PROJECT_SH" "${args[@]}"
 }
 
+# プロジェクトをディレクトリごと消す。切り替えの途中なら、消す相手が今のプロジェクトに
+# なりかけているかもしれないので断る。root で動く（cmd_dash から呼ぶ）。
+remove_project() {
+  local name="$1" admin="$2"
+  switching && die "ダッシュボードがプロジェクトを切り替えている。終わるのを待つ"
+  ADMIN_USER="$admin" bash "$PROJECT_SH" remove "$name"
+}
+
 # ホストのダッシュボードが流す入口。sudoers が保守ユーザーにこれだけをパスワード無しで
 # 許す（25-runner.sh）ので、root で動く。要求は標準入力の JSON 1つで、形と値は
 # loop_dash.py が確かめる。ここでは確かめ済みの行だけを使う。
@@ -265,6 +273,7 @@ cmd_dash() {
     use)      switch_project "${req[1]}" "$admin" ;;
     reset)    reset_step "${req[1]}" ;;
     init)     init_project "${req[1]}" "${req[2]}" "${req[3]}" "${req[4]}" "$admin" ;;
+    remove)   remove_project "${req[1]}" "$admin" ;;
     *)        die "知らない操作: $action" ;;
   esac
 }
@@ -336,7 +345,7 @@ usage() {
                     {"mode", "index", "title", "evidence"} の JSON を渡す
   log               走行ログを追う。Ctrl-C で抜けても走行は続く
   stop              走行を止める
-  project <引数>    プロジェクトの一覧と切り替え。'loop project' で使い方を出す
+  project <引数>    プロジェクトの一覧、切り替え、削除。'loop project' で使い方を出す
   raw <引数>        loop.py をそのまま runner として前面で呼ぶ。'loop raw --help' で動詞の一覧
   update [--force]  このリポジトリを pull し、プロビジョニングを流し直す。プロビジョニング済みの
                     コミットなら、--force が無い限り飛ばす

@@ -68,6 +68,12 @@ class Request(unittest.TestCase):
         for name in ("CURRENT", "../etc", "-x", "Game", "a b", "", None, "a\nb"):
             self.refused({"action": "use", "project": name})
 
+    def test_a_removal_follows_the_same_rule_for_the_name(self):
+        self.assertEqual(self.parse({"action": "remove", "project": "game-2"}),
+                         ["remove", "game-2"])
+        for name in ("CURRENT", "../etc", "-x", "", None, ".", "a/b"):
+            self.refused({"action": "remove", "project": name})
+
     def test_a_model_change_passes_only_names_that_are_safe_in_a_shell(self):
         self.assertEqual(
             self.parse({"action": "model", "role": "solver", "model": "claude-opus-5-5[1m]",

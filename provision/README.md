@@ -493,6 +493,7 @@ loop project init <名前> --src <ディレクトリ> --tests <ディレクト�
 loop project layout <名前> --src <ディレクトリ> --tests <ディレクトリ>
                                                 # 作ってあるプロジェクトの柵の場所を変える
 loop project use <名前>                         # 切り替える
+loop project remove <名前>                      # ディレクトリと走行ログごと消す。今のものは消せない
 loop project unity-refs <名前> <tar>            # Unity の参照アセンブリを置く（ホストの loop-unity-refs が流す）
 ```
 
@@ -989,6 +990,7 @@ VirtualBox 構成の手順は `c4374f4` から拾える。
 
 ## 更新履歴
 
+- 2026/10/08: §2-11 に `loop project remove` を追加
 - 2026/10/08: Promete のために .NET 10 SDK と Promete 2.1.0 を §2-8 の凍結に足し、`smoke-dotnet` を2つの組み合わせにし、`probe-promete` を追加
 - 2026/09/28: 3役の起動でツールとシステムプロンプトを絞ることと、その確かめ方を §2-9 に追加
 - 2026/09/27: Unity の参照アセンブリの置き場（§2-11）と、それで測る `probe-unity`（§2-8）を追加

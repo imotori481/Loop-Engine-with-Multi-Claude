@@ -74,6 +74,7 @@ python host/dashboard/server.py --project C:\dev\roop-engin\project
 |---|---|---|---|
 | 取り込み | 既存リポジトリのブランチを新しいプロジェクトにして切り替える | `loop project init` と `loop project use` | ローカル |
 | プロジェクト | 一覧を見て切り替える | `loop project use` を一時ユニット `loop-switch` で | ローカル |
+| プロジェクト | 今のもの以外を、名前を打って確かめてから箱のディレクトリと走行ログごと消す。走行中と切り替え中は断る | `loop project remove` | ローカル |
 | 役のモデル | 役ごとに `LOOP_MODEL` と `LOOP_EFFORT` を変える | `/etc/loop/<役>.env` の2行の書き換え | ローカル |
 | 走行 | 要件のファイルと言語を選んで開始 | `loop go` | ローカル |
 | 走行 | 止まったところから続ける | `loop continue` | どこからでも |
@@ -90,7 +91,7 @@ python host/dashboard/server.py --project C:\dev\roop-engin\project
 | `{"action": "go", "requirements": <本文>, "language": <言語>, "framework": <持ち込む先>}` | 本文は root だけが入れる一時ディレクトリに書き、そこから `human/in/REQUIREMENTS.md` に置く。言語は `loop.py` の `LANGUAGES` のどれか。持ち込む先はその言語の `FRAMEWORKS` のどれかで、空なら言語の既定 |
 | `{"action": "continue"}` / `{"action": "stop"}` | 引数なし |
 | `{"action": "reset", "step": <ID>}` | ID は英数字で始まり、英数字と `. _ -` だけ |
-| `{"action": "use", "project": <名前>}` | 名前は `loop-project.sh` と同じ規則 |
+| `{"action": "use", "project": <名前>}` / `{"action": "remove", "project": <名前>}` | 名前は `loop-project.sh` と同じ規則 |
 | `{"action": "init", "project": <名前>, "branch": <ブランチ>, "src": <柵>, "tests": <柵>}` | ブランチは英数字で始まり、英数字と `. _ / -` だけ。柵は `loop.py` の `layout_problems` で確かめ、空なら既定 |
 | `{"action": "settings"}` | 役ごとの `LOOP_MODEL` と `LOOP_EFFORT`、選べる effort と言語を JSON で返す。資格情報の行は返さない |
 | `{"action": "model", "role": <役>, "model": <名前>, "effort": <effort>}` | 名前は英数字と `. _ - [ ]` だけ。effort は `low` / `medium` / `high` / `xhigh` / `max` か空 |

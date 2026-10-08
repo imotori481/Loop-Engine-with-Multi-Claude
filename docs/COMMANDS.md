@@ -96,6 +96,7 @@ PowerShell なら `.\host\loop.cmd <args>`、Git Bash なら `./host/loop.cmd <a
 | 作ってあるプロジェクトの柵の場所を変える | `loop project layout <project> --src <src-dir> --tests <tests-dir>` |
 | Unity の参照アセンブリを送る（ホストだけ） | `loop-unity-refs <project> <unity-project-dir>` |
 | 切り替える | `loop project use <project>` |
+| ディレクトリと走行ログごと消す（今のものは消せない） | `loop project remove <project>` |
 | `loop-project.sh` より前に作った箱に名前を付ける | `loop project adopt <project>` |
 
 走行中は切り替えられない。先に `loop stop` か、終わるのを待つ。

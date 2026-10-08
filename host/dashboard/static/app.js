@@ -604,7 +604,18 @@ function renderProjects(projects, error) {
       use.disabled = liveState.running || liveState.switching;
       use.onclick = () => act(use, "/api/project", {project: project.name},
         `'${project.name}' に切り替えます。今のプロジェクトは退避されます。よいですか？`);
-      cell.append(use);
+      // 消すと戻せない。確かめは「OK」ではなく、名前を打たせる。
+      const remove = document.createElement("button"); remove.textContent = "削除";
+      remove.className = "danger";
+      remove.disabled = liveState.running || liveState.switching;
+      remove.onclick = () => {
+        const typed = prompt(`'${project.name}' を箱からディレクトリごと消します。退避中の作業ツリー、計画、走行ログも消え、戻せません。` +
+                             "ホストのクローンは残ります。\n消すなら名前を打ってください。");
+        if (typed === null) return;
+        if (typed.trim() !== project.name) { alert("名前が違うので、消しませんでした"); return; }
+        act(remove, "/api/project/remove", {project: project.name});
+      };
+      cell.append(use, remove);
     }
     row.append(text("td", project.name), text("td", PROJECT_STATE[project.state] || project.state),
                text("td", project.branch || "?"), cell);

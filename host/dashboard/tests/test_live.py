@@ -121,10 +121,12 @@ class ActOnTheSandbox(LiveView):
         self.assertNotIn("rm -rf", " ".join(run.call_args.args[0]))
 
     @patch("host.dashboard.live.subprocess.run")
-    def test_switching_and_model_changes_are_requests_too(self, run):
+    def test_switching_removal_and_model_changes_are_requests_too(self, run):
         run.return_value = answered("ok")
         self.live.use_project("game-2")
         self.assertEqual(self.dash_request(run), {"action": "use", "project": "game-2"})
+        self.live.remove_project("game-2")
+        self.assertEqual(self.dash_request(run), {"action": "remove", "project": "game-2"})
         self.live.set_model("solver", "claude-opus-5-5", "high")
         self.assertEqual(self.dash_request(run), {"action": "model", "role": "solver",
                                                   "model": "claude-opus-5-5", "effort": "high"})

@@ -102,8 +102,8 @@ def parse(request: object, work: str) -> list[str]:
     if action == "model":
         return ["model", check_role(request.get("role")), check_model(request.get("model")),
                 check_effort(request.get("effort"))]
-    if action == "use":
-        return ["use", check_project(request.get("project"))]
+    if action in ("use", "remove"):
+        return [action, check_project(request.get("project"))]
     if action == "reset":
         return ["reset", check_step(request.get("step"))]
     if action == "init":

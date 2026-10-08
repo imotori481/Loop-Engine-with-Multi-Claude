@@ -112,6 +112,10 @@ class Live:
         """`loop project use` を箱の一時ユニットで裏に回す。進みは `loop now` の switch に出る。"""
         return self._dash({"action": "use", "project": name})
 
+    def remove_project(self, name: str) -> str:
+        """`loop project remove`。箱のプロジェクトをディレクトリと走行ログごと消す。"""
+        return self._dash({"action": "remove", "project": name})
+
     def init_project(self, name: str, branch: str, src: str = "", tests: str = "") -> str:
         """`loop project init <名前> --branch <ブランチ>`。取り込むブランチの push を待つ空の bare を作る。"""
         return self._dash({"action": "init", "project": name, "branch": branch,
