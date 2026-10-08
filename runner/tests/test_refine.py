@@ -1,4 +1,5 @@
-"""plan refine が、上限の後に残った指摘を人に直させ、直した指摘で1回だけ改訂させること。
+"""plan refine が、上限の後に残った指摘と、プランナーが改訂せずに判断を返したときの指摘を
+人に直させ、直した指摘で1回だけ改訂させること。
 改訂に失敗しても改訂前の提案を失わないこと。
 
 改訂を頼む前に out/ は空になる。プランナーがエスカレーションしたとき、または
@@ -216,6 +217,26 @@ class TheHumanRewritesWhatIsLeftAfterTheCap(PendingDraft):
             self.assertEqual(loop.cmd_plan_refine(["trace"]), 0)
         self.assertFalse(self.shown()["waiting"])
         self.assertFalse(self.state.exists())
+
+    def test_an_escalation_before_the_cap_waits_for_the_rewrite(self) -> None:
+        def escalate(brief_for, tag, keep=None):
+            loop.clear_proposal()
+            (self.out / loop.ESCALATE_NAME).write_text("人間に訊く", encoding="utf-8")
+            return 0
+
+        with mock.patch.object(loop, "plan_with_retry", escalate):
+            self.assertEqual(loop.cmd_plan_refine(["trace"]), 3)
+        shown = self.shown()
+        self.assertTrue(shown["waiting"])
+        self.assertEqual(shown["round"], 1)
+
+        self.critiques = 0
+        self.rewrite("trace", 0, title="範囲は既存のファイルの分割まで")
+        self.assertEqual(self.resume(), 0)
+        self.assertEqual(self.critiques, 0)
+        self.assertEqual(len(self.briefs), 1)
+        self.assertIn("1. 範囲は既存のファイルの分割まで\n   REWRITTEN BY THE HUMAN", self.briefs[0])
+        self.assertFalse(self.shown()["waiting"])
 
     def test_applying_the_plan_closes_the_waiting_critique(self) -> None:
         self.reach_the_cap()

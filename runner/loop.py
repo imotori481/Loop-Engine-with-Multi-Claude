@@ -901,6 +901,103 @@ provides match on those names.
 
 Say all of this in CONTEXT.md; the solver has no other way to learn it.""",
     },
+    # C++ は、箱では標準の C++17 のロジックだけを g++ と GoogleTest で確かめる。
+    # DXライブラリや Windows の API は Linux に無い。それを include するファイルは
+    # ビルドから外し（cpp_sources）、人が Visual Studio でビルドする。CMakeLists.txt は
+    # ランナーが /srv/loop/cpp/build に書く。プロジェクトの根には置かない。
+    #
+    # 契約の名前は、型（`Board`）、メンバー関数（`Board::score`）、自由関数
+    # （`countLines`）の3つの単位を持つ。provides_pattern の3つの組がそれだ。
+    # 契約が名指しするファイルはヘッダで、source_suffix が `.h` なのはそのため。
+    "cpp": {
+        "name": "cpp",
+        "label": "C++",
+        "test_runner": Path("/usr/bin/g++"),
+        "wiring": None,
+        "environment_files": frozenset(),
+        "naming_note": """
+A test is `TEST(Suite, Name)`, and both are identifiers. The suite is the
+file's name (`BoardTest.cpp` uses `TEST(BoardTest, ...)` and nothing else). Name
+each test after its criterion in PascalCase with no underscores
+(`ScoreCountsEveryRow`): GoogleTest joins the two with an underscore, so an
+underscore in either can make two tests collide. Do not copy the criterion's
+prose into it.
+""",
+        "stub_shape": "a stub whose functions throw",
+        "stub_note": f"""
+THE STUB, IN C++. Every function and constructor this step provides throws
+`std::logic_error("__stub__")`, and a test that dies on that exception counts
+as red. Every data member this step provides is value-initialised by the stub
+(`int width{{}};`, `std::vector<Cell> cells{{}};`), so against the stub it holds
+0, false, an empty string or an empty container.
+
+A test that reads past the end of such a container is not red, it is broken.
+`v[0]` on an empty vector is undefined behaviour: the whole test program dies,
+no test reports anything, and the step is rejected. `v.at(0)` throws
+std::out_of_range, which is not red either. So before the first index into a
+container this step provides -- in the arrange part of a test as much as in its
+assertions -- write `ASSERT_GE(v.size(), n)`, and index with `.at()`.
+""",
+        # 上の誤りで落ちたテストは、書き手が直せる。スタブはソルバーが書いたものだが、
+        # 落ちたのはテストの側だ。
+        "fixable_crashes": re.compile(r"^std::out_of_range$"),
+        "provides_pattern": re.compile(
+            r"\b(?:class|struct|enum(?:\s+class)?)\s+([A-Za-z_]\w*)"
+            r"|\b([A-Za-z_]\w*::~?[A-Za-z_]\w*)\s*\("
+            r"|\b([A-Za-z_]\w*)\s*\("),
+        # 型の後ろ、名前の前に型を書くので、C# と同じく語の境目で探す。`std::` は
+        # あってもなくてもよい。
+        "shape_pattern": re.compile(
+            r"(?<![\w])(?:std::)?(vector|map|unordered_map|set|unordered_set|multimap|"
+            r"multiset|list|deque|array|pair|tuple|any|function)\b\s*(<?)"),
+        # GoogleTest の junit は例外の型を持たない。cpp_failure_kind が message から
+        # 読み、アサーションとスタブの例外をこの名前にする。
+        "red_kinds": re.compile(r"^(?:AssertionFailure|StubNotImplemented)$"),
+        "source_suffix": ".h",
+        "test_suffixes": (".cpp", ".h", ".hpp"),
+        # テストの前にビルドする。初回は全部をコンパイルする。
+        "min_test_timeout": 600,
+        "index_name": "",
+        "module_separator": "/",
+        "shapeless": frozenset({
+            "vector", "map", "unordered_map", "set", "unordered_set", "multimap",
+            "multiset", "list", "deque", "array", "pair", "tuple", "any", "function",
+        }),
+        "shape_bracket": "<",
+        "shape_example": "std::vector<Cell>, std::map<std::string, int>, std::pair<Board, int>",
+        "name_boundary": r"[\w]",
+        "layout_note": """Every header is `.h` and every source file is `.cpp`, under {SRC}/: the header
+declares (`{SRC}/logic/Board.h`) and the source file of the same name defines
+(`{SRC}/logic/Board.cpp`). Every header starts with `#pragma once`. Include a
+project header by its path under {SRC}/ -- `#include "logic/Board.h"` -- from
+code and tests alike; {SRC}/ is on the include path.
+
+The code is standard C++17 and nothing else. The box builds it with g++, and a
+person later builds it with Visual Studio (MSVC), so: no compiler extensions,
+no `<bits/stdc++.h>`, no variable-length arrays, no `#include <windows.h>` or
+DxLib.h in anything a test reaches. Write new code in the global namespace.
+
+Write every file in ASCII only, comments and string literals included. MSVC
+reads a source file without a byte order mark in the system code page, and a
+UTF-8 Japanese comment there breaks the build on the person's machine.
+
+Tests use GoogleTest: `#include <gtest/gtest.h>`, `TEST(Suite, Name)`,
+`EXPECT_EQ(expected, actual)`, `EXPECT_TRUE`, `EXPECT_THROW(call, type)`. A test
+file has no `main`; the runner links one. Each test file uses exactly one
+suite, named after the file (`{TESTS}/BoardTest.cpp` holds `TEST(BoardTest,
+...)` only): the runner selects a step's tests by that name.
+
+A contract line names the header and then the declaration. A type:
+    {SRC}/logic/Board.h: struct Board { int width; int height; }
+A member function, written with its class:
+    {SRC}/logic/Board.h: int Board::score() const
+A free function:
+    {SRC}/logic/rules.h: int countLines(const Board& board)
+The names are `Board`, `Board::score` and `countLines`; requires and provides
+match on those names.
+
+Say all of this in CONTEXT.md; the solver has no other way to learn it.""",
+    },
 }
 
 # tasks.json の最上位の "language" で選ぶ。既定は Python。これができる前に
@@ -947,6 +1044,8 @@ def failure_kind(failure: ET.Element) -> str:
     """
     if LANGUAGE["name"] == "csharp":
         return csharp_failure_kind(failure)
+    if LANGUAGE["name"] == "cpp":
+        return cpp_failure_kind(failure)
     declared = (failure.get("type") or "").strip()
     if declared:
         return declared
@@ -1151,6 +1250,241 @@ def test_owner(name: str) -> str:
     return name.rsplit(".", 1)[-1] if LANGUAGE["name"] == "csharp" else name
 
 
+# --------------------------------------------------------------------------
+# C++
+# --------------------------------------------------------------------------
+#
+# 箱で確かめるのは標準の C++17 のロジックだけだ。DXライブラリも Windows の API も
+# Linux には無い。それを include するファイルは、ビルドから外す（cpp_sources）。
+# ビルドは CMake で、CMakeLists.txt はランナーが柵の場所と外したファイルから書く。
+# 置き場は C# の csproj と同じ理由でプロジェクトの外にする。
+
+CPP_BUILD = LOOP / "cpp" / "build"
+CMAKE = Path("/usr/bin/cmake")
+# コンパイラの出力を英語の ASCII に固定する。UTF-8 のロケールでは、g++ はエラーの
+# 名前を ‘ ’ で囲み、行の形で読めなくなる。
+CPP_ENV = {"LC_ALL": "C", "LANG": "C"}
+CPP_SOURCE_SUFFIXES = (".cpp", ".cc", ".cxx")
+CPP_STUB_BODY = 'throw std::logic_error("__stub__");'
+CPP_INCLUDE = re.compile(r'^[ \t]*#[ \t]*include[ \t]*([<"])([^>"\n]+)[>"]', re.M)
+# 箱にあるものとして扱うヘッダ。C++17 の標準ライブラリと C の互換ヘッダ。
+# GoogleTest はテストのために箱が持つ。
+CPP_STANDARD_HEADERS = frozenset("""
+algorithm any array atomic bitset cassert cctype cerrno cfenv cfloat charconv chrono
+cinttypes climits clocale cmath codecvt complex condition_variable csetjmp csignal
+cstdarg cstddef cstdint cstdio cstdlib cstring ctime cuchar cwchar cwctype deque
+exception execution filesystem forward_list fstream functional future initializer_list
+iomanip ios iosfwd iostream istream iterator limits list locale map memory
+memory_resource mutex new numeric optional ostream queue random ratio regex
+scoped_allocator set shared_mutex sstream stack stdexcept streambuf string string_view
+system_error thread tuple type_traits typeindex typeinfo unordered_map unordered_set
+utility valarray variant vector
+assert.h ctype.h errno.h fenv.h float.h inttypes.h limits.h locale.h math.h setjmp.h
+signal.h stdarg.h stddef.h stdint.h stdio.h stdlib.h string.h time.h uchar.h wchar.h
+wctype.h
+""".split())
+CPP_TEST_HEADERS = ("gtest/", "gmock/")
+
+
+def cpp_resolve(name: str, quoted: bool, here: Path) -> Path | None:
+    """include の名前を、リポジトリのファイルにする。無ければ None。
+
+    探す順は、`"..."` なら include したファイルの隣、次に柵のコードの場所、
+    最後に根。CMakeLists.txt の include の場所と同じ順だ。
+    """
+    bases = ([here] if quoted else []) + [SRC, PROJECT]
+    for base in bases:
+        target = (base / name).resolve()
+        if target.is_file() and PROJECT.resolve() in target.parents:
+            return target
+    return None
+
+
+def cpp_sources() -> tuple[list[str], dict[str, str]]:
+    """柵のコードの場所の .cpp を、箱でビルドするものと外すものに分ける。
+
+    外すのは、直接かリポジトリのヘッダを通して、標準でもリポジトリのものでもない
+    ヘッダ（DxLib.h、windows.h など）を include するファイルだ。返すのは、ビルド
+    するファイルと、外すファイルからそのヘッダの名前への対応。どちらも根からの
+    相対パス。`#ifdef _WIN32` の中の include も数えるので、それで外れるファイルもある。
+    """
+    blocked: dict[Path, str | None] = {}
+
+    def missing(path: Path, seen: set[Path]) -> str | None:
+        if path in blocked:
+            return blocked[path]
+        if path in seen:
+            return None
+        seen.add(path)
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return None
+        found = None
+        for bracket, name in CPP_INCLUDE.findall(text):
+            name = name.strip()
+            target = cpp_resolve(name, bracket == '"', path.parent)
+            if target is not None:
+                found = missing(target, seen)
+            elif name not in CPP_STANDARD_HEADERS and not name.startswith(CPP_TEST_HEADERS):
+                found = name
+            if found:
+                break
+        blocked[path] = found
+        return found
+
+    built: list[str] = []
+    left_out: dict[str, str] = {}
+    if not SRC.is_dir():
+        return built, left_out
+    for path in sorted(SRC.rglob("*")):
+        if not path.is_file() or path.suffix not in CPP_SOURCE_SUFFIXES:
+            continue
+        rel = path.relative_to(PROJECT).as_posix()
+        header = missing(path.resolve(), set())
+        if header:
+            left_out[rel] = header
+        else:
+            built.append(rel)
+    return built, left_out
+
+
+def cpp_test_sources() -> list[str]:
+    if not TESTS.is_dir():
+        return []
+    return [p.relative_to(PROJECT).as_posix() for p in sorted(TESTS.rglob("*"))
+            if p.is_file() and p.suffix in CPP_SOURCE_SUFFIXES]
+
+
+def cpp_cmake_lists() -> str:
+    """ランナーが書く CMakeLists.txt。コードは静的ライブラリ、テストは gtest_main とつなぐ。
+
+    ファイルは glob ではなく1つずつ並べる。外したファイルを入れないためと、
+    ファイルが増えたことを CMake に気づかせるためだ。
+    """
+    code, _ = cpp_sources()
+
+    def files(paths: list[str]) -> str:
+        return "".join(f'\n    "{(PROJECT / p).as_posix()}"' for p in paths)
+
+    include = f'"{SRC.as_posix()}" "{PROJECT.as_posix()}"'
+    if code:
+        library = (f"add_library(loop_code STATIC{files(code)})\n"
+                   f"target_include_directories(loop_code PUBLIC {include})")
+    else:
+        library = ("add_library(loop_code INTERFACE)\n"
+                   f"target_include_directories(loop_code INTERFACE {include})")
+    return f"""cmake_minimum_required(VERSION 3.16)
+project(LoopCpp CXX)
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+find_package(GTest REQUIRED)
+{library}
+add_executable(loop_tests{files(cpp_test_sources())})
+target_link_libraries(loop_tests PRIVATE loop_code GTest::gtest_main)
+"""
+
+
+# g++ と ld のエラーの行。ld の行はファイルを持たないことがある。
+CPP_ERROR = re.compile(r"^(/[^:\n]+):(\d+):(?:\d+:)? (?:fatal )?error: (.*)$", re.M)
+CPP_UNDEFINED = re.compile(r"undefined reference to [`'](.+?)'\s*$", re.M)
+
+
+def cpp_build_failure(output: str) -> TestRun | None:
+    """ビルドが通らなかった出力を読む。エラーの行が無ければ None。
+
+    dotnet_build_failure と同じく、テストファイルのエラーは「コンパイルできなかった」、
+    コードの側とリンクのエラーは「ビルドできなかった」にする。
+    """
+    kinds: list[str] = []
+    lines: list[str] = []
+    files: list[str] = []
+    for path, number, text in CPP_ERROR.findall(output):
+        try:
+            rel = Path(path).relative_to(PROJECT).as_posix()
+        except ValueError:
+            rel = path
+        kind = (f"<did not compile: {rel}>" if in_layout(rel, "tests")
+                else f"<build failed: {rel}>")
+        if kind not in kinds:
+            kinds.append(kind)
+            files.append(rel)
+        line = f"{rel}:{number}: error: {text}"
+        if line not in lines:
+            lines.append(line)
+    undefined = list(dict.fromkeys(CPP_UNDEFINED.findall(output)))
+    if undefined:
+        kinds.append("<build failed: undefined reference>")
+        lines += [f"undefined reference to {name}" for name in undefined]
+    if not kinds:
+        return None
+    return TestRun(0, 0, len(kinds), 0, kinds, [], chr(10).join(lines),
+                   failed_files=files)
+
+
+def cpp_build(seconds: int) -> TestRun | None:
+    """CMakeLists.txt を書き、ビルドする。通れば None、通らなければその判定。"""
+    try:
+        text = cpp_cmake_lists()
+        CPP_BUILD.mkdir(parents=True, exist_ok=True)
+        lists = CPP_BUILD / "CMakeLists.txt"
+        if not lists.exists() or lists.read_text(encoding="utf-8") != text:
+            lists.write_text(text, encoding="utf-8")
+    except OSError as e:
+        return TestRun(0, 0, 1, 0, ["<build failed: cannot write the CMake project>"], [], str(e))
+    out = CPP_BUILD / "out"
+    steps = []
+    # CMakeLists.txt が変われば、--build が自分で設定し直す。
+    if not (out / "CMakeCache.txt").exists():
+        steps.append([str(CMAKE), "-S", str(CPP_BUILD), "-B", str(out),
+                      "-G", "Unix Makefiles", "-DCMAKE_BUILD_TYPE=Debug"])
+    steps.append([str(CMAKE), "--build", str(out), "--parallel", str(os.cpu_count() or 2)])
+    for argv in steps:
+        try:
+            proc = run(argv, env=CPP_ENV, timeout=seconds)
+        except subprocess.TimeoutExpired:
+            return TestRun(0, 0, 1, 0, [f"<timeout: the build did not finish within {seconds}s>"],
+                           [], "")
+        if proc.returncode != 0:
+            output = proc.stdout + proc.stderr
+            return cpp_build_failure(output) or TestRun(
+                0, 0, 1, 0, ["<build failed>"], [], output[-3000:])
+    return None
+
+
+def cpp_test_suites(files_test: list[str]) -> list[str]:
+    """テストファイルが持つスイートの名前。ファイル名と同じにする決まり（layout_note）。"""
+    return [Path(f).stem for f in files_test if f.endswith(CPP_SOURCE_SUFFIXES)]
+
+
+# GoogleTest は、テストの本体から出た例外をこう報告する。
+CPP_EXCEPTION = re.compile(r'C\+\+ exception with description "(.*?)" thrown in ', re.S)
+# 標準ライブラリの at() が投げる std::out_of_range の what()。libstdc++ の形。
+CPP_OUT_OF_RANGE = re.compile(r"_M_range_check|::at\b")
+
+
+def cpp_failure_kind(failure: ET.Element) -> str:
+    """GoogleTest の失敗の種類。junit の type は空で、例外の型を持たない。
+
+        "BoardTest.cpp:12\\nExpected equality of these values: ..."  -> AssertionFailure
+        "unknown file\\nC++ exception with description \\"__stub__\\" ..." -> StubNotImplemented
+
+    例外の報告を先に見る。どちらでもない失敗は GoogleTest のアサーション
+    （EXPECT_*、ASSERT_*、FAIL）だ。
+    """
+    message = (failure.get("message") or "") + "\n" + (failure.text or "")
+    match = CPP_EXCEPTION.search(message)
+    if match:
+        what = match.group(1)
+        if what == "__stub__":
+            return "StubNotImplemented"
+        return "std::out_of_range" if CPP_OUT_OF_RANGE.search(what) else "std::exception"
+    if "Unknown C++ exception thrown in " in message:
+        return "UnknownException"
+    return "AssertionFailure" if message.strip() else "<no type>"
+
+
 def test_argv(files_test: list[str], xml_path: Path) -> tuple[list[str], dict[str, str]]:
     """判定を出すコマンドと、それに要る環境変数。
 
@@ -1171,6 +1505,16 @@ def test_argv(files_test: list[str], xml_path: Path) -> tuple[list[str], dict[st
         if classes:
             argv += ["--filter", "|".join(f"FullyQualifiedName~.{c}." for c in classes)]
         return argv, dict(DOTNET_ENV)
+    if LANGUAGE["name"] == "cpp":
+        # テストのプログラムは柵のテストの場所を全部持つ。ステップのテストだけを
+        # 走らせるのは、スイートの名前での絞り込みだ。DISABLED_ のテストも走らせる。
+        # 走らせなければ、何も判定しないテストが通ったものとして数えられる。
+        argv = [str(CPP_BUILD / "out" / "loop_tests"), f"--gtest_output=xml:{xml_path}",
+                "--gtest_also_run_disabled_tests"]
+        suites = cpp_test_suites(files_test)
+        if suites:
+            argv.append("--gtest_filter=" + ":".join(f"{s}.*" for s in suites))
+        return argv, dict(CPP_ENV)
     if LANGUAGE["name"] == "typescript":
         # `watch` ではなく `run`。vitest の既定は対話的で、永遠に止まったランナーは
         # 終わらないステップとまったく同じに見える。
@@ -1202,12 +1546,17 @@ def pytest_run(tag: str, files_test: list[str]) -> TestRun:
     # 分と一緒に数えられてしまう。
     xml_path.unlink(missing_ok=True)
     csharp = LANGUAGE["name"] == "csharp"
+    cpp = LANGUAGE["name"] == "cpp"
     if csharp:
         problem = prepare_dotnet()
         if problem:
             return TestRun(0, 0, 1, 0, ["<dotnet restore failed>"], [], problem)
-    # C# は走らせる前にビルドする。Unity のプロジェクトでは数十秒かかる。
+    # C# と C++ は走らせる前にビルドする。Unity のプロジェクトでは数十秒かかる。
     seconds = max(TIMEOUTS["test"], LANGUAGE.get("min_test_timeout", 0))
+    if cpp:
+        failed = cpp_build(seconds)
+        if failed:
+            return failed
     try:
         proc = run(argv, env=env, timeout=seconds)
     except subprocess.TimeoutExpired:
@@ -1221,6 +1570,11 @@ def pytest_run(tag: str, files_test: list[str]) -> TestRun:
         failed = dotnet_build_failure(proc.stdout + proc.stderr)
         if failed:
             return failed
+    if cpp and not xml_path.exists():
+        # GoogleTest はレポートを最後にまとめて書く。範囲外の添字などでプログラムが
+        # 落ちると、どのテストの判定も残らない。最後の [ RUN ] の行が、落ちたテストだ。
+        return TestRun(0, 0, 1, 0, [f"<test program died: exit status {proc.returncode}>"], [],
+                       (proc.stdout + proc.stderr)[-3000:])
     return parse_junit(xml_path, proc.stdout + proc.stderr)
 
 
@@ -2323,6 +2677,34 @@ no behaviour to stub.
 Put each type in the namespace that follows its folder under {LAYOUT["src"]}/,
 and add the `using` directives the signatures need. Implement no behaviour
 whatsoever.
+"""
+    if LANGUAGE["name"] == "cpp":
+        # C++ も番兵の値を使わない。C# と同じ理由で、印の付いた例外を投げる。
+        return f"""Create stubs only.
+
+# Signatures to provide
+{render_provides(step)}
+
+# Files you may create or modify
+{chr(10).join(step["files_write"])}
+{existing_files_section(existing or [])}
+Declare each name in its header with exactly the signature above, and define
+it in the `.cpp` of the same name. The body of every function and constructor
+you write is exactly this one statement and nothing else:
+
+    {CPP_STUB_BODY}
+
+Add `#include <stdexcept>` to each `.cpp` that has one. Keep the message
+"__stub__" exactly. The runner accepts a test that fails on this exception as a
+test that fails against the stub; any other exception rejects the step.
+
+Do not return values. Give every data member a value-initialiser (`int
+width{{}};`, `std::vector<Cell> cells{{}};`) and nothing else: members hold
+values and have no behaviour to stub, and an uninitialised one holds garbage
+that a test could pass against by chance.
+
+Every header starts with `#pragma once` and includes the headers its
+signatures need. Write ASCII only. Implement no behaviour whatsoever.
 """
     return f"""Create stubs only.
 
@@ -3911,6 +4293,7 @@ TEST_NAMES = {
         r"\[\s*(?:NUnit\.Framework\.)?(?:Test|TestCase|TestCaseSource|UnityTest)\b[^\]]*\]"
         r"(?:\s*\[[^\]]*\])*\s*(?:(?:public|private|internal|protected|static|async)\s+)*"
         r"[\w<>\[\],.]+\s+(\w+)\s*\("),
+    "cpp": re.compile(r"\b(?:TEST|TEST_F|TEST_P)\s*\(\s*\w+\s*,\s*(\w+)\s*\)"),
 }
 
 
@@ -4136,6 +4519,9 @@ def top_level_units(text: str, path: str, provided: set[str]) -> dict[str, str] 
     """
     if path.endswith(".cs"):
         return csharp_units(text, provided)
+    if path.endswith((".h", ".hpp", *CPP_SOURCE_SUFFIXES)):
+        # C++ の既存コードはまだ読まない。比べるものが無いので、何も止めない。
+        return {}
     units: dict[str, str] = {}
     if path.endswith(".py"):
         try:
@@ -5080,6 +5466,106 @@ Unity afterwards.
 """)
 
 
+# DXライブラリの主な関数。箱には DXライブラリが無いので、プランナーとソルバーが
+# 知っていることはこれだけだ。画面、入力、音を扱う薄いファイルを書くのに足りる
+# ところまでに絞る。プランナーが CONTEXT.md に写してソルバーに渡す。
+DXLIB_SHEET = """DXLib (DX Library) in brief. Every call returns -1 on failure unless noted.
+TRUE and FALSE are ints.
+
+  Entry and frame loop:
+    #include "DxLib.h"
+    int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
+        ChangeWindowMode(TRUE);            // before DxLib_Init
+        SetGraphMode(640, 480, 32);        // before DxLib_Init
+        if (DxLib_Init() == -1) return -1;
+        SetDrawScreen(DX_SCREEN_BACK);
+        while (ProcessMessage() == 0) {    // non-zero when the window closes
+            ClearDrawScreen();
+            /* update, then draw */
+            ScreenFlip();
+        }
+        DxLib_End();
+        return 0;
+    }
+  Drawing (colors come from GetColor):
+    unsigned int GetColor(int r, int g, int b)
+    DrawBox(x1, y1, x2, y2, color, fillFlag)      DrawCircle(x, y, r, color, fillFlag)
+    DrawLine(x1, y1, x2, y2, color)               DrawPixel(x, y, color)
+    DrawString(x, y, "text", color)               DrawFormatString(x, y, color, "%d", n)
+    SetFontSize(size)                             GetDrawStringWidth("text", length)
+    int LoadGraph("path")  (handle)               DrawGraph(x, y, handle, transFlag)
+    DrawRotaGraph(x, y, extRate, angle, handle, transFlag)   DeleteGraph(handle)
+    SetDrawBlendMode(DX_BLENDMODE_ALPHA, 0..255) / (DX_BLENDMODE_NOBLEND, 0)
+  Input:
+    CheckHitKey(KEY_INPUT_SPACE)  1 while the key is held (KEY_INPUT_LEFT, _Z, ...)
+    GetHitKeyStateAll(char buf[256])  buf[KEY_INPUT_X] is 1 while held
+    GetJoypadInputState(DX_INPUT_KEY_PAD1) & PAD_INPUT_UP / _DOWN / _LEFT / _RIGHT / _1
+    GetMousePoint(&x, &y)         GetMouseInput() & MOUSE_INPUT_LEFT
+  Sound:
+    int LoadSoundMem("path")      PlaySoundMem(handle, DX_PLAYTYPE_BACK or DX_PLAYTYPE_LOOP)
+    StopSoundMem(handle)          CheckSoundMem(handle)  1 while playing
+  Time and random:
+    GetNowCount()  milliseconds since start      WaitTimer(ms)
+    GetRand(max)   0 to max inclusive            SRand(seed)
+
+None of these exist in the box. Key presses are levels, not edges: a press is
+"held now and not held last frame", which the frame loop has to remember."""
+
+
+def cpp_uses_dxlib(left_out: dict[str, str]) -> bool:
+    """このプロジェクトが DXライブラリを使うか。外したファイルか要件で見分ける。"""
+    if any(header.lower().endswith("dxlib.h") for header in left_out.values()):
+        return True
+    try:
+        requirements = REQUIREMENTS.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    return bool(re.search(r"dx\s*lib|DXライブラリ", requirements, re.I))
+
+
+def cpp_facts() -> tuple[str, str]:
+    """C++ の計画に伝える、画面とプラットフォームについての事実。(1行の要約, 段落)。"""
+    _, left_out = cpp_sources()
+    dxlib = cpp_uses_dxlib(left_out)
+    summary = ("Platform: DXLib (DX Library) on Windows. It is not here; only standard C++ "
+               "is built and tested." if dxlib else
+               "Platform: none. Only standard C++ is built and tested.")
+    if left_out:
+        listing = "\n".join(f"    {path}  (includes {header})"
+                            for path, header in sorted(left_out.items()))
+    else:
+        listing = "    (none yet)"
+    text = layout_text(f"""There is no screen, no window and no Windows here. The code is built with g++
+on Linux, and only standard C++ builds. A source file under {{SRC}}/ is built
+here only if every header it includes -- directly, or through the project's own
+headers -- is a standard header or a file in the repository. A file that
+includes anything else (DxLib.h, windows.h, a library that is not in the
+repository) is left out of the build, and nothing in it can be reached by a
+test. Left out right now:
+
+{listing}
+
+So every criterion must be checkable by calling standard C++. Put the behaviour
+a criterion checks in plain classes and functions that take and return plain
+values -- positions, scores, states, which key is held -- and keep them in files
+that include only standard headers and each other. The platform code calls
+them: it reads input, passes it in, and draws what comes back.
+
+A step may also write a platform file -- the code that draws, reads input or
+plays sound -- by listing it in `files_write` next to the logic its tests
+check. Nothing here builds or runs that file; a person builds it in Visual
+Studio and looks at the screen. Keep such a file thin, and do not write
+criteria about what it draws or plays. A test that includes it does not build,
+and the step is rejected.
+
+A new source file must also be added to the person's Visual Studio project by
+hand. List every new `.cpp` and `.h` in CONTEXT.md so the person can.
+""")
+    if dxlib:
+        text += "\n" + DXLIB_SHEET + "\n"
+    return summary, text
+
+
 def environment_facts(plan: dict | None = None, short: bool = False) -> str:
     """プロジェクトが実際にどうなっているかを、機械から読み取る。
 
@@ -5227,6 +5713,10 @@ more, not shown line by line. They also exist before the first step runs:
         wiring = PROJECT / LANGUAGE["wiring"]
         wiring_heading = f"{wiring.name} at the root, which the test runner loads automatically:"
         wiring_text = wiring.read_text(encoding="utf-8") if wiring.exists() else "(none)"
+    elif LANGUAGE["name"] == "cpp":
+        wiring_heading = ("The CMake project the runner writes and builds before every test "
+                          "run (outside the repository; no step writes it):")
+        wiring_text = cpp_cmake_lists()
     else:
         wiring_heading = ("The test project the runner writes and builds (outside the "
                           "repository; no step writes it):")
@@ -5309,6 +5799,9 @@ try, be refused, and spend part of its attempt on it.
     if LANGUAGE["name"] == "csharp":
         runtime = "Runtime: .NET 8 for the tests; the code is built as netstandard2.1"
         toolkit, screen = csharp_facts()
+    elif LANGUAGE["name"] == "cpp":
+        runtime = "Standard: C++17, built with CMake; tests: GoogleTest"
+        toolkit, screen = cpp_facts()
     elif typescript:
         runtime = f"Runtime: {version(Path('node'))}"
         toolkit = ("User interface: the DOM, via happy-dom. Every test file is "
@@ -5387,6 +5880,46 @@ def prune_proposal() -> list[str]:
         else:
             entry.unlink(missing_ok=True)
     return removed
+
+
+# validate_plan の L11 の文言。規則を2つ目に実装せず、リンタが言ったことを読む。
+L11_VIOLATION = re.compile(r"L11: step (\S+) provides `(.+)`, which no step requires")
+
+
+def wire_unused_provides(problems: list[str], text: str) -> tuple[str, list[dict]]:
+    """L11 だけで落ちた tasks.json を、ランナーが requires を足して直す。
+
+    L11 の多くは、後のステップが名前を使っているのに requires に書き忘れたものだ。
+    プランナーの直し方もそれで、そのために呼び出しを丸ごと1回使っていた
+    （取り込んだ Unity のプロジェクトの refine で、S3 の
+    `SaveManager.CopyTacticalFromSaveData` を S4 の requires に足しただけ）。
+    提供する側から消すことはしない。そのステップのテストや、後のステップの goal
+    が使っていれば、消すと壊れる。
+
+    足す先は、提供したステップに直接依存し（L3 は直接の依存しか数えない）、
+    goal か acceptance にその名前がそのまま現れるステップ。1つでも足す先の無い
+    名前があれば何もしない。直すかどうかの判断が要るので、プランナーに返す。
+    足した結果を採るかは呼び出し側が proposal_problems で決める。
+    """
+    found = [L11_VIOLATION.fullmatch(p) for p in problems]
+    if not found or not all(found):
+        return text, []
+    tasks = json.loads(text)
+    steps = {s["id"]: s for s in tasks["steps"]}
+    wired = []
+    for match in found:
+        sid, name = match.groups()
+        lines = [p for p in steps[sid]["contracts"]["provides"] if declared_name(p) == name]
+        word = re.compile(rf"(?<![\w.]){re.escape(name)}(?!\w)")
+        users = [s for s in tasks["steps"] if sid in s["depends_on"]
+                 and word.search(s["goal"] + "\n" + json.dumps(s["acceptance"], ensure_ascii=False))]
+        if not lines or not users:
+            return text, []
+        for user in users:
+            requires = user["contracts"].setdefault("requires", [])
+            requires.extend(line for line in lines if line not in requires)
+        wired.append({"step": sid, "name": name, "to": [u["id"] for u in users]})
+    return json.dumps(tasks, ensure_ascii=False, indent=2) + "\n", wired
 
 
 def proposal_problems(proposal: dict[str, str]) -> list[str]:
@@ -5487,6 +6020,20 @@ def plan_with_retry(brief_for, tag: str, keep: dict[str, str] | None = None) -> 
                  f"runner deleted it" for n in removed]
         if removed:
             ledger("PLAN_PRUNED", attempt=attempt, removed=removed)
+
+        # L11 だけなら、ランナーが requires を足して直せることがある。直した計画が
+        # 同じ検査を通ったときだけ採る。out/ のファイルはプランナーの uid のもので
+        # 上書きできないので、PLAN_CARRIED と同じく消してから書く。
+        if problems and "tasks.json" in proposal:
+            wired_text, wired = wire_unused_provides(problems, proposal["tasks.json"])
+            if wired and not proposal_problems({**proposal, "tasks.json": wired_text}):
+                path = PLANNER_OUT / "tasks.json"
+                path.unlink()
+                path.write_text(wired_text, encoding="utf-8")
+                path.chmod(0o644)
+                ledger("PLAN_WIRED", attempt=attempt, wired=wired)
+                problems = []
+
         if not problems:
             if attempt > 1:
                 print(f"the plan passed on attempt {attempt}")
@@ -6155,8 +6702,9 @@ def cmd_plan_refine(modes: list[str], resume: bool = False) -> int:
     続くのを止める。改訂1回はプランナーの呼び出し1回で、TypeScript のブリーフでは
     28分かかった。
 
-    上限の後も指摘が残って止まるときは、どのみち人が `loop continue` を打つ。
-    そこで人が指摘を読み、title と evidence を書き換えられるようにする。
+    上限の後も指摘が残って止まるときと、改訂の途中でプランナーが判断を返して止まる
+    ときは、どのみち人が `loop continue` を打つ。そこで人が指摘を読み、title と
+    evidence を書き換えられるようにする。
     クリティックは計画と要件しか見ておらず、的を外すことがある。resume は人が
     書き換えた指摘でプランナーに1回だけ改訂させ、批評はもう回さない。書き換えが
     無ければ、何もせずに提案を残す。どちらも、その後は `plan apply` に進む。
@@ -6194,11 +6742,7 @@ def cmd_plan_refine(modes: list[str], resume: bool = False) -> int:
             return 0
 
         if round_no > cap:
-            REFINE_STATE.parent.mkdir(parents=True, exist_ok=True)
-            REFINE_STATE.write_text(json.dumps(
-                {"round": round_no, "tasks_sha256": text_sha256(tasks), "findings": by_mode},
-                ensure_ascii=False), encoding="utf-8")
-            write_critique_for_human(round_no, by_mode, waiting=True)
+            wait_for_human(round_no, tasks, by_mode)
             ledger("REFINE_CAP", round=round_no, findings=total)
             print(f"\n{total} finding(s) still standing after {cap} revision(s). "
                   f"The proposal is left as it is. Rewrite the title or the evidence "
@@ -6210,16 +6754,29 @@ def cmd_plan_refine(modes: list[str], resume: bool = False) -> int:
         # 上限の前の回は、クリティックの指摘のまま、人を待たずに改訂させる。
         write_critique_for_human(round_no, by_mode, waiting=False)
         code = revise_with_findings(requirements, tasks, by_mode, round_no)
+        if code == 3:
+            # プランナーが改訂せずに判断を返した。下書きは批評した時のものに戻っているので、
+            # 上限の後と同じく、人が指摘を書き換えて `loop continue` で1回だけ改訂させられる。
+            wait_for_human(round_no, tasks, by_mode)
         if code != 0:
             return code
 
     return 4   # 届かない。ループは必ず戻る
 
 
-def resume_refine(requirements: str, pending: Path) -> int:
-    """上限の後に残った指摘を、人が書き換えたものに替えて、1回だけ改訂させる。
+def wait_for_human(round_no: int, tasks: str, by_mode: dict[str, list[dict]]) -> None:
+    """批評した提案と指摘を控え、人が直せる写しを書く。resume_refine がこれを読む。"""
+    REFINE_STATE.parent.mkdir(parents=True, exist_ok=True)
+    REFINE_STATE.write_text(json.dumps(
+        {"round": round_no, "tasks_sha256": text_sha256(tasks), "findings": by_mode},
+        ensure_ascii=False), encoding="utf-8")
+    write_critique_for_human(round_no, by_mode, waiting=True)
 
-    批評はもう回さない。上限は使い切っていて、人が読んだ指摘に答えた改訂を、
+
+def resume_refine(requirements: str, pending: Path) -> int:
+    """人を待っている指摘を、人が書き換えたものに替えて、1回だけ改訂させる。
+
+    批評はもう回さない。人が読んだ指摘に答えた改訂を、
     人の読んでいない指摘でまた曲げさせない。書き換えが1つも無ければ改訂もしない。
     どちらも 0 で戻り、`loop continue` は提案を適用する。
     """
@@ -6859,7 +7416,8 @@ def run_step(step_id: str, unvalidated: bool = False) -> int:
         # （test_owner）。
         own_tests = {Path(p).with_suffix("").as_posix().replace("/", ".")
                      for p in step["files_test"]} | set(step["files_test"]) \
-            | set(csharp_test_classes(step["files_test"]))
+            | set(csharp_test_classes(step["files_test"])) \
+            | set(cpp_test_suites(step["files_test"]))
 
         timeouts = 0
         while attempt < len(schedule):

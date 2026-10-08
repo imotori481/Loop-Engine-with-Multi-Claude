@@ -47,8 +47,14 @@ loop project init <project> --branch <branch> --src <src-dir> --tests <tests-dir
 
 柵の場所はここで決める。Unity なら `--src Assets/Source --tests Assets/Tests/Editor/Loop` のように、`Assets/` の下を指す。
 
-`loop-import` は使わない。`loop-import` は柵の場所を決める前に `use` まで流す。既定の `src/` と `tests/` で
-プロビジョニングが走り、あとで `loop project layout` を流すともう1回走る。
+2 から 4 と 6 は、`loop-import` の1行か、ダッシュボードの「取り込み」タブでまとめて流せる。柵の場所は
+`--src` と `--tests`（タブでは「コードの柵」と「テストの柵」）で渡す。渡さないと既定の `src/` と `tests/` で
+プロビジョニングが走り、あとで `loop project layout` を流すともう1回走る。まとめて流したときは、5 の参照を
+切り替えの後に送る。今のプロジェクトに送った参照は、その場でつながる。
+
+```powershell
+loop-import <project> <repo-url> <branch> <base-branch> --src <src-dir> --tests <tests-dir>
+```
 
 ## 4. ブランチを箱へ送る
 

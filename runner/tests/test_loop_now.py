@@ -93,5 +93,46 @@ class CurrentLoop(unittest.TestCase):
         self.assertEqual(loop_now.outcome(False, "loop 終了 (x): 利用枠が尽きた"), "stopped")
 
 
+class Projects(unittest.TestCase):
+    """プロジェクトの一覧と切り替えの状態。保守ユーザーが sudo なしで読める所だけを読む。"""
+
+    def setUp(self) -> None:
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.root = Path(temp.name)
+        self.logs = self.root / "logs"
+        self.logs.mkdir()
+
+    def project(self, name: str, branch: str | None = "main", parked: bool = False) -> None:
+        repo = self.root / "projects" / name / "repo.git"
+        repo.mkdir(parents=True)
+        if branch:
+            (repo / "HEAD").write_text(f"ref: refs/heads/{branch}\n", encoding="utf-8")
+        if parked:
+            (self.root / "projects" / name / "parked").mkdir()
+
+    def test_each_project_has_a_state_and_the_branch_of_its_bare(self):
+        self.project("game", "loop/feature")
+        self.project("old", parked=True)
+        self.project("next", branch=None)
+        (self.root / "projects" / "CURRENT").write_text("game\n", encoding="utf-8")
+        self.assertEqual(loop_now.projects(str(self.logs), "game"), [
+            {"name": "game", "state": "current", "branch": "loop/feature"},
+            {"name": "next", "state": "new", "branch": None},
+            {"name": "old", "state": "parked", "branch": "main"},
+        ])
+
+    def test_a_box_without_projects_has_an_empty_list(self):
+        self.assertEqual(loop_now.projects(str(self.logs), "default"), [])
+
+    def test_the_switch_carries_the_tail_of_its_log(self):
+        self.assertIsNone(loop_now.switch(str(self.logs), False))
+        self.assertEqual(loop_now.switch(str(self.logs), True), {"running": True, "log": []})
+        lines = [f"line {n}" for n in range(30)]
+        (self.logs / "switch.log").write_text("\n".join(lines) + "\n", encoding="utf-8")
+        self.assertEqual(loop_now.switch(str(self.logs), False),
+                         {"running": False, "log": lines[-20:]})
+
+
 if __name__ == "__main__":
     unittest.main()

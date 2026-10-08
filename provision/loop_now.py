@@ -151,8 +151,47 @@ def findings(logs: str) -> dict | None:
     return value if isinstance(value, dict) and isinstance(value.get("modes"), dict) else None
 
 
+def head_branch(repo: str) -> str | None:
+    """bare の HEAD が指すブランチ。HEAD は runner の所有だが、誰でも読める。"""
+    value = read(os.path.join(repo, "HEAD"), lambda handle: handle.read().strip())
+    prefix = "ref: refs/heads/"
+    return value[len(prefix):] if value and value.startswith(prefix) else None
+
+
+def projects(logs: str, current: str) -> list[dict]:
+    """箱のプロジェクトの一覧。loop-project.sh の list と同じ見分け方をする。
+
+    parked/ は root だけが入れるが、/srv/loop/projects/<名前> は誰でも読めるので、
+    あるかどうかは分かる。
+    """
+    root = os.path.join(os.path.dirname(logs), "projects")
+    try:
+        names = sorted(os.listdir(root))
+    except OSError:
+        return []
+    found = []
+    for name in names:
+        path = os.path.join(root, name)
+        if not os.path.isdir(path):
+            continue
+        state = ("current" if name == current
+                 else "parked" if os.path.isdir(os.path.join(path, "parked")) else "new")
+        found.append({"name": name, "state": state,
+                      "branch": head_branch(os.path.join(path, "repo.git"))})
+    return found
+
+
+def switch(logs: str, moving: bool) -> dict | None:
+    """ダッシュボードが始めたプロジェクトの切り替え。出力の末尾を添える。"""
+    tail = read(os.path.join(logs, "switch.log"),
+                lambda handle: handle.read().splitlines()[-20:])
+    if tail is None and not moving:
+        return None
+    return {"running": moving, "log": tail or []}
+
+
 def main(argv: list[str]) -> int:
-    project, active, logs = argv[1:4]
+    project, active, logs, moving = argv[1:5]
     running = active == "true"
     last = read(os.path.join(logs, f"{project}-latest.log"), last_result)
     loop = current_loop(project_logs(logs, project))
@@ -160,7 +199,9 @@ def main(argv: list[str]) -> int:
         loop["outcome"] = outcome(running, last)
     print(json.dumps({"project": project, "running": running,
                       "now": read(os.path.join(logs, "now.json"), json.load),
-                      "last": last, "loop": loop, "findings": findings(logs)},
+                      "last": last, "loop": loop, "findings": findings(logs),
+                      "projects": projects(logs, project),
+                      "switch": switch(logs, moving == "true")},
                      ensure_ascii=False))
     return 0
 

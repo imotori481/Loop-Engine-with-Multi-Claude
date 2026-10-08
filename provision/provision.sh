@@ -17,11 +17,15 @@ cd "$(dirname "$0")"
 
 # 05-isolation を最初に流す。wsl.conf が効いていなければ、プロビジョニングする
 # サンドボックスが無い。その後のステップはすべて成功しつつ、何も意味しなくなる。
-for s in 05-isolation.sh 10-users.sh 15-authkeys.sh 20-layout.sh 25-runner.sh 30-python.sh 35-node.sh 36-dotnet.sh 40-perms.sh 45-agent-invoke.sh 50-lockdown.sh; do
+for s in 05-isolation.sh 10-users.sh 15-authkeys.sh 20-layout.sh 25-runner.sh 30-python.sh 35-node.sh 36-dotnet.sh 37-cpp.sh 40-perms.sh 45-agent-invoke.sh 50-lockdown.sh; do
   echo
   echo "=== $s ==="
   bash "$s"
 done
+
+# 全ステップが通ったコミットを残す。'loop update' は、これが今のコミットと同じなら
+# プロビジョニングを飛ばす。途中で落ちれば書かれないので、次の 'loop update' が流し直す。
+git -C .. rev-parse HEAD > /etc/loop/provisioned
 
 echo
 echo "=== プロビジョニング完了 ==="

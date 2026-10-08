@@ -15,6 +15,59 @@
       <article><span>最終イベント</span><strong id="last-event">—</strong></article>
       <article><span>接続元</span><strong id="scope">—</strong></article>
     </section>
+    <section>
+      <div class="section-title"><h2>操作</h2></div>
+      <p id="control-note" class="why" hidden></p>
+      <div id="control-tabs" class="tabs" role="tablist">
+        <button role="tab" data-tab="import-panel" aria-selected="false" class="local-only">取り込み</button>
+        <button role="tab" data-tab="projects-panel" aria-selected="false">プロジェクト</button>
+        <button role="tab" data-tab="models-panel" aria-selected="false">役のモデル</button>
+        <button role="tab" data-tab="run" aria-selected="true">走行</button>
+        <button role="tab" data-tab="pull-panel" aria-selected="false" class="local-only">ホストの写し</button>
+      </div>
+      <div class="tab-panels">
+        <article id="run" class="panel" role="tabpanel">
+          <p id="run-state" class="why">読み込み中</p>
+          <div id="start-form" class="form local-only">
+            <label><span>要件</span><input id="requirements" type="file" accept=".md,.markdown,.txt"></label>
+            <label><span>言語</span><select id="language"></select></label>
+            <button id="start-run">開始（loop go）</button>
+          </div>
+          <div class="actions"><button id="continue-run" class="quiet">続ける（loop continue）</button><button id="stop-run" class="danger">停止（loop stop）</button></div>
+          <p class="why">途中で切れたステップは、続ける前に最後の緑まで戻す。そのステップのコミットしていない作業は消える。</p>
+          <div class="actions"><select id="reset-step" aria-label="やり直すステップ"></select><button id="reset-run" class="quiet">やり直す（loop raw reset）</button></div>
+        </article>
+        <article id="projects-panel" class="panel" role="tabpanel" hidden>
+          <div class="table-wrap flat"><table><thead><tr><th>名前</th><th>状態</th><th>ブランチ</th><th></th></tr></thead><tbody id="projects"></tbody></table></div>
+          <div id="switch" hidden><p id="switch-state" class="why"></p><pre id="switch-log"></pre></div>
+        </article>
+        <article id="models-panel" class="panel" role="tabpanel" hidden>
+          <p class="why">/etc/loop/&lt;役&gt;.env の LOOP_MODEL と LOOP_EFFORT。空ならアカウントの既定。保存すると次の呼び出しから効く。</p>
+          <div id="models" class="stack"><p class="why">読み込み中</p></div>
+          <datalist id="model-options"></datalist>
+        </article>
+        <article id="pull-panel" class="panel" role="tabpanel" hidden>
+          <p class="why">loop-pull で、ホストの写しを箱の先まで進める。予定レビューと台帳の欄は写しを読む。</p>
+          <div class="actions"><span id="pull-state"></span><button id="pull">写しを更新（loop-pull）</button></div>
+          <pre id="pull-log" hidden></pre>
+        </article>
+        <article id="import-panel" class="panel" role="tabpanel" hidden>
+          <p class="why">既存リポジトリのブランチを、箱の新しいプロジェクトにする（loop-import と同じ）。ホストにクローンし、箱にプロジェクトを作ってブランチを push し、そこへ切り替える。</p>
+          <div class="form">
+            <label><span>プロジェクト名</span><input id="import-project" placeholder="英小文字、数字、. _ -"></label>
+            <label><span>リポジトリの URL</span><input id="import-url" placeholder="https://github.com/&lt;owner&gt;/&lt;repo&gt;.git"></label>
+            <label><span>作業用ブランチ</span><input id="import-branch" placeholder="無ければ親ブランチから作る"></label>
+            <label><span>親ブランチ（任意）</span><input id="import-base" placeholder="省くと origin の既定のブランチ。PR の送り先になる"></label>
+            <div class="pair">
+              <label><span>コードの柵（任意）</span><input id="import-src" placeholder="src"></label>
+              <label><span>テストの柵（任意）</span><input id="import-tests" placeholder="tests"></label>
+            </div>
+          </div>
+          <div class="actions"><span id="import-state"></span><button id="import">取り込む（loop-import）</button></div>
+          <pre id="import-log" hidden></pre>
+        </article>
+      </div>
+    </section>
     <section><div class="section-title"><h2>いまの作業</h2><span id="live-updated"></span></div><article id="live" class="live"><p class="why">読み込み中</p></article></section>
     <section><div class="section-title"><h2>クリティックの指摘</h2><span id="critique-at"></span></div><article id="critique"><p class="why">読み込み中</p></article></section>
     <section><h2>ステップ</h2><div class="table-wrap"><table><thead><tr><th>ID</th><th>状態</th><th>内容</th></tr></thead><tbody id="steps"></tbody></table></div></section>

@@ -11,7 +11,7 @@
 起動と sshd の待機も先に済ませる。だから下の `loop` の行は、ホストと箱のどちらで打っても同じに動く。
 
 ホストで `loop` だけで打つには、`host` ディレクトリをユーザーの PATH に足す。PowerShell で1回だけ
-打ち、端末を開き直す。`loop-pull` と `loop-dashboard` も同じく名前だけで打てるようになる。
+打ち、端末を開き直す。`loop-pull`、`loop-pr`、`loop-dashboard` も同じく名前だけで打てるようになる。
 
 ```powershell
 $hostDir = "<repo-dir>\host"
@@ -52,6 +52,7 @@ PowerShell なら `.\host\loop.cmd <args>`、Git Bash なら `./host/loop.cmd <a
 |---|---|
 | 要件から最後まで走らせる | `loop go <requirements>` |
 | TypeScript で走らせる | `loop go <requirements> --language typescript` |
+| C++ で走らせる | `loop go <requirements> --language cpp` |
 | 状態を見る | `loop status` |
 | ログを追う（Ctrl-C で抜けても走行は続く） | `loop log` |
 | 止まったところから続ける | `loop continue` |
@@ -65,7 +66,7 @@ PowerShell なら `.\host\loop.cmd <args>`、Git Bash なら `./host/loop.cmd <a
 
 止まった理由と次の手は、`loop status` とログの最後の行に出る。
 
-改訂の上限まで回してもクリティックの指摘が残ると止まる。的外れな指摘を書き換えてから `loop continue` を流すと、
+改訂の上限まで回してもクリティックの指摘が残るか、改訂の途中でプランナーが判断を返すと止まる。的外れな指摘や、プランナーの問いに答える指摘を書き換えてから `loop continue` を流すと、
 書き換えた指摘でプランナーが1回だけ計画を直し、適用して走らせる。何も書き換えなければ、そのまま適用する。
 ダッシュボードの「クリティックの指摘」からも、書き換えと続行ができる。
 
@@ -106,11 +107,14 @@ GitHub とやり取りするのはホストだけだ。箱には GitHub の資�
 
 ### 取り込む
 
-ホストで1行打つ。下の1から4をまとめて流す。クローンは `C:\dev\roop-engin\projects\<project>` に置く。
+ホストで1行打つ。下の1から4をまとめて流し、切り替えが終わるまで待つ。クローンは `C:\dev\roop-engin\projects\<project>` に置く。
+ダッシュボードの「取り込み」タブでも同じことができる。
 
 ```bash
-loop-import <project> <repo-url> <branch> [<base-branch>]
+loop-import <project> <repo-url> <branch> [<base-branch>] [--src <src-dir>] [--tests <tests-dir>]
 ```
+
+`--src` と `--tests` は書き込みの柵の場所で、省くと `src` と `tests`。
 
 手で打つときは次の順に流す。
 
@@ -165,6 +169,15 @@ git merge loop/<branch>
 先に `loop-pull` を流して、写しを箱の先まで進めておく。仕組みと前提は
 [host/dashboard/README.md](../host/dashboard/README.md) の「プルリクエスト」にある。
 
+全ステップが緑になる前に出すなら、`loop-pull` のあとに `loop-pr` を打つ。最後に緑になったステップまでが、
+`<branch>-draft` から `<base-branch>` への下書きの PR になる。本文には残りのステップが並ぶ。
+緑が増えたら、`loop-pull` と `loop-pr` をもう一度打てば同じ PR が更新される。
+
+| やりたいこと | コマンド |
+|---|---|
+| 途中の成果を下書きの PR に出す | `loop-pr` |
+| 写しの場所を指定して出す | `loop-pr --project <mirror-dir>` |
+
 `loop-import` より前に取り込んだプロジェクトは、親ブランチを1回だけ記録する。
 
 ```bash
@@ -195,6 +208,21 @@ git push origin <pr-branch>
 - `.gitignore` に `node_modules/` があると `35-node.sh` が止まる
 - 依存パッケージは入らない。箱にあるのは pytest と vitest だけだ
 - 既存のファイルでは、スタブは計画が挙げた名前の宣言だけを差し替える。既存のテストは凍結されるので、振る舞いを変えるとそのテストが回帰として落ちる
+
+## C++ で作業させる
+
+```bash
+loop go <requirements> --language cpp
+```
+
+箱は標準の C++17 のロジックだけを g++ と GoogleTest で確かめる。DXライブラリや Windows の API は箱に無い。
+
+- `DxLib.h` や `windows.h` のように、標準でもリポジトリのものでもないヘッダを include するファイルはビルドから外す。外したファイルは計画づくりのブリーフに並ぶ
+- 描画、入力、音を扱うファイルもソルバーが書けるが、箱ではビルドも実行もしない。人が Visual Studio でビルドして画面を確かめる
+- `DxLib.h` を include するファイルがあるか、要件が DXライブラリに触れていれば、プランナーに DXライブラリの主な関数の早見表を渡す
+- 新しい `.cpp` と `.h` は Visual Studio のプロジェクト（`.vcxproj`）に入らない。CONTEXT.md の一覧を見て、人が足す
+- ソースは ASCII だけで書かせる。画面に日本語を出すなら、Visual Studio でソースの文字コードの扱い（`/utf-8` など）を決めてから人が書き足す
+- C++ の既存コードの宣言はまだプランナーに渡らない。スタブはソルバーが書き、ランナーは既存のファイルの残りが変わっていないかを確かめない
 
 ## 見る
 
@@ -229,6 +257,24 @@ git push origin <pr-branch>
 「いまの作業」は5秒ごとに `ssh loop-dev loop now` を `BatchMode=yes` で流す。鍵にパスフレーズが
 あるなら、先に ssh-agent に載せておく。
 
+### 画面から操作する
+
+画面の「操作」で、次をコマンドなしで済ませる。
+
+| やりたいこと | 欄 | 同じことをするコマンド |
+|---|---|---|
+| 要件から走らせる | 走行 | `loop go <requirements> --language <言語>` |
+| 止まったところから続ける | 走行 | `loop continue` |
+| 止める | 走行 | `loop stop` |
+| 途中で止まったステップを最後の緑に戻す | 走行 | `loop raw reset <step>` |
+| プロジェクトを切り替える | プロジェクト | `loop project use <project>` |
+| 役ごとのモデルと effort を変える | 役のモデル | `/etc/loop/<役>.env` の `LOOP_MODEL` と `LOOP_EFFORT` を書き換える |
+| 写しを最新にする | ホストの写し | `loop-pull` |
+| 既存リポジトリのブランチを取り込む | 取り込み | `loop-import <project> <repo-url> <branch> [<base-branch>]` |
+
+箱は、これらを `loop dash` の1本で受ける。箱を更新したら、`provision.sh` を流し直して sudoers の
+規則を入れる。
+
 ### スマホや他の PC から見る
 
 | やりたいこと | コマンド |
@@ -242,7 +288,8 @@ git push origin <pr-branch>
 Tailscale のログインを書く。どちらかが無ければ、tailnet からの要求はすべて拒まれる。
 `tailscale funnel` は使わない。インターネット全体に公開される。
 
-リモートから、予定レビューの承認はできない。差し戻し、エスカレーションへの回答、停止はできる。
+リモートから、予定レビューの承認、走行の開始、プロジェクトの切り替え、モデルの変更、写しの更新、
+取り込みはできない。差し戻し、エスカレーションへの回答、走行の停止と続行、止まったステップのやり直しはできる。
 
 設定の詳細: [host/dashboard/README.md](../host/dashboard/README.md)
 
@@ -250,7 +297,20 @@ Tailscale のログインを書く。どちらかが無ければ、tailnet か�
 
 ### 更新する（箱）
 
-スクリプトやランナーを更新したら、pull してからプロビジョニングを流し直す。何度流しても同じ状態になる。
+スクリプトやランナーを更新したら、`loop update` を流す。このリポジトリを pull し、プロビジョニングを
+流し直す。何度流しても同じ状態になる。走行中とプロジェクトの切り替え中は断る。
+ホストからは `host\loop.cmd` で `loop update` と打つ。
+
+pull の後のコミットが、最後にプロビジョニングが通ったコミット（`/etc/loop/provisioned`）と同じなら、
+プロビジョニングを飛ばす。プロビジョニングが途中で落ちたときは記録が古いままなので、次の
+`loop update` が流し直す。コミットが同じでも流し直すときは `--force` を付ける。
+
+```bash
+loop update
+loop update --force
+```
+
+`loop update` は最初のプロビジョニングが置く。それより前は次の2行を流す。
 
 ```bash
 sudo git -C /opt/loop-engine pull

@@ -216,7 +216,8 @@ sudo git clone -b develop <このリポジトリの https URL> /opt/loop-engine
 ```
 
 箱には GitHub の鍵を置かないので、https で取る。改行コードは `.gitattributes` で LF に
-なるので変換は要らない。スクリプトの更新は pull で取り込む:
+なるので変換は要らない。スクリプトの更新は、最初のプロビジョニングの後は `loop update` で
+取り込む（§2-10）。それより前は pull で取り込む:
 
 ```bash
 sudo git -C /opt/loop-engine pull
@@ -247,7 +248,7 @@ cd /tmp && sudo ADMIN_USER=<保守ユーザー> bash /opt/loop-engine/provision/
 pull したあとも同じ行を流す。
 
 `05-isolation.sh` が WSL 隔離（Windows パス非マウント、WSLg、systemd、NAT）を、
-`35-node.sh` が Node 側の凍結を、`36-dotnet.sh` が .NET 側の凍結を、`40-perms.sh` が solver 視点の権限モデルを、
+`35-node.sh` が Node 側の凍結を、`36-dotnet.sh` が .NET 側の凍結を、`37-cpp.sh` が C++ のビルドを、`40-perms.sh` が solver 視点の権限モデルを、
 `45-agent-invoke.sh` が資格情報の柵を assert する。1つでも落ちたら異常終了する。
 `05-` を最初に走らせるのは、隔離が効いていないディストロには
 **プロビジョニングする意味が無い**（以降の全ステップが成功しつつ何も意味しなくなる）ため。
@@ -298,6 +299,26 @@ NUnit のテストで走らせ、junit のレポートから2件走って1件落
 sudo -u runner -H /srv/loop/bin/smoke-dotnet
 ```
 
+`37-cpp.sh` は C++ の計画のための g++、make、CMake、GoogleTest を用意する。
+
+| もの | 場所 | 持ち主 |
+|---|---|---|
+| g++、make、CMake、GoogleTest（`libgtest-dev`） | Ubuntu の archive | apt |
+| ランナーが書く CMakeLists.txt とビルドの出力 | `/srv/loop/cpp/build` | runner、700 |
+
+- 箱でビルドするのは標準の C++17 だけ。DXライブラリや Windows の API は入れない
+- 標準でもリポジトリのものでもないヘッダ（`DxLib.h`、`windows.h` など）を include するファイルは、ランナーがビルドから外す。外したファイルは計画づくりのブリーフに並ぶ
+- CMakeLists.txt はプロジェクトの根に置かない。取り込んだプロジェクトのビルドの設定とぶつかる
+- `build` はコンパイルしたコードとテストを持つので、planner と critic から見えてはならない（BOOTSTRAP 1-1）
+
+最後に `smoke-cpp` を流す。ランナーと同じ形の CMakeLists.txt でビルドし、3件走って2件落ちたことを
+junit のレポートから読む。1件はアサーション、1件はスタブの例外（`std::logic_error("__stub__")`）で落とす。
+ランナーは失敗の種類を `message` から読むので、GoogleTest の版が変わったら形を見る。
+
+```bash
+sudo -u runner -H /srv/loop/bin/smoke-cpp
+```
+
 Unity の参照アセンブリを置いたプロジェクト（ホストの `loop-unity-refs`）では、`probe-unity` で
 箱に何ができるかを測る。関門ではなく測定なので、結果が悪くても落ちない。
 
@@ -336,6 +357,8 @@ sudo nano /etc/loop/solver.env
 | `LOOP_MODEL=` | 使うモデル。空ならアカウントの既定。例: planner は `claude-opus-5-5`、solver と critic は `claude-sonnet-5` |
 | `LOOP_EFFORT=` | `low` / `medium` / `high` / `xhigh` / `max`。空なら既定 |
 
+`LOOP_MODEL` と `LOOP_EFFORT` は、ダッシュボードの「役のモデル」からも変えられる。
+
 planner と critic も同じ手順で埋める。3役とも同じサブスクリプションの利用枠を使う。
 トークンが空の役があると、プロビジョニングの最後に `資格情報がまだ無い役` として名前が出る。
 
@@ -366,7 +389,7 @@ sudo -u runner /srv/loop/bin/smoke-critic
 ホストからは `host\loop.cmd` で同じコマンドを呼べる（`host/README.md`）。
 
 ```bash
-loop go <要件>.md                     # TypeScript なら --language typescript
+loop go <要件>.md                     # 言語は --language typescript / csharp / cpp
 loop status                          # 走っているか、人への問い、台帳の末尾
 loop now                             # いまの作業を JSON で出す（ダッシュボードが読む）
 loop log                             # 走行ログを追う。Ctrl-C で抜けても走行は続く
@@ -374,7 +397,12 @@ loop continue                        # 止まったところから続ける
 loop stop                            # 走行を止める
 loop findings                        # クリティックの指摘を出す
 loop findings set                    # 指摘1件を書き換える。標準入力に JSON を渡す
+loop update                          # このリポジトリを pull し、プロビジョニングを流し直す
 ```
+
+`loop update` は、走行中とプロジェクトの切り替え中は断る。pull は fast-forward だけを受ける。
+`provision.sh` は全ステップが通ると、そのコミットを `/etc/loop/provisioned` に書く。`loop update` は
+pull の後のコミットがこれと同じならプロビジョニングを飛ばす。`--force` を付けると必ず流す。
 
 `loop go` は要件を `/srv/loop/human/in/REQUIREMENTS.md` に置き、次を順に裏で流す。
 
@@ -403,16 +431,19 @@ loop findings set                    # 指摘1件を書き換える。標準入�
 あれば、プランナーに1回だけ改訂させる。クリティックはもう呼ばない。書き換えが無ければ何もしない。
 
 クリティックの指摘は `/srv/loop/human/in/CRITIQUE.json` にある。`title` と `evidence` は日本語で、
-書き換えられるのは、上限の後も指摘が残って止まっているあいだだけだ。ダッシュボードからも直せる。
+書き換えられるのは、上限の後も指摘が残って止まっているか、改訂の途中でプランナーが判断を返して止まっているあいだだけだ。ダッシュボードからも直せる。
 端末では `loop findings` で番号を見て、`loop findings set` に1件ずつ渡す。番号は0から数える。
 
 ```bash
 echo '{"mode": "trace", "index": 0, "title": "<題>", "evidence": "<根拠>"}' | loop findings set
 ```
 
-ダッシュボードは SSH で `sudo -n /usr/local/bin/loop continue` を流す。端末の無い SSH ではパスワードを
-訊けないので、`25-runner.sh` が `/etc/sudoers.d/loop-continue` に、保守ユーザーがこの1つだけを
-パスワード無しで流せる規則を置く。引数まで固定するので、ほかのコマンドには効かない。
+ダッシュボードとホストの `loop-import` は、走行の開始と停止、続行、プロジェクトの切り替えと受け皿づくり
+（`loop project init`）、役のモデルの変更を、SSH で
+`sudo -n /usr/local/bin/loop dash` に頼む。要求は標準入力の JSON 1つで、`loop_dash.py` が形と値を
+確かめる。端末の無い SSH ではパスワードを訊けないので、`25-runner.sh` が `/etc/sudoers.d/loop-dash` に、
+保守ユーザーがこの1つだけをパスワード無しで流せる規則を置く。引数まで固定するので、ほかのコマンドには
+効かない。要求の一覧は `host/dashboard/README.md` の「操作」にある。
 
 走行は systemd の一時ユニット `loop-run` として runner で動く。SSH が切れても止まらず、
 二重には起動できない。`loop stop` は3役の呼び出しも含めてまとめて止める。

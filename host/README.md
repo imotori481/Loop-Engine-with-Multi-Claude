@@ -14,6 +14,7 @@ WSL2 では起動と生存管理がホスト側の責務になった（`RUNNER_S
 | `loop-unity-refs.cmd` / `.ps1` | このリポジトリのまま（`host` を PATH に足す） | Unity のプロジェクトがコンパイルに使う参照アセンブリを箱へ送る |
 | `wsl-keepalive.vbs` | このリポジトリのまま（タスクが絶対パスで参照する） | VM を**窓を出さずに**生かし続ける。下の keepalive タスクの実体 |
 | `loop-pull.cmd` | このリポジトリのまま | **すべての** `repo*.git` と `projects/*/repo.git` をホストのミラーに引く。**VHDX を失っても残る唯一の複製** |
+| `loop-pr.cmd` | このリポジトリのまま（`host` を PATH に足す） | 全ステップが緑になる前の成果を、下書きの PR として出す |
 | `loop-dashboard.cmd` | このリポジトリのまま | 進捗、エスカレーション、予定レビューを扱うGUIを起動（`127.0.0.1:8443`） |
 
 **ASCII のみで書くこと。** PowerShell 5.1 と cmd.exe は BOM 無し UTF-8 を ANSI として
@@ -41,18 +42,22 @@ loop log
 ## 既存リポジトリを取り込む
 
 ```cmd
-loop-import <project> <repo-url> <branch> [<base-branch>]
+loop-import <project> <repo-url> <branch> [<base-branch>] [--src <src-dir>] [--tests <tests-dir>]
 ```
 
-次の順に流す。どこかで失敗したら、その場で止まり、次に打つコマンドを出す。
+ディストロを起動して sshd を待ち、`dashboard\importer.py` を流す。ダッシュボードの「取り込み」タブも
+同じ `importer.py` を使う。次の順に流し、どこかで失敗したら、その場で止まり、次に打つコマンドを出す。
 
 1. `<repo-url>` を `C:\dev\roop-engin\projects\<project>` にクローンする。もうあれば使い回す。そのときは、`origin` が `<repo-url>` であることと、未コミットの変更が無いことを確かめてから fetch する
 2. `<branch>` に切り替える。手元にも `origin` にも無ければ、`<base-branch>` から作る。`<base-branch>` を省くと、`origin` の既定のブランチから作る。作ったときは、親ブランチを `git config branch.<branch>.loopBase` に記録する。ダッシュボードが PR を出す先になる。`<branch>` がもうあるときは、`<base-branch>` を渡したときだけ記録する
-3. 箱で `loop project init <project> --branch <branch>` を流す
+3. 箱で `loop project init <project> --branch <branch>` を流す。`--src` と `--tests` を渡せば柵の場所も決める
 4. `loop-runner` で `<branch>` を箱の bare に push する
-5. 箱で `loop project use <project>` を流す
+5. 箱で `loop project use <project>` を流し、切り替えが終わるまで待つ
 
-クローンの置き場は、冒頭の `set "WORKROOT=..."` で決まる。GitHub とやり取りするのはこのクローンだけだ。
+3 と 5 は `sudo -n /usr/local/bin/loop dash` を通るので、パスワードを訊かれない。
+
+`<repo-url>` は `https://`、`ssh://`、`user@host:path` の形だけを受け付ける。クローンの置き場は
+`importer.py` の `WORKROOT` で決まる。GitHub とやり取りするのはこのクローンだけだ。
 箱には GitHub の資格情報を置かない。
 
 ## Unity の参照アセンブリを送る
@@ -231,7 +236,7 @@ git clone loop-runner:/srv/loop/repo.git <置き場所>
 
 - 箱が作業するブランチは bare の HEAD から読む。手元のそのブランチは、早送りできるときだけ進める。早送りできないときと、手元の変更が邪魔をするときは `NOTE` を出して動かさない。写しは `loop/<ブランチ>` に入っているので、失敗とは数えない
 - ランナーのタグ（`step-S1` など）は `refs/loop-tags/` に入れる。`refs/tags/` に入れると、`git push --tags` で GitHub に届く
-- GitHub への push は、ダッシュボードで予定レビューを承認したときに PR として行う（`dashboard/README.md`）。手で出す手順は `docs/COMMANDS.md`
+- GitHub への push は、ダッシュボードで予定レビューを承認したときに PR として行う（`dashboard/README.md`）。全ステップが緑になる前は `loop-pr` で下書きの PR として出す。手で出す手順は `docs/COMMANDS.md`
 
 `/srv/loop/repo.git` が今のプロジェクトへのリンクのときも、`project` は今のプロジェクトの写しになる。
 作り直す先は、bare の HEAD が指すブランチだ。
@@ -264,6 +269,7 @@ git clone loop-runner:/srv/loop/repo.git <置き場所>
 
 ## 更新履歴
 
+- 2026/10/07: 途中の成果を下書きの PR として出す `loop-pr.cmd` を追加
 - 2026/09/27: `loop-import.cmd` が親ブランチを `branch.<branch>.loopBase` に記録するように変更
 - 2026/09/27: Unity の参照アセンブリを箱へ送る `loop-unity-refs` を追加
 - 2026/09/27: `loop-pull.cmd` がプロジェクトごとの写しを引くように変更
