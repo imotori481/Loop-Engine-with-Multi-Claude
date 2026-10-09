@@ -6920,24 +6920,26 @@ def cmd_plan_refine(modes: list[str], resume: bool = False) -> int:
     続くのを止める。改訂1回はプランナーの呼び出し1回で、TypeScript のブリーフでは
     28分かかった。
 
-    上限の後も指摘が残って止まるときと、改訂の途中でプランナーが判断を返して止まる
-    ときは、どのみち人が `loop continue` を打つ。そこで人が指摘を読み、title と
-    evidence を書き換えられるようにする。
+    上限の後も指摘が残って止まるときと、改訂が済まずに止まるときは、どのみち人が
+    `loop continue` を打つ。改訂が済まないのは、プランナーが判断を返したとき、
+    改訂に失敗したとき、改訂の途中で走行を止めたときだ。そこで人が指摘を読み、
+    title と evidence を書き換えられるようにする。
     クリティックは計画と要件しか見ておらず、的を外すことがある。resume は人が
     書き換えた指摘でプランナーに1回だけ改訂させ、批評はもう回さない。書き換えが
     無ければ、何もせずに提案を残す。どちらも、その後は `plan apply` に進む。
     """
     pending = PLANNER_OUT / "tasks.json"
+    requirements = REQUIREMENTS.read_text(encoding="utf-8") \
+        if REQUIREMENTS.is_file() else ""
+    # 改訂の途中で止まると out/ は空のこともある。resume は控えから戻すので先に分ける。
+    if resume:
+        return resume_refine(requirements, pending)
+
     if not pending.is_file():
         print(f"no pending proposal at {pending}", file=sys.stderr)
         print("run `plan bootstrap` first; refine works before `plan apply`, "
               "while the criteria are still a draft", file=sys.stderr)
         return 1
-
-    requirements = REQUIREMENTS.read_text(encoding="utf-8") \
-        if REQUIREMENTS.is_file() else ""
-    if resume:
-        return resume_refine(requirements, pending)
 
     cap = LIMITS["critiques"]
     for round_no in range(1, cap + 2):
@@ -6970,23 +6972,31 @@ def cmd_plan_refine(modes: list[str], resume: bool = False) -> int:
             return 4
 
         # 上限の前の回は、クリティックの指摘のまま、人を待たずに改訂させる。
-        write_critique_for_human(round_no, by_mode, waiting=False)
+        # 控えは改訂を頼む前に書く。改訂が済まずに止まれば、上限の後と同じく、人が
+        # 指摘を書き換えて `loop continue` で1回だけ改訂させられる。走行を止められると
+        # 改訂の後の処理は走らないので、後から書くのでは間に合わない。
+        wait_for_human(round_no, tasks, by_mode, revising=True)
         code = revise_with_findings(requirements, tasks, by_mode, round_no)
-        if code == 3:
-            # プランナーが改訂せずに判断を返した。下書きは批評した時のものに戻っているので、
-            # 上限の後と同じく、人が指摘を書き換えて `loop continue` で1回だけ改訂させられる。
-            wait_for_human(round_no, tasks, by_mode)
         if code != 0:
             return code
+        REFINE_STATE.unlink()
+        write_critique_for_human(round_no, by_mode, waiting=False)
 
     return 4   # 届かない。ループは必ず戻る
 
 
-def wait_for_human(round_no: int, tasks: str, by_mode: dict[str, list[dict]]) -> None:
-    """批評した提案と指摘を控え、人が直せる写しを書く。resume_refine がこれを読む。"""
+def wait_for_human(round_no: int, tasks: str, by_mode: dict[str, list[dict]],
+                   revising: bool = False) -> None:
+    """批評した提案と指摘を控え、人が直せる写しを書く。resume_refine がこれを読む。
+
+    revising は、これから改訂させる印。改訂の途中で走行が止まると、out/ は空か
+    書きかけのまま残る。resume_refine は、そのときは控えた提案に戻してから進む。
+    """
+    draft = {name: text for name, text in read_proposal().items() if name in PROPOSAL_FILES}
     REFINE_STATE.parent.mkdir(parents=True, exist_ok=True)
     REFINE_STATE.write_text(json.dumps(
-        {"round": round_no, "tasks_sha256": text_sha256(tasks), "findings": by_mode},
+        {"round": round_no, "tasks_sha256": text_sha256(tasks), "findings": by_mode,
+         "revising": revising, "draft": draft},
         ensure_ascii=False), encoding="utf-8")
     write_critique_for_human(round_no, by_mode, waiting=True)
 
@@ -7003,6 +7013,11 @@ def resume_refine(requirements: str, pending: Path) -> int:
     except (OSError, ValueError):
         print("no critique is waiting for you; nothing to resume")
         return 0
+    if state.get("revising"):
+        # 改訂を頼んだまま止まった。out/ は空か書きかけなので、批評した提案に戻す。
+        restore_proposal(state["draft"])
+        ledger("REFINE_RESTORED", round=state["round"], reason="revision did not finish",
+               files=sorted(state["draft"]))
     tasks = pending.read_text(encoding="utf-8")
     if text_sha256(tasks) != state.get("tasks_sha256"):
         raise Halt("CRITIQUE", "the pending proposal changed after it was critiqued",

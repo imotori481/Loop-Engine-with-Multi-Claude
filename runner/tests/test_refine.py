@@ -1,4 +1,4 @@
-"""plan refine が、上限の後に残った指摘と、プランナーが改訂せずに判断を返したときの指摘を
+"""plan refine が、上限の後に残った指摘と、改訂が済まずに止まった回の指摘を
 人に直させ、直した指摘で1回だけ改訂させること。
 改訂に失敗しても改訂前の提案を失わないこと。
 
@@ -236,6 +236,62 @@ class TheHumanRewritesWhatIsLeftAfterTheCap(PendingDraft):
         self.assertEqual(self.critiques, 0)
         self.assertEqual(len(self.briefs), 1)
         self.assertIn("1. 範囲は既存のファイルの分割まで\n   REWRITTEN BY THE HUMAN", self.briefs[0])
+        self.assertFalse(self.shown()["waiting"])
+
+    def test_a_revision_that_went_through_does_not_wait(self) -> None:
+        with mock.patch.dict(loop.LIMITS, {"critiques": 2}), \
+                mock.patch.object(loop, "run_critique",
+                                  lambda modes, tasks: {"trace": []} if self.briefs else
+                                  {"trace": [dict(f) for f in FINDINGS]}), \
+                mock.patch.object(loop, "plan_with_retry", self.planner):
+            self.assertEqual(loop.cmd_plan_refine(["trace"]), 0)
+        self.assertFalse(self.state.exists())
+        self.assertFalse(self.shown()["waiting"])
+
+    def test_a_failed_revision_before_the_cap_waits_for_the_rewrite(self) -> None:
+        def fail(brief_for, tag, keep=None):
+            loop.clear_proposal()
+            return 2
+
+        with mock.patch.object(loop, "plan_with_retry", fail):
+            self.assertEqual(loop.cmd_plan_refine(["trace"]), 2)
+        self.assertTrue(self.shown()["waiting"])
+        self.assertEqual(self.contents(), DRAFT)
+
+    def stop_mid_revision(self, partial: dict[str, str]) -> None:
+        """改訂の途中で走行を止められた。改訂の後の処理は1つも走らない。"""
+        def stopped(brief_for, tag, keep=None):
+            loop.clear_proposal()
+            for name, text in partial.items():
+                (self.out / name).write_text(text, encoding="utf-8")
+            raise KeyboardInterrupt
+
+        with mock.patch.object(loop, "plan_with_retry", stopped), \
+                self.assertRaises(KeyboardInterrupt):
+            loop.cmd_plan_refine(["trace"])
+        shown = self.shown()
+        self.assertTrue(shown["waiting"])
+        self.assertEqual(shown["round"], 1)
+
+    def test_a_run_stopped_mid_revision_waits_and_resumes_from_the_draft(self) -> None:
+        self.stop_mid_revision({"tasks.json": '{"steps": ["half written"]}'})
+        self.critiques = 0
+        self.rewrite("trace", 0, title="S2 の条件は要件どおり")
+        self.assertEqual(self.resume(), 0)
+        self.assertEqual(self.critiques, 0)
+        self.assertEqual(len(self.briefs), 1)
+        # 改訂は書きかけではなく、批評した提案に対して頼む。
+        self.assertIn(DRAFT["tasks.json"], self.briefs[0])
+        self.assertIn("1. S2 の条件は要件どおり\n   REWRITTEN BY THE HUMAN", self.briefs[0])
+        self.assertEqual(self.contents()["CONTEXT.md"], DRAFT["CONTEXT.md"])
+        self.assertFalse(self.state.exists())
+
+    def test_a_run_stopped_with_out_empty_resumes_without_a_rewrite(self) -> None:
+        self.stop_mid_revision({})
+        self.assertEqual(self.contents(), {})
+        self.assertEqual(self.resume(), 0)
+        self.assertEqual(self.briefs, [])
+        self.assertEqual(self.contents(), DRAFT)
         self.assertFalse(self.shown()["waiting"])
 
     def test_applying_the_plan_closes_the_waiting_critique(self) -> None:

@@ -200,7 +200,8 @@ function renderCritique(value) {
   at.textContent = `${findings.round}回目の批評 / ${findings.at}`;
   const editable = findings.waiting && !value.running;
   if (editable) {
-    box.append(text("p", "改訂の上限まで回しても残った指摘か、プランナーが改訂せずに判断を返した指摘です。"
+    box.append(text("p", "改訂の上限まで回しても残った指摘か、改訂が済まずに止まった回の指摘です。"
+      + "改訂が済まないのは、プランナーが判断を返したとき、改訂に失敗したとき、走行を止めたときです。"
       + "的外れなものや、プランナーの問いに答えるものは書き換えてください。"
       + "「続ける」を押すと、書き換えた指摘でプランナーが1回だけ計画を直し、適用して走らせます。"
       + "何も書き換えずに押すと、今の計画をそのまま適用します。", "why"));

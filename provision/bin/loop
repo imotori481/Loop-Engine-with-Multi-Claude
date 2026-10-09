@@ -18,6 +18,8 @@ LOGS=$LOOP/logs
 REQUIREMENTS=$LOOP/human/in/REQUIREMENTS.md
 PENDING=$LOOP/planner/out/tasks.json
 CRITIQUE=$LOOP/human/in/CRITIQUE.json
+# plan refine が人を待っているあいだの控え。改訂の途中で止まると out/ が空のこともある。
+REFINE_STATE=$LOOP/project/.runner/refine.json
 PLAN=$LOOP/project/plan
 ENGINE="${LOOP_ENGINE:-/opt/loop-engine}"
 PROJECT_SH="$ENGINE/provision/loop-project.sh"
@@ -77,6 +79,7 @@ apply_pending() {
 }
 
 # 上限まで改訂しても指摘が残れば 4 で、改訂の途中でプランナーが判断を返せば 3 で止まる。
+# 改訂に失敗したときと、改訂の途中で走行を止めたときも、指摘は人を待つ。
 # 人がダッシュボードか 'loop findings set' で指摘を書き換えてから 'loop continue' を流すと、
 # --resume が書き換えた指摘で1回だけ改訂させる。書き換えが無ければ何もしない。どちらも、
 # その後に提案を適用する。
@@ -87,7 +90,7 @@ refine() {
     0) ;;
     3) finish 3 "plan refine の途中でプランナーが判断を返した。$LOOP/project/.runner/refine-escalation.md を読み、答えを指摘に書き込むならダッシュボードか 'loop findings set'。次は 'loop continue'" ;;
     4) finish 4 "クリティックの指摘が残った。直すならダッシュボードか 'loop findings set'。直しても直さなくても、次は 'loop continue'" ;;
-    *) finish "$rc" "plan refine が失敗した（終了コード $rc）" ;;
+    *) finish "$rc" "plan refine が失敗した（終了コード $rc）。指摘を直すならダッシュボードか 'loop findings set'。次は 'loop continue'" ;;
   esac
 }
 
@@ -115,7 +118,7 @@ work() {
 
     refine
     apply_pending
-  elif [ -f "$PENDING" ]; then
+  elif [ -f "$PENDING" ] || [ -f "$REFINE_STATE" ]; then
     # 人を待つ批評が無ければ、--resume は何もせずに 0 で戻り、提案を適用する。
     refine --resume
     apply_pending
@@ -161,7 +164,7 @@ cmd_go() {
 
 cmd_continue() {
   as_runner test -f "$PLAN/tasks.json" || as_runner test -f "$PENDING" \
-    || die "まだ計画が無い。'loop go <要件>.md' から始める"
+    || as_runner test -f "$REFINE_STATE" || die "まだ計画が無い。'loop go <要件>.md' から始める"
   start continue
 }
 

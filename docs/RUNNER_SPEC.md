@@ -1332,7 +1332,7 @@ run --all [--budget <分>]    # 停止条件に当たるまで回す
 reset <id>                   # 止まったステップを捨て、最後の green に戻す
 plan bootstrap [--from <path>]  # 要件 .md から計画を起こさせる。終えた計画は plan/archive/ へ移す
 plan propose [--step <id>]   # ESCALATION.md に対する改訂をプランナーに書かせる
-plan refine [--resume]       # 保留中の提案を批評と改訂で上限まで回す。上限の後に残った指摘と、プランナーが判断を返した回の指摘は人が書き換え、
+plan refine [--resume]       # 保留中の提案を批評と改訂で上限まで回す。上限の後に残った指摘と、改訂が済まずに止まった回の指摘は人が書き換え、
                              # --resume が書き換えた指摘で1回だけ改訂させる（AGENT_IO.md の critic）
 plan show                    # 保留中の提案を、適用せずに表示する
 plan apply                   # 提案を検査し、通れば plan/ に反映して commit
