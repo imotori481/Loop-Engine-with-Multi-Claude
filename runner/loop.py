@@ -497,12 +497,27 @@ def set_writable(*, tests: bool | None, src: bool | None) -> None:
         if writable:
             shutil.chown(path, group="solverw")
             path.chmod(0o2775)
+            for child in owned_dirs(path):
+                child.chmod(0o2775)
             for child in source_files(path):
                 child.chmod(0o664)
         else:
             path.chmod(0o2755)
+            for child in owned_dirs(path):
+                child.chmod(0o2755)
             for child in source_files(path):
                 child.chmod(0o444)
+
+
+def owned_dirs(path: Path) -> list[Path]:
+    """`path` の下のディレクトリのうち、ランナーが所有するもの。
+
+    ソルバーが作ったディレクトリはソルバーの所有で、ランナーは chmod できない。
+    それは飛ばし、書いたものは assert_touched が確かめる。
+    """
+    me = os.getuid()
+    return [d for d in path.rglob("*")
+            if d.is_dir() and not d.is_symlink() and d.stat().st_uid == me]
 
 
 def discard_attempt(files_write: list[str]) -> list[str]:
@@ -597,7 +612,7 @@ def touched_paths() -> set[str]:
     return paths
 
 
-def assert_written(phase: str, required: list[str]) -> None:
+def assert_written(phase: str, required: list[str], said: str = "") -> None:
     """その位相に頼んだファイルが存在し、中身があること。
 
     assert_touched は、許可リストの「外」に何も書かれていないことを確かめる。
@@ -609,8 +624,11 @@ def assert_written(phase: str, required: list[str]) -> None:
     missing = [p for p in required
                if not (PROJECT / p).is_file() or not (PROJECT / p).stat().st_size]
     if missing:
+        # ソルバーの返答を添える。書けなかった理由（EACCES など）を言っているのは
+        # それだけで、ほかには残らない。
         raise Halt(phase, "the files this phase had to produce are missing or empty",
-                   "expected: " + ", ".join(missing))
+                   "expected: " + ", ".join(missing)
+                   + (f"\n\nsolver said:\n{said[-2000:]}" if said and said.strip() else ""))
 
 
 def assert_touched(phase: str, allowed: list[str]) -> None:
@@ -7527,9 +7545,10 @@ def run_step(step_id: str, unvalidated: bool = False) -> int:
             replaced = sorted(head_sources(step["files_test"]))
             if replaced and write_attempt == 1:
                 ledger("TESTS_REPLACED", step=step_id, files=replaced)
-            call_solver("TEST_WRITE", brief_test_write(step, context, broken, replaced, crashed))
+            said = call_solver("TEST_WRITE",
+                               brief_test_write(step, context, broken, replaced, crashed))
             assert_touched("TEST_WRITE", step["files_test"])
-            assert_written("TEST_WRITE", step["files_test"])
+            assert_written("TEST_WRITE", step["files_test"], said)
             ledger("TEST_WRITE", step=step_id, ok=True, attempt=write_attempt)
 
             # --- STUB ---------------------------------------------------
@@ -7538,8 +7557,9 @@ def run_step(step_id: str, unvalidated: bool = False) -> int:
             # ステップに関係の無い関数まで消える。
             originals = head_sources(step["files_write"])
             written = generate_stub(step, dep_contract_lines(step), originals)
+            said = ""
             if written is None:
-                call_solver("STUB", brief_stub(step, sorted(originals)))
+                said = call_solver("STUB", brief_stub(step, sorted(originals)))
                 ledger("STUB", step=step_id, ok=True, by="solver")
             else:
                 for rel, text in written.items():
@@ -7549,7 +7569,7 @@ def run_step(step_id: str, unvalidated: bool = False) -> int:
                 ledger("STUB", step=step_id, ok=True, by="runner",
                        files=sorted(written))
             assert_touched("STUB", step["files_test"] + step["files_write"])
-            assert_written("STUB", step["files_write"])
+            assert_written("STUB", step["files_write"], said)
             changed = stub_kept_the_rest(step, originals)
             if changed:
                 raise Halt("STUB",
@@ -7973,6 +7993,10 @@ def fence_is_open() -> bool:
 
 
 def main() -> int:
+    # 柵の中に runner が作るディレクトリを、グループ solverw で書けるようにする。
+    # 走行の systemd-run も dash の sudo も umask を 022 にし、git が作り直した
+    # src/Managers が 2755 になって、ソルバーの Write がすべて EACCES で落ちた。
+    os.umask(0o002)
     parser = argparse.ArgumentParser(description="loop runner v1")
     sub = parser.add_subparsers(dest="cmd", required=True)
     sub.add_parser("validate", help="lint plan/tasks.json (RUNNER_SPEC section 8)")
