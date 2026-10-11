@@ -98,6 +98,11 @@ chk_cannot ls "$P/.git"
 chk_cannot ls "$P/plan"
 chk_cannot ls "$P/.runner"
 chk_cannot test -w /srv/loop/brief
+# ライブラリの参照（36-dotnet.sh）。読んで引くもので、書き換えて逃げる場所ではない。
+if [ -d /srv/loop/refs ]; then
+  chk_can    test -r /srv/loop/refs
+  chk_cannot test -w /srv/loop/refs
+fi
 # 走行ログは失敗したテストの中身を含む。
 chk_cannot ls /srv/loop/logs
 chk_cannot ls /home/runner

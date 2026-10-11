@@ -15,7 +15,8 @@ function button(label, decision, item, note) {
   element.onclick = async () => {
     element.disabled = true;
     try {
-      await api("/api/decision", {method: "POST", body: JSON.stringify({kind: item.kind, request_id: item.id, decision, note: note.value})});
+      const result = await api("/api/decision", {method: "POST", body: JSON.stringify({kind: item.kind, request_id: item.id, decision, note: note.value})});
+      if (result.sent && result.sent.error) alert("回答は記録したが、箱に送れなかった: " + result.sent.error);
       await refresh();
     } catch (error) { alert(error.message); element.disabled = false; }
   };

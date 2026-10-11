@@ -140,6 +140,12 @@ REQUIREMENTS = HUMAN_IN / "REQUIREMENTS.md"
 # 書いて止まり、再開したときに読み戻してプランナーへ渡す。human/in は humanw の
 # 保守ユーザーが書け、プランナーとクリティックは読めない。
 CRITIQUE_FOR_HUMAN = HUMAN_IN / "CRITIQUE.json"
+# エスカレーションへの人の答え。ダッシュボードが「回答を記録」で送る。次の
+# plan propose がプランナーに渡し、計画が適用されたら消す。
+HUMAN_ANSWER = HUMAN_IN / "ANSWER.md"
+# 人が書き換えた計画。`loop plan amend` が置き、plan amend が取り込んで消す。
+# 受け入れ条件の書き換え (b) は人の権限で、プランナーの経路では拒まれる。
+AMENDED_PLAN = HUMAN_IN / "tasks.json"
 
 # プランナーが書いてよい3つのファイル（BOOTSTRAP「書いてよいのは次の3つだけ」）。
 # out/ に書く名前から、プロジェクトの中の置き場への対応表にしてある。この表が
@@ -237,6 +243,26 @@ class QuotaExhausted(Exception):
         self.who = who
         self.phase = phase
         self.kind = kind
+
+
+# 箱が書き込みを拒んだ跡。ソルバーにもプランナーにも直せないので、エスカレーション
+# にせずに止める。柵の下のディレクトリが 2755 で作られ、ソルバーの Write がすべて
+# EACCES で落ちたとき、試行もエスカレーションの上限もそれで使い切った。
+# 誤りと取り違えないよう、箱のパス（/srv/loop の下）と同じ行に出たものだけを見る。
+# Node は `EACCES: permission denied, open '<path>'`、Python は
+# `[Errno 13] Permission denied: '<path>'` の形で出す。
+INFRA_ERROR = re.compile(r"\b(?:EACCES|EPERM|EROFS|ENOSPC)\b|\[Errno (?:1|13|28|30)\]"
+                         r"|Permission denied|Read-only file system|No space left on device")
+
+
+class InfraBroken(Exception):
+    """箱が書き込みを拒んだ。Halt ではないので、エスカレーションしない。"""
+
+    def __init__(self, phase: str, evidence: str):
+        super().__init__(f"the sandbox refused the {phase} phase: {evidence}")
+        self.phase = phase
+        self.evidence = evidence
+
 
 # RUNNER_SPEC 6-2。BOOTSTRAP 1-4 はステップの中の「試行」に上限を掛けるが、
 # その外のループについては何も言わない。だからプランナーが (a) を繰り返し答える
@@ -963,6 +989,21 @@ assertions -- write `ASSERT_GE(v.size(), n)`, and index with `.at()`.
 #   environment_files  言語のものに足す
 #   facts              (実行環境の1行, UI の1行, 画面についての段落) を返す
 #   page               根のページを見せる文を返す。ページの無い先は持たない
+#   refs               ライブラリの参照の名前。REFS の下の置き場（library_refs）
+
+# C# のコードは OutputType の無いライブラリとして組む（dotnet_projects）。入口は
+# どの持ち込む先でもテストで確かめられない。
+CSHARP_LIBRARY_NOTE = """The code is built as a class library named LoopCode, with no OutputType.
+There is no `Main` here and `Assembly.EntryPoint` is always null. A file of
+top-level statements (the usual `Program.cs`) is left out of the build, so
+nothing in it compiles or runs here. So no criterion can check how the program
+starts -- what `Main` or `Program.cs` does, or what it calls first. A step may
+write the entry file by listing it in `files_write`; the person checks it by
+hand after the run. Keep it thin, and put the behaviour it starts in classes
+the tests can call.
+
+"""
+
 FRAMEWORKS = {
     "python": {
         # 持ち込む先を持たない。画面の事実は tkinter が読み込めるかで決まる。
@@ -1021,7 +1062,7 @@ costs nothing elsewhere. A new file's namespace follows its folder under {SRC}/
 the namespace it has: a declaration read from it ends in `-- namespace <name>`,
 and code that uses it writes `using <name>;`.
 
-Tests use NUnit 3: `using NUnit.Framework;`, a public class with `[Test]`
+""" + CSHARP_LIBRARY_NOTE + """Tests use NUnit 3: `using NUnit.Framework;`, a public class with `[Test]`
 methods, and `Assert.AreEqual(expected, actual)` or `Assert.That(actual,
 Is.EqualTo(expected))`. Every test class is inside a namespace, and its name
 is the file's name (`{TESTS}/BoardTests.cs` holds `BoardTests`): the runner
@@ -1053,6 +1094,7 @@ Say all of this in CONTEXT.md; the solver has no other way to learn it.""",
             "dotnet_implicit_usings": "enable",
             "dotnet_nullable": "enable",
             "dotnet_packages": ("Promete",),
+            "refs": "promete",
             "layout_note": """Every source file is `.cs` under {SRC}/, e.g. `{SRC}/Logic/Board.cs`, and
 every test file is `.cs` under {TESTS}/. The code compiles as one assembly
 (net10.0, C# 14, implicit usings and nullable reference types on) that
@@ -1066,7 +1108,7 @@ One public type per file, and the file is named after the type
 keeps the namespace it has: a declaration read from it ends in
 `-- namespace <name>`, and code that uses it writes `using <name>;`.
 
-Tests use NUnit 3: `using NUnit.Framework;`, a public class with `[Test]`
+""" + CSHARP_LIBRARY_NOTE + """Tests use NUnit 3: `using NUnit.Framework;`, a public class with `[Test]`
 methods, and `Assert.AreEqual(expected, actual)` or `Assert.That(actual,
 Is.EqualTo(expected))`. Every test class is inside a namespace, and its name
 is the file's name (`{TESTS}/BoardTests.cs` holds `BoardTests`): the runner
@@ -1075,8 +1117,15 @@ selects a step's tests by that class name.
 Promete here is version 2, and older examples show version 1. A scene takes the
 plugins it uses through its constructor (`public class MainScene(Keyboard
 keyboard) : Scene`) and reads the screen through `View` and the clock through
-`Time`. `IWindow` and a scene's `Window` property are the version 1 API: do not
-use them.
+`Time`. A scene reaches the app through `App`. The window is `App.Window`: its
+size is `App.Window.Size = (640, 480)` and its title `App.Window.Title`, set
+in the first scene's `OnStart`, or the window keeps Promete's default size.
+Input is a plugin taken through the constructor. `mouse[MouseButtonType.Left]`
+is the left button: `IsButtonDown` is true on the frame it goes down,
+`IsPressed` while it is held, `IsButtonUp` on the frame it is released, and
+`mouse.Position` is the pointer. A key has `IsKeyDown`, `IsPressed` and
+`IsKeyUp` in the same sense. No test can see the window or press a button; the
+person checks both after the run.
 
 A contract line names the file and then the declaration. A type:
     {SRC}/Logic/Board.cs: class Board { public int Width; public int Height; }
@@ -1244,6 +1293,49 @@ def csharp_failure_kind(failure: ET.Element) -> str:
     return first or "<no type>"
 
 
+# 持ち込む先のライブラリの参照。36-dotnet.sh が root で置き、誰でも読めて誰も書けない。
+# TYPES.txt と MEMBERS.txt を1行1件で持つ（provision/loop_refs.py）。
+REFS = LOOP / "refs"
+
+
+def library_refs() -> Path | None:
+    """いまの持ち込む先の参照の置き場。無ければ None。"""
+    name = LANGUAGE.get("refs")
+    path = REFS / name if name else None
+    return path if path is not None and (path / "TYPES.txt").is_file() else None
+
+
+def library_types() -> str:
+    """参照にある型の名前を、名前空間ごとに1行にまとめる。プランナーに渡す。"""
+    path = library_refs()
+    if path is None:
+        return ""
+    spaces: dict[str, list[str]] = {}
+    for line in (path / "TYPES.txt").read_text(encoding="utf-8").splitlines():
+        name = line.split(None, 1)[0] if line.strip() else ""
+        if not name:
+            continue
+        space, _, short = name.rpartition(".")
+        spaces.setdefault(space, []).append(short)
+    return "\n".join(f"    {space}: {', '.join(names)}" for space, names in sorted(spaces.items()))
+
+
+def library_refs_section() -> str:
+    """ソルバーのブリーフの、ライブラリの参照の節。参照が無ければ空。"""
+    path = library_refs()
+    if path is None:
+        return ""
+    return f"""
+# The library reference
+Every documented public type and member of the library this code is built
+against is listed in {path}, one per line with its summary:
+`TYPES.txt` holds the types and `MEMBERS.txt` the members
+(`P:Promete.Input.MouseButton.IsButtonDown  <summary>`). Before you use a
+library member, Grep `MEMBERS.txt` for its type and use what is listed. A
+member that is not listed may still exist; then look for how the project uses it.
+"""
+
+
 DOTNET_TOOLS = LOOP / "dotnet"
 DOTNET_BUILD = DOTNET_TOOLS / "build"
 UNITY_REFS = LOOP / "unity-refs"
@@ -1276,6 +1368,39 @@ def dotnet_global_json() -> str:
     return json.dumps({"sdk": {"version": f"{LANGUAGE['dotnet_sdk']}.100",
                                "rollForward": "latestFeature", "allowPrerelease": False}},
                       indent=2) + "\n"
+
+
+def csharp_entry_files() -> list[str]:
+    """柵のコードの場所にある、トップレベル文を持つ .cs。根からの相対パス。
+
+    コードは OutputType の無いライブラリとして組むので、トップレベル文はコンパイル
+    できない（CS8805）。Promete のプロジェクトの Program.cs はこの形で、取り込むと
+    ビルド全体が落ちる。C++ の cpp_sources と同じく、ビルドから外して人の手で直す
+    入口として扱う。読めないファイルは外さない。壊れていることはビルドが伝える。
+    """
+    found: list[str] = []
+    if not SRC.is_dir():
+        return found
+    for path in sorted(SRC.rglob("*.cs")):
+        try:
+            outline = csharp_outline(path.read_text(encoding="utf-8", errors="replace"))
+        except OSError:
+            continue
+        if outline is None:
+            continue
+        if any(csharp_is_statement(outline, start, stop) for start, stop in outline["others"]):
+            found.append(path.relative_to(PROJECT).as_posix())
+    return found
+
+
+def csharp_is_statement(outline: dict, start: int, stop: int) -> bool:
+    """最上位の単位が文か。型でも using でもない最上位の宣言（csharp_outline の
+    others）には、文のほかに、本体の無い型（`record Card(int Rank);`、
+    `interface IMarker;`）、delegate、extern alias、`[assembly: ...]` だけの単位がある。"""
+    sig = csharp_after_attributes(outline["shape"], start, stop)
+    head = " ".join(outline["code"][sig:stop].split()).rstrip(";").strip()
+    return bool(head) and not CSHARP_TYPE_HEAD.match(head) \
+        and not re.match(r"(?:extern\s+alias|(?:[\w\s]*\s)?delegate)\b", head)
 
 
 def dotnet_projects() -> dict[Path, str]:
@@ -1312,6 +1437,8 @@ def dotnet_projects() -> dict[Path, str]:
     # 持ち込む先のパッケージはコードが参照し、テストはコードを通して受け取る。
     packages = "".join(f'\n    <PackageReference Include="{name}" Version="{versions[name]}" />'
                        for name in LANGUAGE["dotnet_packages"])
+    # 入口はビルドから外す（csharp_entry_files）。
+    entries = "".join(f'\n    <Compile Remove="{PROJECT / rel}" />' for rel in csharp_entry_files())
     code = f"""<Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <TargetFramework>{LANGUAGE["dotnet_target"]}</TargetFramework>
@@ -1319,7 +1446,7 @@ def dotnet_projects() -> dict[Path, str]:
 {common}
   </PropertyGroup>
   <ItemGroup>
-    <Compile Include="{SRC}/**/*.cs" />{packages}
+    <Compile Include="{SRC}/**/*.cs" />{entries}{packages}
   </ItemGroup>
   <ItemGroup>{references(False)}
   </ItemGroup>
@@ -1977,6 +2104,35 @@ def run_agent(who: str, phase: str, invoke, detail: str = "") -> subprocess.Comp
     raise QuotaExhausted(who, phase, kind)
 
 
+def infra_evidence(phase: str, text: str) -> str | None:
+    """箱が書き込みを拒んだ行。無ければ None。
+
+    拒まれて当然の場所は数えない。ソルバーは plan/ も .runner も読めず、IMPL の
+    あいだは凍結したテストに書けない。そこで拒まれたのはソルバーの誤りで、柵が
+    効いた証拠だ。数えるのは、その位相でソルバーが書けるはずの柵と、ランナーの
+    ビルドの置き場だけだ。
+    """
+    writable = [SRC, DOTNET_BUILD, CPP_BUILD] + ([TESTS] if phase != "IMPL" else [])
+    for line in text.splitlines():
+        if not INFRA_ERROR.search(line):
+            continue
+        for raw in re.findall(rf"{re.escape(str(LOOP))}/[^\s'\"`,:;)]+", line):
+            path = Path(raw)
+            if any(path == root or root in path.parents for root in writable):
+                return line.strip()
+    return None
+
+
+def check_infra(phase: str, text: str) -> None:
+    """箱が書き込みを拒んだ跡があれば、台帳に残して InfraBroken で止める。"""
+    evidence = infra_evidence(phase, text)
+    if evidence is None:
+        return
+    ledger("INFRA_FAILURE", step=NOW.get("step") or "-", phase=phase,
+           evidence=evidence[-400:])
+    raise InfraBroken(phase, evidence[-400:])
+
+
 def call_solver(phase: str, brief: str, backend: str | None = None) -> str:
     """ソルバーにブリーフを1つだけ渡し、ほかには何も渡さない。
 
@@ -2012,6 +2168,7 @@ def call_solver(phase: str, brief: str, backend: str | None = None) -> str:
                    "solver-run's internal timeout did not fire; a solver process "
                    "may still be alive. Check with: pgrep -a -u solver")
     out = proc.stdout + proc.stderr
+    check_infra(phase, out)
     if proc.returncode == 124:
         raise SolverTimeout(phase, "solver hit its own timeout in solver-run", out[-4000:])
     if proc.returncode != 0:
@@ -2118,7 +2275,7 @@ after it.
 
 # Signatures this step provides
 {render_provides(step)}
-"""
+{library_refs_section()}"""
 
 
 def replaced_tests_section(replaced: list[str], expected: int) -> str:
@@ -3066,6 +3223,12 @@ Make the smallest change that passes the tests. Reuse the code that is already
 there -- existing methods, fields and helpers -- instead of writing new ones
 that do the same thing, and do not add methods the tests do not need. Search
 the project with Grep and Glob before writing something that may already exist.
+
+Do not guess at a library's API. Code that looks members up by name at run
+time (reflection, `getattr`) and quietly falls back when they are missing
+compiles and passes the tests, then does nothing in the real program. If you
+do not know a library member, look for how the project or CONTEXT.md uses it;
+if neither says, write that in your final message instead of guessing.
 """
 
 
@@ -3118,6 +3281,9 @@ def escalation_count(step_id: str) -> int:
     出来事（VM の停止、reset、明日再開する走行）を越えて残ることだからだ。
     `reset` が台帳を巻き戻さないのもこのためだ。reset が消す記録から数える上限は、
     上限にならない。
+
+    人が `plan amend` でこのステップを直したら、そこから数え直す。上限が止めるのは
+    プランナーが同じ条件に (a) を繰り返すことで、人が書き換えた条件は別のものだ。
     """
     if not LEDGER.exists():
         return 0
@@ -3129,9 +3295,23 @@ def escalation_count(step_id: str) -> int:
             rec = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if rec.get("event") == "ESCALATED" and rec.get("step") == step_id:
+        if rec.get("step") != step_id:
+            continue
+        if rec.get("event") == "ESCALATED":
             n += 1
+        elif rec.get("event") == "PLAN_AMEND":
+            n = 0
     return n
+
+
+def escalated_step() -> str | None:
+    """答えを待つ ESCALATION.md のステップ。無ければ None。見出しから読む。"""
+    try:
+        first = ESCALATION.read_text(encoding="utf-8").splitlines()[:1]
+    except OSError:
+        return None
+    match = re.fullmatch(r"# ESCALATION: step (\S+)", first[0].strip()) if first else None
+    return match.group(1) if match else None
 
 
 def escalate(step: dict, halt: Halt, attempt: int, run_: TestRun | None) -> None:
@@ -3152,7 +3332,8 @@ def escalate(step: dict, halt: Halt, attempt: int, run_: TestRun | None) -> None
         constraint = f"""- This is escalation {n} of at most {cap} for this step, so **(a) is no
   longer available**. Only (b) rewriting the acceptance criteria, or (c)
   rebuilding from further upstream -- and both of those are the human's
-  decision, not the planner's (RUNNER_SPEC 6-2).
+  decision, not the planner's (RUNNER_SPEC 6-2). The human makes it with
+  `loop plan amend {step["id"]} <tasks.json>`.
 - If (c) is chosen, name every green step that has to be discarded."""
     else:
         constraint = f"""- The acceptance criteria for this step must NOT be weakened.
@@ -3250,6 +3431,24 @@ def declared_name(line: str) -> str:
 # 数えない。英語の単語と見分けがつかず、"is true for every" のような形容が通る。
 CONCRETE = re.compile(r"(?<![\w.])\d+(?:\.\d+)?(?!\w)|'[^']*'|\"[^\"]*\"|\b[A-Z]\w*(?:Error|Exception)\b"
                       r"|\[\]|\{\}|\(\)|\b(?:True|False|None)\b")
+
+# L16: 反射でコードの形だけを確かめる条件。スタブは契約どおりの型とメンバーを持つ
+# ので、型の名前、基底型、メソッドの有無はスタブの時点で通り、R4 が必ず止める。
+# 取り込んだ Promete のプロジェクトで、`given: typeof(Program), typeof(MainScene)` と
+# `then: has a static method named 'Main'; base type whose Name is 'Scene'` の条件が
+# R4 で止まり、人が2回計画から消した。前提が反射で、かつ結果が形を主張するときだけ
+# 落とす。片方だけなら、振る舞いを確かめる条件かもしれない。
+REFLECTION = re.compile(
+    r"\btypeof\s*\(|\breflect(?:ion|ing|ed)?\b|\bGetType\s*\(|\bAssembly\b"
+    r"|\.(?:GetMethods?|GetPropert(?:y|ies)|GetFields?|GetMembers?|GetInterfaces|BaseType"
+    r"|IsSubclassOf|IsAssignableFrom|EntryPoint)\b|\binspect\.|\bhasattr\s*\(",
+    re.IGNORECASE)
+SHAPE = re.compile(
+    r"\bhas (?:an? |the )?(?:public |static |private |protected |instance )*"
+    r"(?:method|property|field|member|constructor|attribute)s?\b"
+    r"|\bbase ?type\b|\bderives? from\b|\binherits?\b|\bsubclass\b|\bimplements?\b"
+    r"|\bEntryPoint\b|\b(?:type )?name(?:d| is)\b|\bis (?:a |an )?(?:public|static|sealed|abstract|const)\b",
+    re.IGNORECASE)
 
 CASES = {"normal", "boundary", "error"}
 REQUIRED_KEYS = {
@@ -3505,6 +3704,14 @@ def validate_plan(tasks: dict) -> list[str]:
                     problems.append(
                         f"L8: step {sid} has review_gate false but the [{a['case']}] criterion "
                         f"states no concrete value")
+
+        # L16 -- スタブが必ず満たす条件は、計画の段階で拒む
+        for a in s["acceptance"]:
+            if REFLECTION.search(a["given"]) and SHAPE.search(a["then"]):
+                problems.append(
+                    f"L16: step {sid}: the [{a['case']}] criterion checks the shape of the "
+                    f"code through reflection; a stub already has that shape, so its test "
+                    f"passes before anything is implemented (R4). Check what the code does")
 
     # L4 -- 計画全体を通して、ファイルの持ち主は1つ
     owners: dict[str, str] = {}
@@ -3874,6 +4081,28 @@ do not replace the file.
 """
 
 
+def human_answer_section() -> str:
+    """エスカレーションへの人の答え。無ければ空。"""
+    try:
+        answer = HUMAN_ANSWER.read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+    if not answer:
+        return ""
+    return f"""
+# The human's answer
+The human read why the runner stopped and wrote this. It is a decision you
+do not get to overrule:
+
+{answer}
+
+Follow it with the changes you may make. If it asks for one the runner rejects
+mechanically -- an acceptance entry changed or removed, a step removed -- do
+not attempt it: write `{ESCALATE_NAME}` naming the change, and the human makes
+it with `loop plan amend`.
+"""
+
+
 def brief_plan_revise(step: dict | None, escalation: str, feedback: str = "") -> str:
     spec = SYSTEM_SPEC.read_text(encoding="utf-8") if SYSTEM_SPEC.exists() \
         else "(not written yet)"
@@ -3920,7 +4149,7 @@ the current directory and the runner decides whether to apply them.
 
 # Why the runner stopped
 {escalation}
-
+{human_answer_section()}
 # Steps that are already green
 {", ".join(done) if done else "(none)"}
 
@@ -4082,6 +4311,9 @@ yourself first.
          rejected
     L15  every line of contracts.provides names the module it lives in, and that
          module is one of this step's own files_write
+    L16  no criterion inspects the code by reflection (typeof, GetMethod,
+         BaseType, hasattr, inspect) to check only its shape -- a type's name,
+         base type, or which members it has. The stub already has that shape
     L17  no file appears in files_test of two different steps
 
 # Four things that are not obvious
@@ -5766,9 +5998,17 @@ def promete_facts() -> tuple[str, str]:
     ScenelessRunTests）がヘッドレスで確かめているものだけだ。箱での実測は
     probe-promete が出す。測っていないものは、使えないものとして扱わせる。
     """
+    entries = csharp_entry_files()
+    listing = "\n".join(f"    {path}" for path in entries) or "    (none yet)"
     return ("Promete 2.1.0: the package is here and the code compiles against it. There is "
             "no window and no GPU; tests use Promete's headless backend.",
-            """There is no screen and no GPU here. The code is compiled against Promete, and
+            f"""Files of top-level statements -- the entry, `Program.cs` that builds the app
+and loads the first scene -- are left out of the build. The person keeps them
+working by hand. Left out right now:
+
+{listing}
+
+""" + """There is no screen and no GPU here. The code is compiled against Promete, and
 the tests run on plain .NET 10. Promete has a headless backend for exactly
 this, so a test can do more than call plain C#:
 
@@ -5786,7 +6026,21 @@ plain values -- which key is held, where the pointer is. A test that needs a
 texture, a font, a sound or a real key press fails with an exception rather
 than an assertion, and RED_GATE rejects the step (R5). What is drawn and heard
 is checked by a person afterwards.
-""")
+""" + promete_types_text())
+
+
+def promete_types_text() -> str:
+    """Promete の型の一覧。メンバーはソルバーが参照から引く（library_refs_section）。"""
+    types = library_types()
+    if not types:
+        return ""
+    return f"""
+Promete's public types, by namespace. Use these names; do not invent others.
+The solver looks up their members in {library_refs()}, so a criterion or a
+goal may name a type here without spelling out its members.
+
+{types}
+"""
 
 
 # DXライブラリの主な関数。箱には DXライブラリが無いので、プランナーとソルバーが
@@ -7287,6 +7541,8 @@ def cmd_plan_apply() -> int:
         run(["git", "ls-files", "--",
              str(PLANNER_ESCALATION.relative_to(PROJECT))]).stdout.strip())
     PLANNER_ESCALATION.unlink(missing_ok=True)
+    # 人の答えも、適用された計画に入った。次のエスカレーションには渡さない。
+    HUMAN_ANSWER.unlink(missing_ok=True)
 
     ledger("PLAN_APPLY", files=applied)
     # 人を待っていた批評は、適用した計画には効かない。直せる印を外す。
@@ -7312,6 +7568,76 @@ def cmd_plan_apply() -> int:
     for entry in PLANNER_OUT.iterdir():
         entry.unlink()
     print("applied: " + ", ".join(applied))
+    return 0
+
+
+def cmd_plan_amend(step_id: str) -> int:
+    """人が書き換えた計画を取り込み、そのステップを最後の緑からやり直せるようにする。
+
+    受け入れ条件の書き換え (b) と上流からの作り直し (c) は人の権限で、プランナーの
+    経路（P1、P2）では拒まれる。人は plan/ に書けないので、`loop plan amend` が
+    human/in に置いた tasks.json を読む。リンタは同じものを通す。
+
+    計画だけをコミットしてから reset する。順を逆にすると、`git reset --hard` が
+    コミットしていない計画を捨てる（RUNNER_SPEC 6-2）。拒んだときは何も変えず、
+    置かれた計画を残す。
+    """
+    try:
+        tasks = json.loads(AMENDED_PLAN.read_text(encoding="utf-8"))
+    except OSError:
+        print(f"nothing to amend: {AMENDED_PLAN} does not exist", file=sys.stderr)
+        return 1
+    except json.JSONDecodeError as e:
+        print(f"{AMENDED_PLAN} is not JSON: {e}", file=sys.stderr)
+        return 2
+    if not isinstance(tasks, dict):
+        print(f"{AMENDED_PLAN} is not a plan", file=sys.stderr)
+        return 2
+    steps = {s.get("id"): s for s in tasks.get("steps") or [] if isinstance(s, dict)}
+    problems = [] if step_id in steps else [f"no step {step_id} in the amended plan"]
+    try:
+        load_settings(tasks)
+    except SystemExit as e:
+        problems.append(str(e))
+    problems += validate_plan(tasks) if not problems else []
+    if problems:
+        for problem in problems:
+            print(problem, file=sys.stderr)
+        ledger("PLAN_AMEND_REJECT", step=step_id, violations=problems)
+        print(f"\namendment rejected: {len(problems)} violation(s); "
+              f"{AMENDED_PLAN} left as it is", file=sys.stderr)
+        return 2
+
+    # 緑のステップを書き換えても、台帳の GREEN は残り、走り直さない。それは (c) で、
+    # 捨てる緑まで戻すのは人の仕事だ。拒まずに、何が走り直さないかを伝える。
+    before = {s["id"]: s for s in
+              json.loads((PLAN / "tasks.json").read_text(encoding="utf-8"))["steps"]}
+    stale = sorted(sid for sid in green_steps() & set(steps)
+                   if sid != step_id and canon(steps[sid]) != canon(before.get(sid)))
+
+    tasks_path = PLAN / "tasks.json"
+    tasks_path.write_text(AMENDED_PLAN.read_text(encoding="utf-8"), encoding="utf-8")
+    tasks_path.chmod(0o644)
+    paths = [tasks_path, LEDGER]
+    # 計画を直したことが、どちらのエスカレーションへの答えにもなる。
+    for answered in (ESCALATION, PLANNER_ESCALATION):
+        if run(["git", "ls-files", "--", str(answered.relative_to(PROJECT))]).stdout.strip():
+            paths.append(answered)
+        answered.unlink(missing_ok=True)
+    HUMAN_ANSWER.unlink(missing_ok=True)
+    AMENDED_PLAN.unlink(missing_ok=True)
+
+    ledger("PLAN_AMEND", step=step_id, **({"green_changed": stale} if stale else {}))
+    relative = [str(p.relative_to(PROJECT)) for p in paths]
+    run(["git", "add", "--"] + relative, check=True)
+    run(["git", "commit", "-q", "-m", f"plan: the human amended step {step_id}", "--"]
+        + relative, check=True)
+    cmd_reset(step_id)
+    publish("the amended plan")
+    if stale:
+        print(f"warning: green step(s) {', '.join(stale)} changed but stay green; "
+              "they do not run again", file=sys.stderr)
+    print(f"amended: step {step_id} runs again from the last green")
     return 0
 
 
@@ -7800,6 +8126,8 @@ def run_step(step_id: str, unvalidated: bool = False) -> int:
         return 0
 
     except Halt as halt:
+        # テストやビルドの出力に、箱が書き込みを拒んだ跡があれば、計画の問題ではない。
+        check_infra(halt.phase, f"{halt.reason}\n{halt.detail}")
         escalate(step, halt, attempt, last_run)
         return 2
 
@@ -7818,6 +8146,7 @@ CAP_REACHED = "the escalation cap for this step is spent (RUNNER_SPEC 6-2)"
 PLAN_REFUSED = "the planner's proposal was refused"
 PLANNER_ASKED = "the planner handed the decision to you"
 BUDGET_SPENT = "the wall-clock budget is spent"
+INFRA_REFUSED = "the sandbox refused a write"
 
 
 def cmd_run_all(unvalidated: bool = False, budget_minutes: int = 0) -> int:
@@ -7846,6 +8175,30 @@ def cmd_run_all(unvalidated: bool = False, budget_minutes: int = 0) -> int:
     ledger("RUN_ALL_START", budget_minutes=budget_minutes or "none",
            escalation_cap=LIMITS["escalations"])
 
+    def revise(step_id: str) -> int | None:
+        """プランナーに答えさせ、適用してやり直せる木にする。止めるなら終了コード。"""
+        if cmd_plan_propose(step_id) != 0:
+            return stop(f"the planner produced nothing for {step_id}", 2)
+        applied = cmd_plan_apply()
+        if applied == 3:
+            return stop(f"{PLANNER_ASKED} on {step_id}", 3)
+        if applied != 0:
+            return stop(f"{PLAN_REFUSED} for {step_id}; {PLANNER_OUT} has it", 2)
+        # やり直す前に最後の緑へ戻す。次の試行が、落ちたファイルを継がずに
+        # きれいな木から始まるようにだ。改訂した計画はこれで消えない。
+        # `plan apply` がコミットしたので、HEAD の一部になっている。
+        cmd_reset(step_id)
+        return None
+
+    # 止まったまま人が答えたエスカレーションには、ステップを走らせ直す前に
+    # プランナーを通して答える。上限を使い切っていても通す。上限が止めるのは
+    # プランナーだけの判断で、これは人の判断だ。
+    waiting = escalated_step()
+    if waiting and HUMAN_ANSWER.exists():
+        code = revise(waiting)
+        if code is not None:
+            return code
+
     while True:
         # 毎周、計画を読み直す。前の周で適用された提案が、これから走るステップを
         # 書き換え、その後にステップを足しているかもしれない。
@@ -7868,8 +8221,12 @@ def cmd_run_all(unvalidated: bool = False, budget_minutes: int = 0) -> int:
             return stop(f"{BUDGET_SPENT}; {len(remaining)} step(s) left, next is {step_id}", 2)
 
         print(f"\n=== {step_id} ({len(done)} done, {len(remaining)} to go) ===")
-        if run_step(step_id, unvalidated=unvalidated) == 0:
-            continue
+        try:
+            if run_step(step_id, unvalidated=unvalidated) == 0:
+                continue
+        except InfraBroken as broken:
+            print(f"INFRA [{broken.phase}] {broken.evidence}", file=sys.stderr)
+            return stop(f"{INFRA_REFUSED} in {step_id}; nothing was escalated", 6)
 
         # ステップがエスカレーションした。run_step はすでに ESCALATION.md を書いた。
         spent = escalation_count(step_id)
@@ -7879,19 +8236,9 @@ def cmd_run_all(unvalidated: bool = False, budget_minutes: int = 0) -> int:
         if out_of_budget():
             return stop(f"{BUDGET_SPENT}; {step_id} is escalated and unanswered", 2)
 
-        if cmd_plan_propose(step_id) != 0:
-            return stop(f"the planner produced nothing for {step_id}", 2)
-
-        applied = cmd_plan_apply()
-        if applied == 3:
-            return stop(f"{PLANNER_ASKED} on {step_id}", 3)
-        if applied != 0:
-            return stop(f"{PLAN_REFUSED} for {step_id}; {PLANNER_OUT} has it", 2)
-
-        # やり直す前に最後の緑へ戻す。次の試行が、落ちたファイルを継がずに
-        # きれいな木から始まるようにだ。改訂した計画はこれで消えない。
-        # `plan apply` がコミットしたので、HEAD の一部になっている。
-        cmd_reset(step_id)
+        code = revise(step_id)
+        if code is not None:
+            return code
 
 
 def cmd_validate() -> int:
@@ -8038,6 +8385,10 @@ def main() -> int:
                              help="the step that halted; named in the brief")
     plan_sub.add_parser("show", help="print the pending proposal without applying it")
     plan_sub.add_parser("apply", help="check the pending proposal and apply it if it passes")
+    amend_cmd = plan_sub.add_parser(
+        "amend", help=f"take the plan the human rewrote ({AMENDED_PLAN}), commit it, "
+                      "and reset the step so it runs again")
+    amend_cmd.add_argument("step_id", help="the step the amendment is for")
 
     # クリティック。`plan apply` の一手順ではなく別の動詞にする。プランナーの
     # 経路を3つの動詞にしたのと同じ理由で、お金を使い、意見に払う前に計画を
@@ -8089,6 +8440,8 @@ def main() -> int:
                 return cmd_plan_refine(args.mode or list(CRITIQUE_MODES), resume=args.resume)
             if args.plan_cmd == "show":
                 return cmd_plan_show()
+            if args.plan_cmd == "amend":
+                return cmd_plan_amend(args.step_id)
             return cmd_plan_apply()
         if args.cmd == "critique":
             return cmd_critique(args.mode or list(CRITIQUE_MODES))
@@ -8115,6 +8468,13 @@ def main() -> int:
               f"`reset <step-id>` first, then run the same command again.",
               file=sys.stderr)
         return 5
+    except InfraBroken as broken:
+        # エスカレーションはしていない。ソルバーにも計画にも直せず、上限を使わせない。
+        print(f"INFRA [{broken.phase}] the sandbox refused a write. Nothing was escalated.\n"
+              f"  {broken.evidence}\n"
+              f"Fix the modes, then run `reset <step-id>` and the same command again.",
+              file=sys.stderr)
+        return 6
     except FileNotFoundError as missing:
         # ほぼ必ず、まだ計画の無い新しいプロジェクトだ。tasks.json についての
         # トレースバックを出さず、そう言う。

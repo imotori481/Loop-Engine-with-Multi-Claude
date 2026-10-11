@@ -103,10 +103,25 @@ cat > "$TOOLS/nuget.config" <<EOF
 </configuration>
 EOF
 
+# ---- ライブラリの参照 -------------------------------------------------------
+# プランナーとソルバーが Promete の型とメンバーを実物から知るための索引。フィードの
+# パッケージの XML ドキュメントから作る（loop_refs.py）。版が変わったときだけ作り直す。
+REFS=/srv/loop/refs
+install -d -o root -g root -m 755 "$REFS"
+if [ "$(cat "$REFS/promete/.version" 2>/dev/null)" != "$PROMETE_VERSION" ]; then
+  pkg="$(find "$FEED" -maxdepth 1 -iname "promete.$PROMETE_VERSION.nupkg" | head -n 1)"
+  [ -n "$pkg" ] || { echo "36-dotnet: promete.$PROMETE_VERSION.nupkg がフィードに無い" >&2; exit 1; }
+  rm -rf "$REFS/promete.new"
+  python3 loop_refs.py "$pkg" Promete.xml "$REFS/promete.new"
+  echo "$PROMETE_VERSION" > "$REFS/promete.new/.version"
+  rm -rf "$REFS/promete"
+  mv "$REFS/promete.new" "$REFS/promete"
+fi
+
 # ---- 凍結 ------------------------------------------------------------------
-# フィードと設定は root のもの。runner も含めて誰も書けない。
-chown -R root:root "$FEED" "$TOOLS/nuget.config"
-chmod -R a+rX,go-w "$FEED" "$TOOLS/nuget.config"
+# フィードと設定と参照は root のもの。runner も含めて誰も書けない。参照は誰でも読める。
+chown -R root:root "$FEED" "$TOOLS/nuget.config" "$REFS"
+chmod -R a+rX,go-w "$FEED" "$TOOLS/nuget.config" "$REFS"
 
 # ランナーが csproj を書き、ビルドするところ。中身はコンパイルしたコードと
 # テストなので、runner だけが入れる。planner と critic に見えてはならない
@@ -122,6 +137,12 @@ for who in solver planner critic; do
   id -u "$who" >/dev/null 2>&1 || continue
   if sudo -u "$who" test -w "$FEED"; then
     echo "FAIL: $who should NOT be able to: test -w $FEED"; fail=1
+  fi
+  if ! sudo -u "$who" test -r "$REFS/promete/MEMBERS.txt"; then
+    echo "FAIL: $who should be able to: test -r $REFS/promete/MEMBERS.txt"; fail=1
+  fi
+  if sudo -u "$who" test -w "$REFS/promete"; then
+    echo "FAIL: $who should NOT be able to: test -w $REFS/promete"; fail=1
   fi
   if sudo -u "$who" ls "$BUILD" >/dev/null 2>&1; then
     echo "FAIL: $who should NOT be able to: ls $BUILD"; fail=1

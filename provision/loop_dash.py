@@ -38,6 +38,8 @@ BRANCH = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,199}")
 # やり直すステップの ID。ランナーは凍結のマニフェストのファイル名に使うので、/ は通さない。
 STEP = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 MAX_REQUIREMENTS = 200_000
+# エスカレーションへの答え。ダッシュボードの欄は 4000 字までだが、箱の側でも絞る。
+MAX_ANSWER = 20_000
 KEYS = {"model": "LOOP_MODEL", "effort": "LOOP_EFFORT"}
 
 
@@ -128,6 +130,16 @@ def parse(request: object, work: str) -> list[str]:
         with open(os.path.join(work, "requirements.md"), "w", encoding="utf-8") as handle:
             handle.write(text)
         return ["go", language, framework]
+    if action == "answer":
+        # 答えの本文も要件と同じく作業ディレクトリに書き、行には載せない。
+        text = request.get("text")
+        if not isinstance(text, str) or not text.strip():
+            raise Refused("答えが空")
+        if len(text) > MAX_ANSWER:
+            raise Refused(f"答えが長すぎる。{MAX_ANSWER} 字まで")
+        with open(os.path.join(work, "answer.md"), "w", encoding="utf-8") as handle:
+            handle.write(text.strip() + "\n")
+        return ["answer"]
     raise Refused(f"知らない操作: {action!r}")
 
 

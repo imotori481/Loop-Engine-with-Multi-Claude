@@ -80,6 +80,9 @@ class TheProjectsTheRunnerWrites(Promete):
         # テストはコードを通して Promete を受け取る。2つの版が食い違う道を作らない。
         self.assertNotIn('Include="Promete"', tests)
         self.assertIn("<LangVersion>14.0</LangVersion>", code)
+        # ブリーフはコードがライブラリだと伝えている（CSHARP_LIBRARY_NOTE）。
+        self.assertIn("<AssemblyName>LoopCode</AssemblyName>", code)
+        self.assertNotIn("OutputType", code)
 
     def test_imported_code_compiles_with_the_settings_promete_projects_use(self):
         code = self.projects("promete")["dotnet/build/code/Code.csproj"]
@@ -95,6 +98,63 @@ class TheProjectsTheRunnerWrites(Promete):
                       unity["dotnet/build/tests/Tests.csproj"])
         self.assertNotIn("PackageReference Include=\"Promete\"",
                          unity["dotnet/build/code/Code.csproj"])
+
+
+PROGRAM_CS = """using Promete;
+using Game.Scenes;
+
+var app = PrometeApp.Create()
+    .Use<Keyboard>()
+    .BuildWithOpenGLDesktop();
+return app.Run<MainScene>();
+"""
+
+
+class TheEntryIsLeftOutOfTheBuild(Promete):
+    """取り込んだ Promete のプロジェクトの Program.cs はトップレベル文で、ライブラリとして
+    組むとコンパイルできない（CS8805）。ビルド全体が落ち、どのテストも走らない。"""
+
+    def setUp(self):
+        super().setUp()
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.root = Path(temp.name)
+        (self.root / "src" / "Logic").mkdir(parents=True)
+        (self.root / "src" / "Program.cs").write_text(PROGRAM_CS, encoding="utf-8")
+        (self.root / "src" / "Logic" / "Board.cs").write_text(EXISTING_CS, encoding="utf-8")
+        # 最上位にあっても文ではないもの。どれもライブラリとしてコンパイルできる。
+        (self.root / "src" / "Logic" / "Events.cs").write_text(
+            "namespace Game.Logic;\n\npublic delegate void Scored(int points);\n"
+            "public sealed record Card(int Rank);\npublic interface IMarker;\n",
+            encoding="utf-8")
+        (self.root / "src" / "AssemblyInfo.cs").write_text(
+            "using System.Runtime.CompilerServices;\n\n"
+            "[assembly: InternalsVisibleTo(\"LoopTests\")]\n", encoding="utf-8")
+        # Main を持つクラスの Program.cs も、ライブラリとしてコンパイルできる。
+        (self.root / "src" / "Logic" / "Launcher.cs").write_text(
+            "public class Launcher\n{\n    public static void Main(string[] args) { }\n}\n",
+            encoding="utf-8")
+        for p in (mock.patch.object(loop, "PROJECT", self.root),
+                  mock.patch.object(loop, "SRC", self.root / "src")):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def test_only_the_file_of_top_level_statements_is_found(self):
+        self.assertEqual(loop.csharp_entry_files(), ["src/Program.cs"])
+
+    def test_the_csproj_removes_it(self):
+        temp = self.root / "dotnet"
+        (temp / "feed").mkdir(parents=True)
+        (temp / "feed" / ".versions").write_text(FEED_VERSIONS, encoding="utf-8")
+        with mock.patch.object(loop, "DOTNET_TOOLS", temp), \
+             mock.patch.object(loop, "DOTNET_BUILD", temp / "build"):
+            code = loop.dotnet_projects()[temp / "build" / "code" / "Code.csproj"]
+        self.assertIn(f'<Compile Remove="{self.root / "src" / "Program.cs"}" />', code)
+        self.assertNotIn("Board.cs", code)
+
+    def test_the_planner_is_told_which_files_are_left_out(self):
+        _, text = loop.promete_facts()
+        self.assertIn("    src/Program.cs", text)
 
 
 class DotnetRunsWhereTheGlobalJsonIs(Promete):
@@ -160,8 +220,61 @@ class WhatThePlannerIsTold(Promete):
         self.assertIn("treat as unavailable", facts)
 
     def test_the_layout_names_the_version_2_api(self):
-        self.assertIn("version 1 API", loop.LANGUAGE["layout_note"])
-        self.assertNotIn("C# 9 is the ceiling", loop.LANGUAGE["layout_note"])
+        note = loop.LANGUAGE["layout_note"]
+        self.assertIn("older examples show version 1", note)
+        self.assertNotIn("C# 9 is the ceiling", note)
+
+    def test_the_window_and_the_mouse_are_the_2_1_0_api(self):
+        # 2.1.0 の IWindow.Size と MouseButton.IsButtonDown。窓を禁じると大きさが渡らず、
+        # ボタンを知らないとソルバーは反射で名前を当て推量する。
+        note = loop.LANGUAGE["layout_note"]
+        self.assertIn("App.Window.Size", note)
+        self.assertIn("mouse[MouseButtonType.Left]", note)
+        self.assertNotIn("do not\nuse them", note)
+
+    def test_the_entry_cannot_be_tested(self):
+        # ランナーはコードをライブラリとして組む。入口を確かめる条件はビルドで通らない。
+        for framework in ("promete", "unity"):
+            note = loop.compose_language("csharp", framework)["layout_note"]
+            self.assertIn("`Assembly.EntryPoint` is always null", note)
+
+
+class TheLibraryReference(Promete):
+    """ソルバーはマウスのボタンの名前を知らず、反射で当て推量した。プランナーには型の
+    名前を、ソルバーには置き場を渡し、メンバーは実物から引かせる。"""
+
+    def setUp(self):
+        super().setUp()
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        refs = Path(temp.name)
+        (refs / "promete").mkdir()
+        (refs / "promete" / "TYPES.txt").write_text(
+            "Promete.Input.Mouse  マウス\nPromete.Input.MouseButton  ボタン\n"
+            "Promete.Scene  シーン\n", encoding="utf-8")
+        p = mock.patch.object(loop, "REFS", refs)
+        p.start()
+        self.addCleanup(p.stop)
+        self.refs = refs
+
+    def test_the_planner_gets_the_type_names_by_namespace(self):
+        self.assertEqual(loop.library_types(),
+                         "    Promete: Scene\n    Promete.Input: Mouse, MouseButton")
+        _, text = loop.promete_facts()
+        self.assertIn("    Promete.Input: Mouse, MouseButton", text)
+
+    def test_the_solver_is_told_where_to_look(self):
+        step = {"id": "S1", "depends_on": [],
+                "contracts": {"provides": [], "requires": [], "invariants": []}}
+        with mock.patch.object(loop, "existing_requirements", return_value=[]):
+            brief = loop.solver_material(step, "CONTEXT")
+        self.assertIn(f"listed in {self.refs / 'promete'}", brief)
+        self.assertIn("Grep `MEMBERS.txt`", brief)
+
+    def test_a_framework_without_a_reference_says_nothing(self):
+        with mock.patch.dict(loop.LANGUAGE, loop.compose_language("csharp", "unity"), clear=True):
+            self.assertIsNone(loop.library_refs())
+            self.assertEqual(loop.library_refs_section(), "")
 
 
 class ChoosingPromete(unittest.TestCase):

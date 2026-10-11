@@ -107,6 +107,13 @@ class Request(unittest.TestCase):
         for step in ("", "-x", "../S1", "S1/x", "a b", "a\nb", "$(id)", None, 12):
             self.refused({"action": "reset", "step": step})
 
+    def test_an_answer_goes_to_a_file_and_never_into_a_line(self):
+        text = "S2 の時間の条件を外す\n$(rm -rf /)"
+        self.assertEqual(self.parse({"action": "answer", "text": text}), ["answer"])
+        self.assertEqual((self.work / "answer.md").read_text(encoding="utf-8"), text + "\n")
+        for text in ("", "  \n", None, 5, "x" * (loop_dash.MAX_ANSWER + 1)):
+            self.refused({"action": "answer", "text": text})
+
     def test_anything_else_is_refused(self):
         self.refused([])
         self.refused({"action": "raw"})

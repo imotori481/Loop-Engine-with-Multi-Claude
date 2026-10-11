@@ -80,9 +80,18 @@ PowerShell なら `.\host\loop.cmd <args>`、Git Bash なら `./host/loop.cmd <a
 | クリティックの指摘を見る | `loop findings` |
 | 残った指摘を1件書き換える（番号は0から） | `echo '{"mode": "<mode>", "index": <n>, "title": "<題>", "evidence": "<根拠>"}' \| loop findings set` |
 | エスカレーションへの改訂案をプランナーに書かせる | `loop raw plan propose --step <step>` |
+| 受け入れ条件を書き換えた計画を入れ、ステップを最後の緑に戻す | `loop plan amend <step> <tasks.json>` |
 | 計画を批評だけする | `loop raw critique` |
 
 `loop raw` は `loop.py` をそのまま runner として前面で呼ぶ。動詞の一覧は `loop raw --help`。
+
+受け入れ条件の書き換えと上流からの作り直しは人の判断で、プランナーの提案では拒まれる。
+写しの `plan/tasks.json` を書き換えて `loop plan amend` に渡す。ホストで打つときは、ホストの
+ファイルのパスをそのまま渡せる。リンタに通らなければ何も変わらない。通れば計画をコミットし、
+そのステップを最後の緑に戻す。次は `loop continue`。
+
+ダッシュボードでエスカレーションに「回答を記録」すると、回答は箱に届く。次の `loop continue` は
+ステップを走らせ直す前に、その回答をプランナーに渡して計画を直させる。
 
 ## プロジェクトを切り替える（ホストでも箱でも）
 

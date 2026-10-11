@@ -220,6 +220,49 @@ class TheExpectedResultIsAValue(unittest.TestCase):
                 self.assertIn("L8", problems[0])
 
 
+class AStubCannotFailIt(unittest.TestCase):
+    """L16。反射でコードの形だけを確かめる条件は、スタブの時点で通り R4 で止まる。
+
+    取り込んだ Promete のプロジェクトの S15 の条件。人が計画から2回消した。"""
+
+    GIVEN = ("reflection on the built game assembly: typeof(Program), typeof(MainScene), "
+             "typeof(MenuScene), typeof(GameScene); ScreenConfig.Width and ScreenConfig.Height")
+    THEN = ("typeof(Program) has a static method named 'Main'; each of the three scene types "
+            "has a base type (walking BaseType) whose Name is 'Scene'; Width 1280 and Height 720")
+
+    def plan_with(self, given: str, then: str):
+        first = step("S1", "skeleton", ["def new_game() -> GameState  # in incgame.engine"])
+        first["files_write"] = ["src/incgame/engine.py"]
+        first["acceptance"][1]["given"] = given
+        first["acceptance"][1]["then"] = then
+        second = step("S2", "integration", ["def save(s: GameState) -> dict[str, float]  -- in incgame.io"],
+                      requires=["def new_game() -> GameState  # in incgame.engine"], depends=["S1"])
+        second["files_write"] = ["src/incgame/io.py"]
+        return validate_plan({"version": 1, "steps": [first, second]})
+
+    def test_the_criterion_that_stopped_the_run_is_rejected(self) -> None:
+        problems = self.plan_with(self.GIVEN, self.THEN)
+        self.assertEqual(len(problems), 1)
+        self.assertIn("L16: step S1: the [boundary] criterion", problems[0])
+
+    def test_other_reflection_and_shape_claims_are_rejected(self) -> None:
+        for given, then in (
+                ("typeof(Board).GetMethod(\"Score\")", "is not null and is static 'Score'"),
+                ("hasattr(engine, 'tick')", "engine has a method named 'tick'"),
+                ("inspect.signature(Board)", "Board inherits from Model, 1 parameter")):
+            with self.subTest(given=given):
+                self.assertTrue(any(p.startswith("L16") for p in self.plan_with(given, then)))
+
+    def test_reflection_that_checks_behaviour_is_left_alone(self) -> None:
+        # 前提が反射でも、結果が振る舞いなら形の主張ではない。
+        self.assertEqual(self.plan_with("typeof(Board) via Activator.CreateInstance; Score(3)",
+                                        "returns 9"), [])
+
+    def test_a_shape_word_without_reflection_is_left_alone(self) -> None:
+        self.assertEqual(self.plan_with("a player named 'Ann' with 3 cards",
+                                        "the hand is named 'Ann' and holds 3 cards"), [])
+
+
 class TheCodeAlreadyThereCanBeRequired(unittest.TestCase):
     """L3 は依存先の provides のほかに、取り込んだリポジトリの宣言も認める。
 

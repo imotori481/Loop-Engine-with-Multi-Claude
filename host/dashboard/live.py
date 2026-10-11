@@ -102,6 +102,11 @@ class Live:
         """`loop raw reset <ステップ>`。止まったステップの作業ツリーを最後の緑に戻す。"""
         return self._dash({"action": "reset", "step": step})
 
+    def answer(self, text: str) -> str:
+        """エスカレーションへの答えを箱の human/in/ANSWER.md に置く。次の plan propose が
+        プランナーに渡す。"""
+        return self._dash({"action": "answer", "text": text})
+
     def start_loop(self, requirements: str, language: str, framework: str = "") -> str:
         """`loop go`。要件の本文は箱の一時ディレクトリに書かれ、そこから置かれる。
         持ち込む先が空なら、箱が言語の既定を選ぶ。"""

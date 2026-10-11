@@ -21,6 +21,9 @@ CRITIQUE=$LOOP/human/in/CRITIQUE.json
 # plan refine が人を待っているあいだの控え。改訂の途中で止まると out/ が空のこともある。
 REFINE_STATE=$LOOP/project/.runner/refine.json
 PLAN=$LOOP/project/plan
+# エスカレーションへの人の答えと、人が書き換えた計画。loop.py の HUMAN_ANSWER と AMENDED_PLAN。
+ANSWER=$LOOP/human/in/ANSWER.md
+AMENDED=$LOOP/human/in/tasks.json
 ENGINE="${LOOP_ENGINE:-/opt/loop-engine}"
 PROJECT_SH="$ENGINE/provision/loop-project.sh"
 DASH_PY="$ENGINE/provision/loop_dash.py"
@@ -100,6 +103,7 @@ run_all() {
   case "$rc" in
     0) finish 0 "全ステップが緑になった" ;;
     5) finish 5 "利用枠が尽きた。枠が戻ったら 'loop continue'。途中のステップがあれば先に 'loop raw reset <ステップ>'" ;;
+    6) finish 6 "箱が書き込みを拒んだ。エスカレーションにはしていない。上の INFRA の行のパスの権限を直し、'loop raw reset <ステップ>' のあと 'loop continue'" ;;
     *) finish "$rc" "run --all が止まった（終了コード $rc）。'loop status' を見る" ;;
   esac
 }
@@ -277,7 +281,33 @@ cmd_dash() {
     reset)    reset_step "${req[1]}" ;;
     init)     init_project "${req[1]}" "${req[2]}" "${req[3]}" "${req[4]}" "$admin" ;;
     remove)   remove_project "${req[1]}" "$admin" ;;
+    answer)   place_answer "$work/answer.md" ;;
     *)        die "知らない操作: $action" ;;
+  esac
+}
+
+# エスカレーションへの人の答えを置く。次の plan propose がプランナーに渡す。root で動く
+# （cmd_dash から呼ぶ）。
+place_answer() {
+  as_runner test -f "$PLAN/ESCALATION.md" || as_runner test -f "$PLAN/PLANNER_ESCALATION.md" \
+    || die "答えを待つエスカレーションが無い"
+  install -o root -g humanw -m 644 "$1" "$ANSWER"
+  echo "答えを置いた。'loop continue' でプランナーに渡る"
+}
+
+# 人が書き換えた計画を取り込み、そのステップを最後の緑に戻す。受け入れ条件の書き換えと
+# 上流からの作り直しは人の権限で、プランナーの経路では拒まれる。
+cmd_plan() {
+  case "${1:-}" in
+    amend)
+      [ $# -eq 3 ] || die "使い方: loop plan amend <ステップ> <tasks.json>"
+      [ -f "$3" ] || die "ファイルが無い: $3"
+      running && die "走っている間は直せない。先に 'loop stop'"
+      switching && die "プロジェクトを切り替えている。終わるのを待つ"
+      sudo install -o root -g humanw -m 644 "$3" "$AMENDED"
+      as_runner python3 -u "$LOOP/runner/loop.py" plan amend "$2"
+      echo "次は 'loop continue'" ;;
+    *) die "使い方: loop plan amend <ステップ> <tasks.json>" ;;
   esac
 }
 
@@ -346,6 +376,9 @@ usage() {
   findings          クリティックの指摘を出す
   findings set      指摘1件の title と evidence を書き換える。標準入力に
                     {"mode", "index", "title", "evidence"} の JSON を渡す
+  plan amend <ステップ> <tasks.json>
+                    書き換えた計画をリンタに通して取り込み、そのステップを最後の緑に
+                    戻す。受け入れ条件の書き換えと作り直しはこれで入れる
   log               走行ログを追う。Ctrl-C で抜けても走行は続く
   stop              走行を止める
   project <引数>    プロジェクトの一覧、切り替え、削除。'loop project' で使い方を出す
@@ -364,6 +397,7 @@ case "${1:-}" in
   status)   cmd_status ;;
   now)      cmd_now ;;
   findings) shift; cmd_findings "$@" ;;
+  plan)     shift; cmd_plan "$@" ;;
   log)      cmd_log ;;
   stop)     cmd_stop ;;
   project)

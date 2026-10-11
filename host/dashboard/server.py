@@ -56,6 +56,20 @@ def send_pull_request(state: DashboardState, pulls: PullRequests | None) -> dict
     return state.record_pull_request(approval["request_id"], outcome)
 
 
+def send_answer(live: Live | None, decision: dict) -> dict:
+    """エスカレーションへの回答を箱に送る。送れたかを返す。
+
+    送れなくても記録は取り消さない。人が決めたことは decisions.jsonl に残り、
+    箱に届いたかは別の事実として画面に返す。
+    """
+    if live is None:
+        return {"error": "live view is not configured"}
+    try:
+        return {"message": live.answer(decision["note"])}
+    except ValueError as error:
+        return {"error": str(error)}
+
+
 def handler_for(state: DashboardState, launchers: Launchers, reach: Reach, token: str,
                 live: Live | None = None, pulls: PullRequests | None = None,
                 mirror: MirrorSync | None = None, imports: ImportJob | None = None):
@@ -168,6 +182,10 @@ def handler_for(state: DashboardState, launchers: Launchers, reach: Reach, token
                     # 来た承認はローカルのものだけだ。
                     if result["kind"] == "review" and result["decision"] == "approve":
                         result = {**result, "pull_request": send_pull_request(state, pulls)}
+                    # エスカレーションへの回答は、次の plan propose のブリーフに載る。
+                    if result["kind"] in ("escalation", "planner") \
+                            and result["decision"] == "respond":
+                        result = {**result, "sent": send_answer(live, result)}
                     self._json(result, HTTPStatus.CREATED)
                     return
                 if path == "/api/pull-request":

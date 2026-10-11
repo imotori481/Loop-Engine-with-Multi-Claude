@@ -121,6 +121,24 @@ class ActOnTheSandbox(LiveView):
         self.assertNotIn("rm -rf", " ".join(run.call_args.args[0]))
 
     @patch("host.dashboard.live.subprocess.run")
+    def test_an_answer_travels_on_stdin_and_never_on_the_command_line(self, run):
+        run.return_value = answered("答えを置いた")
+        self.live.answer("S2 の条件を外す; $(id)")
+        self.assertEqual(self.dash_request(run),
+                         {"action": "answer", "text": "S2 の条件を外す; $(id)"})
+        self.assertNotIn("$(id)", " ".join(run.call_args.args[0]))
+
+    @patch("host.dashboard.live.subprocess.run")
+    def test_an_answer_that_did_not_arrive_is_reported_not_raised(self, run):
+        # 記録は残る。箱に届いたかは別の事実として返す。
+        from host.dashboard.server import send_answer
+        run.return_value = answered(returncode=1, stderr="loop: 答えを待つエスカレーションが無い")
+        self.assertEqual(send_answer(self.live, {"note": "x"}),
+                         {"error": "loop: 答えを待つエスカレーションが無い"})
+        self.assertEqual(send_answer(None, {"note": "x"}),
+                         {"error": "live view is not configured"})
+
+    @patch("host.dashboard.live.subprocess.run")
     def test_switching_removal_and_model_changes_are_requests_too(self, run):
         run.return_value = answered("ok")
         self.live.use_project("game-2")
