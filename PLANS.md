@@ -15,12 +15,11 @@
 
 | 状態 | 作業内容 | 目的 | 実装方法 | 操作ファイル |
 |---|---|---|---|---|
-| 未着手 | C# の計画を箱で走らせる | 要件から緑まで届くことと、出来たコードが Unity に取り込めることを確かめる | 既存のコードの無い新しいプロジェクトで、`requirements/INCREMENTAL_CORE_CSHARP.md`（INCREMENTAL_CORE と同じ題材）を `loop go --language csharp`。Unity の参照は送らず、netstandard2.1 だけでコンパイルする。出来たコードとテストを人が Unity の `Assets/` に置き、コンパイルと EditMode テストを通す | `requirements/INCREMENTAL_CORE_CSHARP.md`、`docs/HANDOFF.md`、`README.md` |
-| 未着手 | thm で既存の C# を書き換える計画を走らせる | Unity のプロジェクトの既存のクラスを書き換え、既存の型を使うステップが緑まで届くことと、Unity でそのまま開けることを確かめる | thm の小さな要件で `loop go --language csharp`。書き換えないメンバーの本文が HEAD と同じであることを `git diff` で確かめ、人が Unity で開いてコンパイルと EditMode テストを通す | `docs/HANDOFF.md`、`README.md` |
-| 未着手 | 既存のファイルを書き換える計画を箱で走らせる | 取り込んだリポジトリで、既存の関数を書き換えるステップと、既存の型を使うステップが緑まで届くことを確かめる | TypeScript。`requirements/local/cart-fixture` のカートを取り込み、`requirements/local/cart-tax.md` で `loop go --language typescript`。書き換えない関数の本文が HEAD と同じであることを `git diff` で、差し込んだスタブが vitest でコンパイルできることを RED_GATE で確かめる | `docs/HANDOFF.md`、`README.md` |
-| 未着手 | C++ の計画を箱で走らせる | 要件から緑まで届くことと、出来たコードが DXライブラリのプロジェクトに取り込めることを確かめる | `37-cpp.sh` と `smoke-cpp` を箱で流し、GoogleTest の junit の `message` の形が `cpp_failure_kind` の読み方と合うかを見る。WinMain だけを持つ DXライブラリのプロジェクトを取り込み、小さな要件で `loop go --language cpp`。`main.cpp` がビルドから外れること、外したファイルとDXライブラリの早見表がブリーフに出ること、範囲外の添字で落ちたときの扱いを確かめる。出来たコードを人が Visual Studio のプロジェクトに足し、ビルドして動かす | `runner/loop.py`、`docs/HANDOFF.md`、`README.md` |
-| 未着手 | C++ のスタブを契約から書く | ソルバーに頼まずにビルドの通るスタブを置く。C++ は1ファイルでも壊れるとテストのプログラム全体がビルドできない | C# の `generate_csharp_stub` に倣い、契約の型の行とメンバー関数の行と自由関数の行からヘッダと `.cpp` を書く。本体は `CPP_STUB_BODY`、データメンバーは `{}` で初期化する | `runner/loop.py`、`runner/tests/test_cpp.py` |
-| 未着手 | C++ の既存コードを扱う | 取り込んだ C++ のプロジェクトで、既存の関数を書き換えるステップと、既存の型を使うステップを扱う | ヘッダから公開の宣言を読んで `existing_contracts` に渡し、スタブが provides の名前のほかを変えていないことを `top_level_units` で確かめる。プリプロセッサの条件とテンプレートの扱いを決める | `runner/loop.py`、`runner/tests/test_cpp.py` |
+| 未着手 | C# のブリーフにライブラリとして組むことを書く | プランナーが、ランナーのビルドでは通らない入口の条件を書かない | プランナーとソルバーのブリーフに、コードは OutputType の無いライブラリ（LoopCode）として組まれ、`Assembly.EntryPoint` は常に null で、入口はテストで確かめられないことを書く | `runner/loop.py`、`runner/tests/test_promete.py` |
+| 未着手 | Promete の窓と入力をブリーフに正しく書く | ソルバーが窓の大きさを窓に渡し、入力を推測で読まない | Promete の `layout_note` から「`IWindow` を使うな」を外し、窓の大きさは `App.Window.Size` で決めること、マウスのボタンは `mouse[MouseButtonType.Left].IsButtonDown` で読むことを書く。ソルバーのブリーフに、ライブラリのメンバーを反射で探さないこと、分からないメンバーは参照で引くか止まることを書く | `runner/loop.py`、`runner/tests/test_promete.py` |
+| 未着手 | 人の判断を計画に届ける | (b) と (c) の判断を、`plan/tasks.json` の手編集なしで計画に入れる | `loop plan amend <ステップ>` を足す。人が書き換えた計画をリンタに通し、計画だけをコミットしてから、そのステップを reset する。ダッシュボードのプランナーへの回答は箱に送り、次の `plan propose` のブリーフに人の判断として渡す | `runner/loop.py`、`provision/bin/loop`、`host/dashboard/state.py`、`docs/RUNNER_SPEC.md` |
+| 未着手 | 形だけの条件をリンタで落とす | スタブでも通る条件を、RED_GATE の R4 ではなく計画の段階で拒む | HANDOFF の L16 の候補を実装する。`given` が反射（`typeof(`、reflection）で、`then` が型の名前、基底型、メソッドの有無、const の値しか主張しない条件を落とす | `runner/loop.py`、`runner/tests/test_linter.py` |
+| 未着手 | 基盤の故障をエスカレーションに数えない | 権限の故障や人による計画の書き換えで、ステップのエスカレーションの上限を使い切らない | solver の返答と止まった理由から、EACCES のような solver の責任でない停止を見分け、ESCALATED とは別の出来事として記録して走行を止める。`plan amend` で計画を直したステップは回数を数え直す。先に RUNNER_SPEC 6-2 の上限の定義を直す | `runner/loop.py`、`docs/RUNNER_SPEC.md` |
 | 未着手 | Promete の組み合わせを箱で確かめる | .NET 10 と Promete 2.1.0 の凍結が通ることと、ヘッドレスのテストで何が動くかを実測し、ブリーフの事実を実測に合わせる | `loop update` で `36-dotnet.sh` を流し、`smoke-dotnet` の2つの組み合わせが通ることを見る。`probe-promete` を流し、結果で `promete_facts` の動くものと使えないものを書き直す。シーンをテストから読むのに `UseScenesFrom` が要るなら、それを `layout_note` に書く | `runner/loop.py`、`provision/bin/probe-promete` |
 | 未着手 | Promete のプロジェクトの入口を扱う | 取り込んだ Promete のプロジェクトの `Program.cs`（トップレベル文）は、ライブラリとしてコンパイルできない | トップレベル文を持つファイルを C++ の `cpp_sources` と同じくビルドから外し、外したファイルをブリーフに並べる。人の手で直す入口として扱う | `runner/loop.py`、`runner/tests/test_promete.py` |
 | 未着手 | ライブラリの参照を箱に置く | プランナーとソルバーが、持ち込む先のライブラリの関数を推測ではなく実物から知る | `/srv/loop/refs/<持ち込む先>/` を読み取り専用で置く。Promete はフィードの `Promete.xml` から型とメンバーと要約の索引を作り、公式プラグインの `references/` を 2.1.0 のコミットで取る。プランナーのブリーフには型の一覧だけを入れ、ソルバーには置き場を教えて Grep と Read で引かせる。DXライブラリは人の手元の `DxLib.h` を送る形にし、早見表を残すか決める | `provision/36-dotnet.sh`、`runner/loop.py`、`provision/40-perms.sh` |
@@ -35,6 +34,8 @@
 
 ## 更新履歴
 
+- 2026/10/11: Promete に持ち込んだプロダクトを人が確かめ、マウスのボタンを反射で推測して読めていなかったことと、ブリーフが `App.Window` を禁じて窓の大きさが渡っていなかったことを見つけた。Promete の窓と入力をブリーフに正しく書く作業を追加
+- 2026/10/10: C# のブリーフにライブラリとして組むことを書く、人の判断を計画に届ける、形だけの条件をリンタで落とす、基盤の故障をエスカレーションに数えない作業を追加
 - 2026/10/08: C# の持ち込む先に Promete 2.1.0 を足すことに決定。箱での確認、入口の扱い、ライブラリの参照を箱に置く作業を追加
 - 2026/10/04: C++ を計画の言語に足し、箱では標準の C++17 のロジックだけを GoogleTest で確かめ、DXライブラリを include するファイルはビルドから外すことに決定。C++ の実走、スタブの生成、既存コードの扱いの作業を追加
 - 2026/09/30: 取り込んだ Unity のプロジェクトの実走で、ソルバーが既存のヘルパーを見つけられずに同じ処理の static 関数を足していたので、ソルバーのツールに Grep と Glob を追加。トークンの削減より成果物の品質を先にとる
