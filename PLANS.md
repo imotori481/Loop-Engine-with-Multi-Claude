@@ -22,7 +22,7 @@
 | 一部完了 | 基盤の故障をエスカレーションに数えない | 権限の故障や人による計画の書き換えで、ステップのエスカレーションの上限を使い切らない | solver の返答と止まった理由から、EACCES のような solver の責任でない停止を見分け、ESCALATED とは別の出来事として記録して走行を止める。`plan amend` で計画を直したステップは回数を数え直す。先に RUNNER_SPEC 6-2 の上限の定義を直す | `runner/loop.py`、`docs/RUNNER_SPEC.md` |
 | 未着手 | Promete の組み合わせを箱で確かめる | .NET 10 と Promete 2.1.0 の凍結が通ることと、ヘッドレスのテストで何が動くかを実測し、ブリーフの事実を実測に合わせる | `loop update` で `36-dotnet.sh` を流し、`smoke-dotnet` の2つの組み合わせが通ることを見る。`probe-promete` を流し、結果で `promete_facts` の動くものと使えないものを書き直す。シーンをテストから読むのに `UseScenesFrom` が要るなら、それを `layout_note` に書く | `runner/loop.py`、`provision/bin/probe-promete` |
 | 一部完了 | Promete のプロジェクトの入口を扱う | 取り込んだ Promete のプロジェクトの `Program.cs`（トップレベル文）は、ライブラリとしてコンパイルできない | トップレベル文を持つファイルを C++ の `cpp_sources` と同じくビルドから外し、外したファイルをブリーフに並べる。人の手で直す入口として扱う | `runner/loop.py`、`runner/tests/test_promete.py` |
-| 一部完了 | ライブラリの参照を箱に置く | プランナーとソルバーが、持ち込む先のライブラリの関数を推測ではなく実物から知る | `/srv/loop/refs/<持ち込む先>/` を読み取り専用で置く。Promete はフィードの `Promete.xml` から型とメンバーと要約の索引を作り、公式プラグインの `references/` を 2.1.0 のコミットで取る。プランナーのブリーフには型の一覧だけを入れ、ソルバーには置き場を教えて Grep と Read で引かせる。DXライブラリは人の手元の `DxLib.h` を送る形にし、早見表を残すか決める | `provision/36-dotnet.sh`、`provision/loop_refs.py`、`provision/bin/solver-claude`、`runner/loop.py`、`provision/40-perms.sh` |
+| 一部完了 | ライブラリの参照を箱に置く | プランナーとソルバーが、持ち込む先のライブラリの関数を推測ではなく実物から知る | `/srv/loop/refs/<持ち込む先>/` を読み取り専用で置く。Promete はフィードの `Promete.xml` から型とメンバーと要約の索引を作り、公式プラグインの `references/` を 2.1.0 のコミットで取る。プランナーのブリーフには型の一覧だけを入れ、ソルバーには置き場を教えて Grep と Read で引かせる。DXライブラリは人の手元の `DxLib.h` を送る形にし、早見表を残すか決める | `provision/36-dotnet.sh`、`provision/loop_refs.py`、`provision/bin/solver-claude`、`provision/bin/loop`、`host/loop.cmd`、`runner/loop.py`、`provision/40-perms.sh` |
 
 ### 着手前に決めること
 
@@ -34,7 +34,7 @@
 
 ## 更新履歴
 
-- 2026/10/12: 箱で確かめる作業を除く7つの作業を一部完了に変更。ライブラリの参照は Promete の XML ドキュメントの索引まで。公式プラグインの `references/` と DXライブラリの `DxLib.h` は残す
+- 2026/10/12: 箱で確かめる作業を除く7つの作業を一部完了に変更。ライブラリの参照は、Promete の XML ドキュメントの索引と、人が `loop refs dxlib` で送る `DxLib.h` の索引まで。DXライブラリの早見表は残す。公式プラグインの `references/` は残す
 - 2026/10/11: Promete に持ち込んだプロダクトを人が確かめ、マウスのボタンを反射で推測して読めていなかったことと、ブリーフが `App.Window` を禁じて窓の大きさが渡っていなかったことを見つけた。Promete の窓と入力をブリーフに正しく書く作業を追加
 - 2026/10/10: C# のブリーフにライブラリとして組むことを書く、人の判断を計画に届ける、形だけの条件をリンタで落とす、基盤の故障をエスカレーションに数えない作業を追加
 - 2026/10/08: C# の持ち込む先に Promete 2.1.0 を足すことに決定。箱での確認、入口の扱い、ライブラリの参照を箱に置く作業を追加

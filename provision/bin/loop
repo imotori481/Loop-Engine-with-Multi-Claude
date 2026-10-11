@@ -295,6 +295,31 @@ place_answer() {
   echo "答えを置いた。'loop continue' でプランナーに渡る"
 }
 
+# 持ち込む先のライブラリの参照を置く。DXライブラリは箱で取れないので、人の手元の DxLib.h を
+# 受け取り、loop_refs.py が引ける形にして /srv/loop/refs/dxlib に置く。root のもので凍結する。
+cmd_refs() {
+  local refs=/srv/loop/refs work
+  case "${1:-}" in
+    dxlib)
+      [ $# -eq 2 ] || die "使い方: loop refs dxlib <DxLib.h>"
+      [ -f "$2" ] || die "ファイルが無い: $2"
+      running && die "走っている間は置き換えられない。先に 'loop stop'"
+      work="$(mktemp -d)"
+      cp "$2" "$work/DxLib.h"
+      sudo install -d -o root -g root -m 755 "$refs"
+      sudo rm -rf "$refs/dxlib.new"
+      sudo python3 "$ENGINE/provision/loop_refs.py" header "$work/DxLib.h" "$refs/dxlib.new" \
+        || { rm -rf "$work"; die "DxLib.h を読めなかった"; }
+      rm -rf "$work"
+      sudo rm -rf "$refs/dxlib"
+      sudo mv "$refs/dxlib.new" "$refs/dxlib"
+      sudo chown -R root:root "$refs/dxlib"
+      sudo chmod -R a+rX,go-w "$refs/dxlib"
+      echo "DxLib.h を $refs/dxlib に置いた。次の呼び出しからソルバーが引く" ;;
+    *) die "使い方: loop refs dxlib <DxLib.h>" ;;
+  esac
+}
+
 # 人が書き換えた計画を取り込み、そのステップを最後の緑に戻す。受け入れ条件の書き換えと
 # 上流からの作り直しは人の権限で、プランナーの経路では拒まれる。
 cmd_plan() {
@@ -379,6 +404,8 @@ usage() {
   plan amend <ステップ> <tasks.json>
                     書き換えた計画をリンタに通して取り込み、そのステップを最後の緑に
                     戻す。受け入れ条件の書き換えと作り直しはこれで入れる
+  refs dxlib <DxLib.h>
+                    DXライブラリのヘッダをソルバーが引ける参照として置く
   log               走行ログを追う。Ctrl-C で抜けても走行は続く
   stop              走行を止める
   project <引数>    プロジェクトの一覧、切り替え、削除。'loop project' で使い方を出す
@@ -398,6 +425,7 @@ case "${1:-}" in
   now)      cmd_now ;;
   findings) shift; cmd_findings "$@" ;;
   plan)     shift; cmd_plan "$@" ;;
+  refs)     shift; cmd_refs "$@" ;;
   log)      cmd_log ;;
   stop)     cmd_stop ;;
   project)

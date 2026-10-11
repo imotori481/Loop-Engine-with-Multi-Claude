@@ -1144,6 +1144,7 @@ Say all of this in CONTEXT.md; the solver has no other way to learn it.""",
         # ビルドから外す（cpp_sources）。DXライブラリを使わない C++ の計画もこの形で
         # 走り、早見表は DXライブラリを使うと分かったときだけ見せる（cpp_facts）。
         "dxlib": {
+            "refs": "dxlib",
             "layout_note": """Every header is `.h` and every source file is `.cpp`, under {SRC}/: the header
 declares (`{SRC}/logic/Board.h`) and the source file of the same name defines
 (`{SRC}/logic/Board.cpp`). Every header starts with `#pragma once`. Include a
@@ -1293,8 +1294,9 @@ def csharp_failure_kind(failure: ET.Element) -> str:
     return first or "<no type>"
 
 
-# 持ち込む先のライブラリの参照。36-dotnet.sh が root で置き、誰でも読めて誰も書けない。
-# TYPES.txt と MEMBERS.txt を1行1件で持つ（provision/loop_refs.py）。
+# 持ち込む先のライブラリの参照。Promete は 36-dotnet.sh が、DXライブラリは
+# `loop refs dxlib` が root で置き、誰でも読めて誰も書けない。MEMBERS.txt を1行1件で
+# 持ち、型のあるライブラリは TYPES.txt も持つ（provision/loop_refs.py）。
 REFS = LOOP / "refs"
 
 
@@ -1302,13 +1304,13 @@ def library_refs() -> Path | None:
     """いまの持ち込む先の参照の置き場。無ければ None。"""
     name = LANGUAGE.get("refs")
     path = REFS / name if name else None
-    return path if path is not None and (path / "TYPES.txt").is_file() else None
+    return path if path is not None and (path / "MEMBERS.txt").is_file() else None
 
 
 def library_types() -> str:
     """参照にある型の名前を、名前空間ごとに1行にまとめる。プランナーに渡す。"""
     path = library_refs()
-    if path is None:
+    if path is None or not (path / "TYPES.txt").is_file():
         return ""
     spaces: dict[str, list[str]] = {}
     for line in (path / "TYPES.txt").read_text(encoding="utf-8").splitlines():
@@ -1325,14 +1327,16 @@ def library_refs_section() -> str:
     path = library_refs()
     if path is None:
         return ""
+    files = ", ".join(sorted(p.name for p in path.iterdir() if p.is_file()
+                             and not p.name.startswith(".")))
     return f"""
 # The library reference
-Every documented public type and member of the library this code is built
-against is listed in {path}, one per line with its summary:
-`TYPES.txt` holds the types and `MEMBERS.txt` the members
-(`P:Promete.Input.MouseButton.IsButtonDown  <summary>`). Before you use a
-library member, Grep `MEMBERS.txt` for its type and use what is listed. A
-member that is not listed may still exist; then look for how the project uses it.
+The documented functions, members and constants of the library this code is
+built against are in {path} ({files}). `MEMBERS.txt` lists them one per line
+with a short summary, and `TYPES.txt`, where there is one, lists the types.
+Before you use a library function or member, Grep `MEMBERS.txt` for its name
+or its type and use what is listed. One that is not listed may still exist;
+then look in the other file there, or in how the project uses it.
 """
 
 
@@ -6043,9 +6047,9 @@ goal may name a type here without spelling out its members.
 """
 
 
-# DXライブラリの主な関数。箱には DXライブラリが無いので、プランナーとソルバーが
-# 知っていることはこれだけだ。画面、入力、音を扱う薄いファイルを書くのに足りる
-# ところまでに絞る。プランナーが CONTEXT.md に写してソルバーに渡す。
+# DXライブラリの主な関数。画面、入力、音を扱う薄いファイルを書くのに足りるところまでに
+# 絞る。プランナーが CONTEXT.md に写してソルバーに渡す。人が `loop refs dxlib` で
+# DxLib.h を送っていれば、ソルバーはほかの関数をそこから引く（library_refs_section）。
 DXLIB_SHEET = """DXLib (DX Library) in brief. Every call returns -1 on failure unless noted.
 TRUE and FALSE are ints.
 
@@ -6140,6 +6144,12 @@ hand. List every new `.cpp` and `.h` in CONTEXT.md so the person can.
 """)
     if dxlib:
         text += "\n" + DXLIB_SHEET + "\n"
+        refs = library_refs()
+        text += (f"\nThe whole of DxLib.h is in {refs}; the solver looks up any other function "
+                 "there, so a goal may name one that the summary above leaves out.\n"
+                 if refs else
+                 "\nDxLib.h itself is not here. Use only the functions above; the person "
+                 "can send the header with `loop refs dxlib <DxLib.h>`.\n")
     return summary, text
 
 

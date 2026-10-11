@@ -249,6 +249,8 @@ class TheLibraryReference(Promete):
         self.addCleanup(temp.cleanup)
         refs = Path(temp.name)
         (refs / "promete").mkdir()
+        (refs / "promete" / "MEMBERS.txt").write_text(
+            "P:Promete.Input.MouseButton.IsButtonDown  押された\n", encoding="utf-8")
         (refs / "promete" / "TYPES.txt").write_text(
             "Promete.Input.Mouse  マウス\nPromete.Input.MouseButton  ボタン\n"
             "Promete.Scene  シーン\n", encoding="utf-8")
@@ -268,7 +270,7 @@ class TheLibraryReference(Promete):
                 "contracts": {"provides": [], "requires": [], "invariants": []}}
         with mock.patch.object(loop, "existing_requirements", return_value=[]):
             brief = loop.solver_material(step, "CONTEXT")
-        self.assertIn(f"listed in {self.refs / 'promete'}", brief)
+        self.assertIn(f"are in {self.refs / 'promete'} (MEMBERS.txt, TYPES.txt)", brief)
         self.assertIn("Grep `MEMBERS.txt`", brief)
 
     def test_a_framework_without_a_reference_says_nothing(self):

@@ -112,7 +112,7 @@ if [ "$(cat "$REFS/promete/.version" 2>/dev/null)" != "$PROMETE_VERSION" ]; then
   pkg="$(find "$FEED" -maxdepth 1 -iname "promete.$PROMETE_VERSION.nupkg" | head -n 1)"
   [ -n "$pkg" ] || { echo "36-dotnet: promete.$PROMETE_VERSION.nupkg がフィードに無い" >&2; exit 1; }
   rm -rf "$REFS/promete.new"
-  python3 loop_refs.py "$pkg" Promete.xml "$REFS/promete.new"
+  python3 loop_refs.py xml "$pkg" Promete.xml "$REFS/promete.new"
   echo "$PROMETE_VERSION" > "$REFS/promete.new/.version"
   rm -rf "$REFS/promete"
   mv "$REFS/promete.new" "$REFS/promete"
