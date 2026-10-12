@@ -114,16 +114,37 @@ class ActOnTheSandbox(LiveView):
     def test_the_requirements_travel_on_stdin_and_never_on_the_command_line(self, run):
         run.return_value = answered("裏で走らせた")
         text = "# 要件\n$(rm -rf /)\n"
-        self.live.start_loop(text, "csharp")
+        self.live.start_loop(text, "csharp", "unity")
         self.assertEqual(self.dash_request(run),
-                         {"action": "go", "requirements": text, "language": "csharp"})
+                         {"action": "go", "requirements": text, "language": "csharp",
+                          "framework": "unity"})
         self.assertNotIn("rm -rf", " ".join(run.call_args.args[0]))
 
     @patch("host.dashboard.live.subprocess.run")
-    def test_switching_and_model_changes_are_requests_too(self, run):
+    def test_an_answer_travels_on_stdin_and_never_on_the_command_line(self, run):
+        run.return_value = answered("答えを置いた")
+        self.live.answer("S2 の条件を外す; $(id)")
+        self.assertEqual(self.dash_request(run),
+                         {"action": "answer", "text": "S2 の条件を外す; $(id)"})
+        self.assertNotIn("$(id)", " ".join(run.call_args.args[0]))
+
+    @patch("host.dashboard.live.subprocess.run")
+    def test_an_answer_that_did_not_arrive_is_reported_not_raised(self, run):
+        # 記録は残る。箱に届いたかは別の事実として返す。
+        from host.dashboard.server import send_answer
+        run.return_value = answered(returncode=1, stderr="loop: 答えを待つエスカレーションが無い")
+        self.assertEqual(send_answer(self.live, {"note": "x"}),
+                         {"error": "loop: 答えを待つエスカレーションが無い"})
+        self.assertEqual(send_answer(None, {"note": "x"}),
+                         {"error": "live view is not configured"})
+
+    @patch("host.dashboard.live.subprocess.run")
+    def test_switching_removal_and_model_changes_are_requests_too(self, run):
         run.return_value = answered("ok")
         self.live.use_project("game-2")
         self.assertEqual(self.dash_request(run), {"action": "use", "project": "game-2"})
+        self.live.remove_project("game-2")
+        self.assertEqual(self.dash_request(run), {"action": "remove", "project": "game-2"})
         self.live.set_model("solver", "claude-opus-5-5", "high")
         self.assertEqual(self.dash_request(run), {"action": "model", "role": "solver",
                                                   "model": "claude-opus-5-5", "effort": "high"})

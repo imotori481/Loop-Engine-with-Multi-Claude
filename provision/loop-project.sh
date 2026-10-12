@@ -319,6 +319,27 @@ $bad"
   [ "$(current)" != "$name" ] || link_project_files "$name"
 }
 
+# プロジェクトを消す。/srv/loop/projects/<名前> を丸ごと消すので、bare、退避した
+# 作業ツリーと計画、柵の場所、Unity の参照が残らない。走行ログも消す。戻せない。
+# 今のプロジェクトは消さない。/srv/loop の直下のリンクと作業ツリーが指しているからだ。
+# ホストのクローンには触らない。
+cmd_remove() {
+  local name="$1" log
+  valid_name "$name"
+  [ -d "$PROJECTS/$name" ] && [ ! -L "$PROJECTS/$name" ] || die "プロジェクト '$name' は無い"
+  [ "$(current)" != "$name" ] || die "'$name' は今のプロジェクトだ。先にほかへ切り替える"
+  busy && die "ループかエージェントが走っている。終わるのを待つ"
+
+  rm -rf -- "${PROJECTS:?}/$name"
+  # 名前が前方で重なる別のプロジェクト（game と game-2）のログを巻き込まないよう、
+  # loop の start が付ける形 <名前>-<日付>-<時刻>.log と <名前>-latest.log だけを消す。
+  for log in "$LOOP/logs/$name"-*.log; do
+    [[ "$(basename "$log")" =~ ^"$name"-([0-9]{8}-[0-9]{6}|latest)\.log$ ]] || continue
+    rm -f -- "$log"
+  done
+  echo "'$name' を消した"
+}
+
 usage() {
   cat >&2 <<EOF
 使い方: loop project <コマンド>
@@ -332,6 +353,8 @@ usage() {
                                   --src と --tests は書き込みの柵の場所（既定 src と
                                   tests）。作業ツリーの根からの相対パス
   use <名前>                      切り替える。初めてなら作る
+  remove <名前>                   プロジェクトをディレクトリと走行ログごと消す。
+                                  今のプロジェクトは消せない
   layout <名前> --src <ディレクトリ> --tests <ディレクトリ>
                                   作ってあるプロジェクトの柵の場所を変える
   unity-refs <名前> <tar>         Unity の参照アセンブリを置く。tar はホストの
@@ -368,6 +391,7 @@ case "${1:-}" in
       cmd_layout "$name" "$src" "$tests"
     fi ;;
   use)     [ $# -eq 2 ] || usage; cmd_use "$2" ;;
+  remove)  [ $# -eq 2 ] || usage; cmd_remove "$2" ;;
   unity-refs) [ $# -eq 3 ] || usage; cmd_unity_refs "$2" "$3" ;;
   *)       usage ;;
 esac

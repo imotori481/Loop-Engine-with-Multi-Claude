@@ -7,6 +7,7 @@
     python3 -m unittest discover -s runner/tests
 """
 
+import os
 import subprocess
 import sys
 import tempfile
@@ -90,6 +91,31 @@ class Reset(Repository):
         self.tests.rmdir()
         loop.cmd_reset("S1")
         self.assertTrue(self.tests.is_dir())
+
+
+@unittest.skipUnless(hasattr(os, "getuid"), "needs POSIX file modes")
+class FenceDirectories(unittest.TestCase):
+    """diefugou01 の S11。reset の git が umask 022 で src/Managers を作り直し、
+    ソルバーの Write がすべて EACCES で落ちた。"""
+
+    def setUp(self) -> None:
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.src = Path(temp.name) / "src"
+        self.sub = self.src / "Managers"
+        self.sub.mkdir(parents=True)
+        self.sub.chmod(0o755)
+        for name, value in {"SRC": self.src, "TESTS": Path(temp.name) / "tests",
+                            "shutil": mock.Mock()}.items():
+            p = mock.patch.object(loop, name, value)
+            p.start()
+            self.addCleanup(p.stop)
+
+    def test_a_subdirectory_opens_and_closes_with_the_fence(self):
+        loop.set_writable(tests=None, src=True)
+        self.assertEqual(self.sub.stat().st_mode & 0o777, 0o775)
+        loop.set_writable(tests=None, src=False)
+        self.assertEqual(self.sub.stat().st_mode & 0o777, 0o755)
 
 
 if __name__ == "__main__":

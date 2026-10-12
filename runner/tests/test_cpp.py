@@ -249,6 +249,25 @@ class WhatThePlannerIsTold(AProject):
         self.assertIn("src/main.cpp  (includes DxLib.h)", text)
         self.assertIn("ProcessMessage", text)
 
+    def test_the_header_the_person_sent_is_where_the_solver_looks(self):
+        self.write("src/main.cpp", '#include "DxLib.h"\n')
+        with tempfile.TemporaryDirectory() as temp:
+            refs = Path(temp)
+            (refs / "dxlib").mkdir()
+            (refs / "dxlib" / "MEMBERS.txt").write_text("int DxLib_Init(void)\n", encoding="utf-8")
+            (refs / "dxlib" / "DxLib.h").write_text("", encoding="utf-8")
+            with mock.patch.object(loop, "REFS", refs), \
+                 mock.patch.dict(loop.LANGUAGE, loop.compose_language("cpp", "dxlib")):
+                text = loop.cpp_facts()[1]
+                section = loop.library_refs_section()
+        self.assertIn(f"The whole of DxLib.h is in {refs / 'dxlib'}", text)
+        self.assertIn("(DxLib.h, MEMBERS.txt)", section)
+
+    def test_without_the_header_the_sheet_is_all_there_is(self):
+        self.write("src/main.cpp", '#include "DxLib.h"\n')
+        with mock.patch.object(loop, "REFS", Path("/nonexistent/refs")):
+            self.assertIn("loop refs dxlib", loop.cpp_facts()[1])
+
     def test_requirements_that_ask_for_dxlib_get_the_sheet_before_any_code(self):
         self.write("REQUIREMENTS.md", "DXライブラリで動くブロック崩し\n")
         self.assertIn("ScreenFlip", loop.cpp_facts()[1])

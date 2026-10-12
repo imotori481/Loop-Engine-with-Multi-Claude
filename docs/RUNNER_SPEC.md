@@ -757,10 +757,22 @@ BOOTSTRAP 1-4 は試行の上限しか定めていないため、(a) を繰り�
 > **同一ステップの `escalation_no` が 2 以上のとき、(a)「goal の書き方を締める」を禁止する。**
 > 選べるのは (b) 受け入れ条件の書き直し、または (c) 上流からの作り直しのみ。
 
+`escalation_no` は、そのステップの `ESCALATED` のうち、人間がそのステップを最後に
+`plan amend` で直した後のものの数だ。数えるのは**ソルバーと計画の失敗**だけで、次の2つは
+数えない。
+
+- **基盤の故障。** 箱が書き込みを拒んだ停止は、ソルバーにもプランナーにも直せない。
+  ソルバーの返答かテストとビルドの出力に、ソルバーが書けるはずの柵（コード、TEST_WRITE の
+  あいだのテスト）かランナーのビルドの置き場への `EACCES`、`EPERM`、`EROFS`、`ENOSPC` が
+  出たら、ランナーは `INFRA_FAILURE` を台帳に書き、`ESCALATION.md` を書かずに終了コード 6 で
+  止まる。`plan/` や凍結したテストで拒まれたのは柵が効いた証拠で、ソルバーの誤りとして扱う
+- **人間が直す前のもの。** `plan amend` は条件そのものを書き換える。上限が禁じるのは
+  プランナーが同じ条件に (a) を繰り返すことで、書き換えた条件は別のものだ
+
 ランナーは ESCALATION.md にこの制約を明記して出力する（プランナーが忘れても効くように）。
 
-**実装済み（2026-08-19）。** `LIMITS["escalations"]`、既定 1。
-`tasks.json` の最上位 `"limits": {"escalations": n}` で上書きできる。
+`LIMITS["escalations"]`、既定 1。`tasks.json` の最上位 `"limits": {"escalations": n}` で
+上書きできる。
 
 - **回数は台帳から数える**（`escalation_count()`）。メモリ上のカウンタではないのは、
   上限が意味を持つのは**プロセスが終わる場面**だから ── VM の停止、`reset`、翌日の再開。
@@ -771,12 +783,25 @@ BOOTSTRAP 1-4 は試行の上限しか定めていないため、(a) を繰り�
 - 明記するだけでなく `run --all` 側でも判定する。**書いてあることに従わせるのではなく、
   そこから先に進む経路を無くす**
 
-**(b) を実行する動詞が無い（未解決・run 7 で踏んだ）。** 上の制約は「(b) 受け入れ基準の
-書き換えは人間の判断」と言うが、人間がそれを行う手段は `plan/tasks.json` の手編集しかない。
-そして `cmd_reset` は `git reset --hard HEAD` を打ち、**台帳だけ**を明示的に退避する
-（§6-2 の理由による）ので、**コミットしていない基準の書き換えは `reset` で消える**。
-順序は「編集 → コミット → `reset <id>` → `run <id>`」。動詞を足すか、`reset` の退避対象に
-`plan/` を含めるかは未決。
+**(b) と (c) は `plan amend` で入れる。** 人間は `plan/`（0700 runner）に書けない。
+`loop plan amend <step> <tasks.json>` が書き換えた計画を `human/in/tasks.json` に置き、
+`loop.py plan amend <step>` がそれを取り込む。
+
+1. `load_settings` とリンタ（§8）に通す。違反があれば何も変えず、置いた計画を残して 2 で終わる
+2. `plan/tasks.json` に写し、`ESCALATION.md`、`PLANNER_ESCALATION.md`、`human/in/ANSWER.md` を消す
+3. 計画、台帳、消したエスカレーションだけをコミットする
+4. そのステップを `reset` する。計画は HEAD にあるので `git reset --hard` で消えない
+
+緑のステップを書き換えても、台帳の GREEN は残り走り直さない。`PLAN_AMEND` の
+`green_changed` に名前を残し、警告を出す。捨てる緑まで戻すのは人間が行う。
+
+**エスカレーションへの人間の答えはプランナーに届く。** ダッシュボードの「回答を記録」は、
+判断をホストの `decisions.jsonl` に追記したうえで、本文を箱の `human/in/ANSWER.md` に送る。
+`plan propose` はそれを「The human's answer」としてブリーフに載せ、`plan apply` と
+`plan amend` が消す。答えを待つ `ESCALATION.md` と `ANSWER.md` が両方あれば、`run --all` は
+ステップを走らせ直す前にプランナーへ回す。上限を使い切っていても回す。上限が禁じるのは
+プランナーだけの判断で、これは人間の判断だからだ。答えが受け入れ条件の変更を求めるなら、
+プランナーは `ESCALATE.md` でそう返し、人間が `plan amend` で入れる。
 
 ```
 git checkout -b escalate/<step_id>/<escalation_no>
@@ -1073,12 +1098,13 @@ BOOTSTRAP.md §3 の記述に対し、ランナーが機構として動くため
 | `contracts.invariants` | 型だけでは意味が運べず、後続が誤解したまま green になる |
 | `acceptance` の構造化 | 正常/境界/異常の充足をリンタが検査できる |
 
-最上位（ステップの外）に置ける設定が5つある。いずれも省略可で、
+最上位（ステップの外）に置ける設定が6つある。いずれも省略可で、
 **既知のキーだけを読む** ── 綴りを間違えた設定が黙って無視されるのを防ぐため。
 
 ```json
 {
   "language":     "python",
+  "framework":    "none",
   "timeouts":     {"test": 120, "solver": 960, "planner": 1800},
   "limits":       {"escalations": 1, "attempts": 0},
   "policy":       {"retry": "repair"},
@@ -1119,6 +1145,19 @@ TypeScript であって素の JavaScript でないのは L14 のため。契約�
 `.ts` をそのまま実行するので、ビルド段も `tsc` も要らない ── **型はここでは
 「読まれるもの」であって、コンパイラが検査するものではない。**
 
+`framework` は、出来たコードを持ち込む先を選ぶ。値は言語ごとの閉じた一覧で、`loop.py` の
+`FRAMEWORKS` にある。省くと言語の既定になる。言語に属さない値は、`language` と同じく異常終了する。
+
+| 言語 | 持ち込む先（先頭が既定） | 変えるもの |
+|---|---|---|
+| `python` | `none` | なし |
+| `typescript` | `dom` | 根の `index.html`、`start(root)` の決まり、happy-dom についての事実 |
+| `csharp` | `unity`、`promete` | unity: SDK 8、netstandard2.1 と C# 9、Unity の参照アセンブリ、1ファイル1型の決まり、エンジンの事実。promete: SDK 10、net10.0 と C# 14、暗黙の using と nullable、Promete 2.1.0 の参照、ヘッドレスで動くものの事実 |
+| `cpp` | `dxlib` | MSVC と DXライブラリを前提にした決まり、DXライブラリの早見表 |
+
+`language` と同じく、ランナーが通った提案に刻む（`stamp_language`）。`plan bootstrap --framework`、
+`loop go --framework`、ダッシュボードの「持ち込む先」で選ぶ。`framework` を持たない計画は、言語の既定で読む。
+
 後ろの3つは**プランナーが書くものではない**（BOOTSTRAP_RULES にも書くなと明示してある）。
 どのソルバーが何回走るかは**プランが走る機械の性質**であって、プランの性質ではない。
 
@@ -1156,7 +1195,8 @@ TypeScript であって素の JavaScript でないのは L14 のため。契約�
 | L13 | **最初のステップが `kind: "skeleton"`**、かつ計画中にちょうど1つ（2026-08-19 追加） |
 | L14 | `contracts.provides` の型注釈が**中身を述べている**こと。裸の `tuple`/`list`/`dict`/`set`（および `Tuple`/`Sequence`/`Mapping` 等）を拒否（2026-08-21 追加） |
 | L15 | `contracts.provides` の各行が**居場所のモジュール**を述べ、それがそのステップ自身の `files_write` から導けること（2026-08-21 追加） |
-| L17 | `files_test` が全ステップで重複しない（2026-09-28 追加）。L16 は下の候補のために空けてある |
+| L16 | `given` が反射（`typeof(`、`GetMethod`、`BaseType`、`hasattr`、`inspect.` など）で、`then` が型の名前、基底型、メンバーの有無といった**形**を主張する受け入れ条件がない |
+| L17 | `files_test` が全ステップで重複しない（2026-09-28 追加） |
 
 **既存のテストの差し替え。** ステップの `files_test` に HEAD にあるテストファイル（計画より前からあるもの）を挙げると、そのステップはファイルを丸ごと書き直す。今ある
 テストはすべて消え、ファイルにはそのステップのテストだけが入る。件数はほかのテストファイルと合わせて `expected_tests` で数える。要件が変える振る舞いを確かめる既存のテストは、
@@ -1174,26 +1214,25 @@ L13 が完全に含んでいる。番号は識別子なので再利用しない 
 **L15 は L14 と同じ根**（BOOTSTRAP 1-5）から出ている。L14 が契約に**形**を述べさせ、
 L15 は**居場所**を述べさせる。どちらも「後続に渡る1行だけで履行できること」。
 
-**L16 の候補 ── 形だけを主張する受け入れ条件（未実装・run 7 で踏んだ）。**
-`then` が呼び出しの副作用にも返り値の中身にも触れず、キーの集合・型・長さといった
-**形**しか主張していない受け入れ条件は、**RED_GATE を原理的に通れない**。STUB は
-シグネチャが正しい骨組みであることを義務づけられているので（§5 の STUB 規則）、
-形だけの主張は STUB が必ず満たす ── R4 が正しく拒否し、どんな実装でも救えない。
-**合格する世界が存在しない条件**であり、いまのリンタはこれを通す。
+**L16 ── 形だけを主張する受け入れ条件。** `then` が呼び出しの副作用にも返り値の中身にも
+触れず、型やメンバーといった**形**しか主張していない受け入れ条件は、**RED_GATE を原理的に
+通れない**。STUB はシグネチャが正しい骨組みであることを義務づけられているので（§5 の
+STUB 規則）、形だけの主張は STUB が必ず満たす ── R4 が拒否し、どんな実装でも救えない。
+**後で必ず詰まると分かっているものを、書けなくする。**
 
-run 7 の S10 はこれで2回エスカレートし、上限を使い切って停止した:
+L16 が落とすのは、前提が反射で、かつ結果が形を主張する条件だけだ。どちらか片方だけでは
+落とさない。反射で作ったものを呼んで値を確かめる条件や、形の語（named、inherits）を
+振る舞いの説明に使う条件は通る。
 
+```text
+given: reflection on the built game assembly: typeof(Program), typeof(MainScene), ...
+then:  typeof(Program) has a static method named 'Main'; each of the three scene types
+       has a base type (walking BaseType) whose Name is 'Scene'
 ```
-then: set(table.keys()) == {'buy_cursor', 'buy_grandma'}
-```
 
-プランナーはエスカレーション1回目で原因を正しく見抜いたが、直し方を `goal` の散文に
-書いた。**テストは `acceptance` から起こすので、その指示は届かない**（上の L15 と同じ
-構図 ── ブリーフに載らない場所に書いても無い）。人間が `then` を購入の副作用まで
-述べる形に直したところ、1回目で緑になった。
-
-これは B3 の余計なファイル扱いと同じ形の話で、**後で必ず詰まると分かっているものを、
-書けなくする**。検知ではなく剥奪。
+反射を使わない形の主張（`then: set(table.keys()) == {'buy_cursor', 'buy_grandma'}`）は
+L16 では見分けられず、R4 が止める。プランナーが直すときは `goal` ではなく `acceptance` を
+直す。テストは `acceptance` から起こすので、`goal` に書いた直し方はテストに届かない。
 
 テスト作成のブリーフは `goal` を意図的に含まない（テストは受け入れ条件から書かせる）。
 含むのは `provides` なので、そこにモジュール名が無ければブリーフのどこにも無い。
@@ -1318,7 +1357,7 @@ run --all [--budget <分>]    # 停止条件に当たるまで回す
 reset <id>                   # 止まったステップを捨て、最後の green に戻す
 plan bootstrap [--from <path>]  # 要件 .md から計画を起こさせる。終えた計画は plan/archive/ へ移す
 plan propose [--step <id>]   # ESCALATION.md に対する改訂をプランナーに書かせる
-plan refine [--resume]       # 保留中の提案を批評と改訂で上限まで回す。上限の後に残った指摘と、プランナーが判断を返した回の指摘は人が書き換え、
+plan refine [--resume]       # 保留中の提案を批評と改訂で上限まで回す。上限の後に残った指摘と、改訂が済まずに止まった回の指摘は人が書き換え、
                              # --resume が書き換えた指摘で1回だけ改訂させる（AGENT_IO.md の critic）
 plan show                    # 保留中の提案を、適用せずに表示する
 plan apply                   # 提案を検査し、通れば plan/ に反映して commit

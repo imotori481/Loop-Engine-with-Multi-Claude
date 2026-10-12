@@ -91,6 +91,9 @@ loop go <requirements> --language csharp
 `--language` を付けないと Python で計画が立つ。C# のプロジェクトでは、プランナーが「テストが pytest しか無い」と
 言って計画を書かずに止まる。
 
+持ち込む先は `--framework` で選ぶ。省くと言語の既定になり、C# なら `unity` だ。ダッシュボードでは「走行」の
+「持ち込む先」で選ぶ。
+
 要件に曖昧なところがあると、プランナーは計画を書かずに `ESCALATE.md` を返す。質問に答える形で要件を書き足し、
 `loop go` を流し直す。
 
@@ -123,3 +126,13 @@ loop project use <project>
 
 `loop project list` の `*` が今のプロジェクトだ。一度作ったプロジェクトに戻るときは、プロビジョニングは走らず、
 退避していた作業ツリーと計画がそのまま戻る。
+
+## 要らなくなったプロジェクトを消す
+
+```powershell
+loop project remove <project>
+```
+
+箱の `/srv/loop/projects/<project>` と走行ログを消す。退避していた作業ツリーと計画も消え、戻せない。
+今のプロジェクトは消せないので、先にほかへ切り替える。ダッシュボードでは「プロジェクト」タブの「削除」で、
+名前を打って確かめてから消す。ホストのクローン（`C:\dev\roop-engin\projects\<project>`）は残る。

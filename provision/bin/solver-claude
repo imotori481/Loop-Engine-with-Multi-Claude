@@ -82,11 +82,18 @@ SYSTEM_PROMPT="You are the solver in an automated build loop. The user message i
 # --disallowedTools "Bash"
 #     --tools に無い時点で定義されない。上の理由を読み手に示すために明示する。
 #
+# --add-dir /srv/loop/refs
+#     持ち込む先のライブラリの参照（36-dotnet.sh）。作業ディレクトリの外なので、
+#     足さないと Read と Grep が届かない。root のもので、読めるが書けない。
+#
 # 上限時間はここで掛ける。ランナーは別 uid で、このプロセスに信号を送れない。
 # `timeout` は 124 で終わる。
+refs_args=()
+[ -d /srv/loop/refs ] && refs_args=(--add-dir /srv/loop/refs)
 set +e
 timeout --kill-after=30 "$LIMIT" claude -p \
   "${role_args[@]}" \
+  "${refs_args[@]}" \
   --output-format json \
   --safe-mode \
   --setting-sources "" \

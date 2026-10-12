@@ -40,8 +40,22 @@ class Request(unittest.TestCase):
     def test_the_requirements_go_to_a_file_and_never_into_a_line(self):
         text = "# 要件\n$(rm -rf /)\n"
         self.assertEqual(self.parse({"action": "go", "requirements": text, "language": "csharp"}),
-                         ["go", "csharp"])
+                         ["go", "csharp", "unity"])
         self.assertEqual((self.work / "requirements.md").read_text(encoding="utf-8"), text)
+
+    def test_a_framework_left_empty_becomes_the_language_s_own(self):
+        # ダッシュボードは選ばれていない持ち込む先を空で送る。loop には名前で渡す。
+        self.assertEqual(self.parse({"action": "go", "requirements": "x", "language": "cpp",
+                                     "framework": ""}), ["go", "cpp", "dxlib"])
+        self.assertEqual(self.parse({"action": "go", "requirements": "x",
+                                     "language": "typescript", "framework": "dom"}),
+                         ["go", "typescript", "dom"])
+
+    def test_a_framework_must_belong_to_the_language(self):
+        self.refused({"action": "go", "requirements": "x", "language": "csharp",
+                      "framework": "dom"})
+        self.refused({"action": "go", "requirements": "x", "language": "csharp",
+                      "framework": "unity\n--from /etc/shadow"})
 
     def test_a_run_needs_a_known_language_and_some_requirements(self):
         self.refused({"action": "go", "requirements": "x", "language": "cobol"})
@@ -53,6 +67,12 @@ class Request(unittest.TestCase):
         self.assertEqual(self.parse({"action": "use", "project": "game-2"}), ["use", "game-2"])
         for name in ("CURRENT", "../etc", "-x", "Game", "a b", "", None, "a\nb"):
             self.refused({"action": "use", "project": name})
+
+    def test_a_removal_follows_the_same_rule_for_the_name(self):
+        self.assertEqual(self.parse({"action": "remove", "project": "game-2"}),
+                         ["remove", "game-2"])
+        for name in ("CURRENT", "../etc", "-x", "", None, ".", "a/b"):
+            self.refused({"action": "remove", "project": name})
 
     def test_a_model_change_passes_only_names_that_are_safe_in_a_shell(self):
         self.assertEqual(
@@ -87,6 +107,13 @@ class Request(unittest.TestCase):
         for step in ("", "-x", "../S1", "S1/x", "a b", "a\nb", "$(id)", None, 12):
             self.refused({"action": "reset", "step": step})
 
+    def test_an_answer_goes_to_a_file_and_never_into_a_line(self):
+        text = "S2 の時間の条件を外す\n$(rm -rf /)"
+        self.assertEqual(self.parse({"action": "answer", "text": text}), ["answer"])
+        self.assertEqual((self.work / "answer.md").read_text(encoding="utf-8"), text + "\n")
+        for text in ("", "  \n", None, 5, "x" * (loop_dash.MAX_ANSWER + 1)):
+            self.refused({"action": "answer", "text": text})
+
     def test_anything_else_is_refused(self):
         self.refused([])
         self.refused({"action": "raw"})
@@ -115,6 +142,9 @@ class RoleSettings(unittest.TestCase):
         self.assertEqual(value["roles"]["solver"], {"model": "", "effort": ""})
         self.assertIsNone(value["roles"]["critic"])
         self.assertIn("csharp", value["languages"])
+        # 持ち込む先は言語ごとで、先頭が既定。ダッシュボードはそれを既定と書く。
+        self.assertEqual(value["frameworks"]["csharp"][0], "unity")
+        self.assertEqual(sorted(value["frameworks"]), value["languages"])
         self.assertNotIn("sk-secret", json.dumps(value))
 
     def test_a_change_rewrites_two_lines_and_keeps_the_rest(self):

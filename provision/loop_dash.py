@@ -38,6 +38,8 @@ BRANCH = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,199}")
 # やり直すステップの ID。ランナーは凍結のマニフェストのファイル名に使うので、/ は通さない。
 STEP = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 MAX_REQUIREMENTS = 200_000
+# エスカレーションへの答え。ダッシュボードの欄は 4000 字までだが、箱の側でも絞る。
+MAX_ANSWER = 20_000
 KEYS = {"model": "LOOP_MODEL", "effort": "LOOP_EFFORT"}
 
 
@@ -102,8 +104,8 @@ def parse(request: object, work: str) -> list[str]:
     if action == "model":
         return ["model", check_role(request.get("role")), check_model(request.get("model")),
                 check_effort(request.get("effort"))]
-    if action == "use":
-        return ["use", check_project(request.get("project"))]
+    if action in ("use", "remove"):
+        return [action, check_project(request.get("project"))]
     if action == "reset":
         return ["reset", check_step(request.get("step"))]
     if action == "init":
@@ -113,15 +115,31 @@ def parse(request: object, work: str) -> list[str]:
                 check_branch(request.get("branch")), src, tests]
     if action == "go":
         language, text = request.get("language"), request.get("requirements")
+        framework = request.get("framework", "")
         if language not in loop.LANGUAGES:
             raise Refused(f"知らない言語: {language!r}")
+        # 空なら言語の既定。返す行には、いつも名前を入れる。
+        if framework == "":
+            framework = loop.LANGUAGES[language]["framework"]
+        if framework not in loop.FRAMEWORKS[language]:
+            raise Refused(f"{language} の持ち込む先に無い: {framework!r}")
         if not isinstance(text, str) or not text.strip():
             raise Refused("要件が空")
         if len(text) > MAX_REQUIREMENTS:
             raise Refused(f"要件が長すぎる。{MAX_REQUIREMENTS} 字まで")
         with open(os.path.join(work, "requirements.md"), "w", encoding="utf-8") as handle:
             handle.write(text)
-        return ["go", language]
+        return ["go", language, framework]
+    if action == "answer":
+        # 答えの本文も要件と同じく作業ディレクトリに書き、行には載せない。
+        text = request.get("text")
+        if not isinstance(text, str) or not text.strip():
+            raise Refused("答えが空")
+        if len(text) > MAX_ANSWER:
+            raise Refused(f"答えが長すぎる。{MAX_ANSWER} 字まで")
+        with open(os.path.join(work, "answer.md"), "w", encoding="utf-8") as handle:
+            handle.write(text.strip() + "\n")
+        return ["answer"]
     raise Refused(f"知らない操作: {action!r}")
 
 
@@ -150,7 +168,12 @@ def settings(directory: str) -> dict:
             roles[role] = read_role(os.path.join(directory, f"{role}.env"))
         except OSError:
             roles[role] = None
-    return {"roles": roles, "efforts": list(EFFORTS), "languages": sorted(loop.LANGUAGES)}
+    # 持ち込む先は言語ごとの一覧で、先頭が言語の既定。
+    frameworks = {language: [loop.LANGUAGES[language]["framework"]]
+                  + sorted(set(loop.FRAMEWORKS[language]) - {loop.LANGUAGES[language]["framework"]})
+                  for language in loop.LANGUAGES}
+    return {"roles": roles, "efforts": list(EFFORTS), "languages": sorted(loop.LANGUAGES),
+            "frameworks": frameworks}
 
 
 def set_model(directory: str, role: str, model: str, effort: str) -> None:

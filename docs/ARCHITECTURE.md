@@ -106,7 +106,7 @@ flowchart TD
   boot --> refine["critique"]
   refine -->|"指摘あり"| revise["プランナーが改訂"]
   revise --> refine
-  revise -->|"判断を返す"| human
+  revise -->|"判断を返す / 失敗 / 止める"| human
   refine -->|"指摘なし"| apply["plan apply<br/>ここで基準が確定"]
   refine -->|"上限の後も指摘あり"| human["人が指摘を書き換える"]
   human -->|"書き換えがあれば1回だけ"| last["プランナーが改訂"]

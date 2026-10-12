@@ -62,7 +62,7 @@ flowchart LR
 
 `cmd_plan_refine` は、批評と planner の改訂を交互に回す。批評は最大 `LIMITS["critiques"] + 1` 周で、1周ごとにモードの数だけ critic を呼ぶ。周ごとの指摘は `human/in/CRITIQUE.json` に書く。
 
-上限の周のあとも指摘が残るか、改訂の途中で planner が判断を返せば、`CRITIQUE.json` を人が直せる状態（`waiting`）にして止まる。人は指摘の `title` と `evidence` だけを書き換えられる。消すことも足すこともできない。`plan refine --resume`（`resume_refine`）は、書き換えがあれば planner に1回だけ改訂させ、critic はもう呼ばない。書き換えた指摘には、refine のブリーフで `REWRITTEN BY THE HUMAN` の印が付く。書き換えが無ければ何もしない。
+上限の周のあとも指摘が残るか、改訂が済まずに止まれば、`CRITIQUE.json` は人が直せる状態（`waiting`）で残る。改訂が済まないのは、planner が判断を返したとき、改訂に失敗したとき、改訂の途中で走行を止めたときだ。上限の前の周は、改訂を頼む前に `waiting` の写しと控え（`.runner/refine.json`、批評した提案の本文を含む）を書き、改訂が通ってから外す。改訂の途中で止まったときは、`resume_refine` が控えから批評した提案に戻してから進む。人は指摘の `title` と `evidence` だけを書き換えられる。消すことも足すこともできない。`plan refine --resume`（`resume_refine`）は、書き換えがあれば planner に1回だけ改訂させ、critic はもう呼ばない。書き換えた指摘には、refine のブリーフで `REWRITTEN BY THE HUMAN` の印が付く。書き換えが無ければ何もしない。
 
 ### environment_facts()
 

@@ -15,7 +15,8 @@ function button(label, decision, item, note) {
   element.onclick = async () => {
     element.disabled = true;
     try {
-      await api("/api/decision", {method: "POST", body: JSON.stringify({kind: item.kind, request_id: item.id, decision, note: note.value})});
+      const result = await api("/api/decision", {method: "POST", body: JSON.stringify({kind: item.kind, request_id: item.id, decision, note: note.value})});
+      if (result.sent && result.sent.error) alert("回答は記録したが、箱に送れなかった: " + result.sent.error);
       await refresh();
     } catch (error) { alert(error.message); element.disabled = false; }
   };
@@ -200,7 +201,8 @@ function renderCritique(value) {
   at.textContent = `${findings.round}回目の批評 / ${findings.at}`;
   const editable = findings.waiting && !value.running;
   if (editable) {
-    box.append(text("p", "改訂の上限まで回しても残った指摘か、プランナーが改訂せずに判断を返した指摘です。"
+    box.append(text("p", "改訂の上限まで回しても残った指摘か、改訂が済まずに止まった回の指摘です。"
+      + "改訂が済まないのは、プランナーが判断を返したとき、改訂に失敗したとき、走行を止めたときです。"
       + "的外れなものや、プランナーの問いに答えるものは書き換えてください。"
       + "「続ける」を押すと、書き換えた指摘でプランナーが1回だけ計画を直し、適用して走らせます。"
       + "何も書き換えずに押すと、今の計画をそのまま適用します。", "why"));
@@ -604,7 +606,18 @@ function renderProjects(projects, error) {
       use.disabled = liveState.running || liveState.switching;
       use.onclick = () => act(use, "/api/project", {project: project.name},
         `'${project.name}' に切り替えます。今のプロジェクトは退避されます。よいですか？`);
-      cell.append(use);
+      // 消すと戻せない。確かめは「OK」ではなく、名前を打たせる。
+      const remove = document.createElement("button"); remove.textContent = "削除";
+      remove.className = "danger";
+      remove.disabled = liveState.running || liveState.switching;
+      remove.onclick = () => {
+        const typed = prompt(`'${project.name}' を箱からディレクトリごと消します。退避中の作業ツリー、計画、走行ログも消え、戻せません。` +
+                             "ホストのクローンは残ります。\n消すなら名前を打ってください。");
+        if (typed === null) return;
+        if (typed.trim() !== project.name) { alert("名前が違うので、消しませんでした"); return; }
+        act(remove, "/api/project/remove", {project: project.name});
+      };
+      cell.append(use, remove);
     }
     row.append(text("td", project.name), text("td", PROJECT_STATE[project.state] || project.state),
                text("td", project.branch || "?"), cell);
@@ -621,7 +634,19 @@ async function loadSettings() {
   const language = document.querySelector("#language"), chosen = language.value;
   language.replaceChildren(...value.languages.map(name => new Option(name, name)));
   if (value.languages.includes(chosen)) language.value = chosen;
+  frameworksByLanguage = value.frameworks || {};
+  fillFrameworks();
   for (const [role, current] of Object.entries(value.roles)) box.append(modelRow(role, current, value.efforts));
+}
+
+// 言語ごとの持ち込む先。先頭が言語の既定。
+let frameworksByLanguage = {};
+
+function fillFrameworks() {
+  const select = document.querySelector("#framework"), chosen = select.value;
+  const names = frameworksByLanguage[document.querySelector("#language").value] || [];
+  select.replaceChildren(...names.map((name, i) => new Option(i === 0 ? `${name}（既定）` : name, name)));
+  if (names.includes(chosen)) select.value = chosen;
 }
 
 function modelRow(role, current, efforts) {
@@ -652,8 +677,9 @@ async function startRun(element) {
   const file = document.querySelector("#requirements").files[0];
   if (!file) { alert("要件のファイルを選んでください。"); return; }
   const language = document.querySelector("#language").value;
-  await act(element, "/api/start", {requirements: await file.text(), language},
-    `${file.name} を要件にして、${language} で計画づくりから走らせます。よいですか？`);
+  const framework = document.querySelector("#framework").value;
+  await act(element, "/api/start", {requirements: await file.text(), language, framework},
+    `${file.name} を要件にして、${language}${framework ? `（${framework}）` : ""} で計画づくりから走らせます。よいですか？`);
 }
 
 let pullTimer = null;
@@ -747,6 +773,7 @@ function setupControl() {
   setupTabs();
   const start = document.querySelector("#start-run");
   start.onclick = () => startRun(start);
+  document.querySelector("#language").onchange = fillFrameworks;
   const resume = document.querySelector("#continue-run");
   resume.onclick = () => act(resume, "/api/continue", {}, "止まったところから続けます。よいですか？");
   const stop = document.querySelector("#stop-run");

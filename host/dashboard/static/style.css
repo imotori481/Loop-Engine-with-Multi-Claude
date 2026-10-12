@@ -60,6 +60,7 @@ details { margin-top: 14px; } summary { cursor: pointer; color: #9bb7a8; font-si
 .model-row { display: grid; grid-template-columns: 7rem 1fr 7rem auto; gap: 8px; align-items: center; }
 .model-row span { letter-spacing: 0; text-transform: none; color: #edf5ef; font-size: .9rem; }
 .table-wrap.flat { padding: 0; border: 0; background: transparent; } .table-wrap.flat td button { padding: 4px 10px; font-size: .82rem; }
+.table-wrap.flat td button + button { margin-left: 6px; }
 tr.current td { background: #173d30; }
 button.danger { background: #6b2a1c; border-color: #d9805f; } button.danger:hover { background: #8a3826; }
 #run-state.running { color: #86c9a7; font-weight: 700; }

@@ -53,6 +53,7 @@ PowerShell なら `.\host\loop.cmd <args>`、Git Bash なら `./host/loop.cmd <a
 | 要件から最後まで走らせる | `loop go <requirements>` |
 | TypeScript で走らせる | `loop go <requirements> --language typescript` |
 | C++ で走らせる | `loop go <requirements> --language cpp` |
+| 持ち込む先を選んで走らせる | `loop go <requirements> --language <言語> --framework <持ち込む先>` |
 | 状態を見る | `loop status` |
 | ログを追う（Ctrl-C で抜けても走行は続く） | `loop log` |
 | 止まったところから続ける | `loop continue` |
@@ -66,7 +67,7 @@ PowerShell なら `.\host\loop.cmd <args>`、Git Bash なら `./host/loop.cmd <a
 
 止まった理由と次の手は、`loop status` とログの最後の行に出る。
 
-改訂の上限まで回してもクリティックの指摘が残るか、改訂の途中でプランナーが判断を返すと止まる。的外れな指摘や、プランナーの問いに答える指摘を書き換えてから `loop continue` を流すと、
+改訂の上限まで回してもクリティックの指摘が残るか、改訂が済まずに止まると、指摘は人を待つ。改訂が済まないのは、プランナーが判断を返したとき、改訂に失敗したとき、改訂の途中で走行を止めたときだ。的外れな指摘や、プランナーの問いに答える指摘を書き換えてから `loop continue` を流すと、
 書き換えた指摘でプランナーが1回だけ計画を直し、適用して走らせる。何も書き換えなければ、そのまま適用する。
 ダッシュボードの「クリティックの指摘」からも、書き換えと続行ができる。
 
@@ -79,9 +80,18 @@ PowerShell なら `.\host\loop.cmd <args>`、Git Bash なら `./host/loop.cmd <a
 | クリティックの指摘を見る | `loop findings` |
 | 残った指摘を1件書き換える（番号は0から） | `echo '{"mode": "<mode>", "index": <n>, "title": "<題>", "evidence": "<根拠>"}' \| loop findings set` |
 | エスカレーションへの改訂案をプランナーに書かせる | `loop raw plan propose --step <step>` |
+| 受け入れ条件を書き換えた計画を入れ、ステップを最後の緑に戻す | `loop plan amend <step> <tasks.json>` |
 | 計画を批評だけする | `loop raw critique` |
 
 `loop raw` は `loop.py` をそのまま runner として前面で呼ぶ。動詞の一覧は `loop raw --help`。
+
+受け入れ条件の書き換えと上流からの作り直しは人の判断で、プランナーの提案では拒まれる。
+写しの `plan/tasks.json` を書き換えて `loop plan amend` に渡す。ホストで打つときは、ホストの
+ファイルのパスをそのまま渡せる。リンタに通らなければ何も変わらない。通れば計画をコミットし、
+そのステップを最後の緑に戻す。次は `loop continue`。
+
+ダッシュボードでエスカレーションに「回答を記録」すると、回答は箱に届く。次の `loop continue` は
+ステップを走らせ直す前に、その回答をプランナーに渡して計画を直させる。
 
 ## プロジェクトを切り替える（ホストでも箱でも）
 
@@ -95,6 +105,7 @@ PowerShell なら `.\host\loop.cmd <args>`、Git Bash なら `./host/loop.cmd <a
 | 作ってあるプロジェクトの柵の場所を変える | `loop project layout <project> --src <src-dir> --tests <tests-dir>` |
 | Unity の参照アセンブリを送る（ホストだけ） | `loop-unity-refs <project> <unity-project-dir>` |
 | 切り替える | `loop project use <project>` |
+| ディレクトリと走行ログごと消す（今のものは消せない） | `loop project remove <project>` |
 | `loop-project.sh` より前に作った箱に名前を付ける | `loop project adopt <project>` |
 
 走行中は切り替えられない。先に `loop stop` か、終わるのを待つ。
@@ -220,6 +231,7 @@ loop go <requirements> --language cpp
 - `DxLib.h` や `windows.h` のように、標準でもリポジトリのものでもないヘッダを include するファイルはビルドから外す。外したファイルは計画づくりのブリーフに並ぶ
 - 描画、入力、音を扱うファイルもソルバーが書けるが、箱ではビルドも実行もしない。人が Visual Studio でビルドして画面を確かめる
 - `DxLib.h` を include するファイルがあるか、要件が DXライブラリに触れていれば、プランナーに DXライブラリの主な関数の早見表を渡す
+- 手元の `DxLib.h` を `loop refs dxlib <DxLib.h>` で送ると、箱の `/srv/loop/refs/dxlib` に置かれ、ソルバーが早見表に無い関数と定数をそこから引く。ホストで打つときは、ホストのファイルのパスをそのまま渡せる。DXライブラリを入れ替えたら送り直す
 - 新しい `.cpp` と `.h` は Visual Studio のプロジェクト（`.vcxproj`）に入らない。CONTEXT.md の一覧を見て、人が足す
 - ソースは ASCII だけで書かせる。画面に日本語を出すなら、Visual Studio でソースの文字コードの扱い（`/utf-8` など）を決めてから人が書き足す
 - C++ の既存コードの宣言はまだプランナーに渡らない。スタブはソルバーが書き、ランナーは既存のファイルの残りが変わっていないかを確かめない

@@ -443,6 +443,9 @@ class TheSolverIsShownTheCodeTheStubReplaced(unittest.TestCase):
             brief = loop.brief_impl(self.STEP, "CONTEXT", "TESTS", "FAILURE")
         self.assertIn("Make the smallest change that passes the tests.", brief)
         self.assertIn("instead of writing new ones", brief)
+        # 取り込んだ Promete の実走で、ソルバーはマウスのボタンの名前を反射で当て推量し、
+        # 見つからないと黙って false を返していた。テストは通り、クリックは効かない。
+        self.assertIn("Do not guess at a library's API.", brief)
 
 
 class TheSolverBriefsShareTheirOpening(unittest.TestCase):

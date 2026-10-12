@@ -490,8 +490,7 @@ class WhatTheCodeAlreadyDeclares(CSharp):
             ["src/I.cs: class Inputs: IDisposable", "src/I.cs: void Inputs.Enable()"])
 
     def test_a_file_that_cannot_be_read_gives_nothing(self):
-        for text in ("#if DEBUG\npublic class A { }\n", "public class A { /* }\n",
-                     "namespace A;\npublic class B { }\n"):
+        for text in ("#if DEBUG\npublic class A { }\n", "public class A { /* }\n"):
             with self.subTest(text=text):
                 self.assertEqual(loop.csharp_declarations(text, "src/A.cs"), [])
 

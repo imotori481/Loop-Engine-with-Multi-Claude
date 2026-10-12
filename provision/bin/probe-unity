@@ -37,6 +37,10 @@ WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 LOG="/srv/loop/logs/probe-unity-$(date +%Y%m%d-%H%M%S).log"
 : > "$LOG" 2>/dev/null || LOG="$WORK/probe.log"
+# ランナーと同じく SDK 8 で測る。dotnet は $WORK で呼び、この global.json を読ませる。
+cat > "$WORK/global.json" <<'EOF'
+{"sdk": {"version": "8.0.100", "rollForward": "latestFeature", "allowPrerelease": false}}
+EOF
 
 # 参照の一覧。Private=false はコンパイルにだけ使い、出力に写さない。実行の測定
 # （2）では写す。エンジン本体の代わりに、この DLL が読み込まれるからだ。
@@ -72,7 +76,7 @@ $(references false)
 EOF
 echo
 echo "== 1. $SRC/ を送った参照でコンパイルする"
-{ dotnet restore "$WORK/code/Code.csproj" --configfile "$TOOLS/nuget.config" \
+{ cd "$WORK" && dotnet restore "$WORK/code/Code.csproj" --configfile "$TOOLS/nuget.config" \
     && dotnet build "$WORK/code/Code.csproj" --no-restore -nologo -clp:NoSummary; } \
   >"$WORK/code.log" 2>&1 && built=1 || built=0
 cat "$WORK/code.log" >>"$LOG"
@@ -139,7 +143,7 @@ EOF
 echo
 echo "== 2. エンジン本体の無い .NET 8 で Unity の API を呼ぶ"
 REPORT="$WORK/probe.xml"
-{ dotnet restore "$WORK/probe/Probe.csproj" --configfile "$TOOLS/nuget.config" \
+{ cd "$WORK" && dotnet restore "$WORK/probe/Probe.csproj" --configfile "$TOOLS/nuget.config" \
     && dotnet test "$WORK/probe/Probe.csproj" --no-restore --logger "junit;LogFilePath=$REPORT"; } \
   >"$WORK/probe.log" 2>&1 || true
 cat "$WORK/probe.log" >>"$LOG"

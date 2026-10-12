@@ -3,9 +3,11 @@ setlocal
 REM ---------------------------------------------------------------
 REM  loop -- run the sandbox's `loop` command from the host.
 REM
-REM    loop go <requirements.md> [--language <lang>]
+REM    loop go <requirements.md> [--language <lang>] [--framework <name>]
 REM    loop continue | status | log | stop | update
 REM    loop project <list|current|init|use|adopt> ...
+REM    loop plan amend <step> <tasks.json>
+REM    loop refs dxlib <DxLib.h>
 REM    loop raw <loop.py arguments>
 REM
 REM  Starts the distro and waits for sshd first, the same way
@@ -31,8 +33,34 @@ if errorlevel 1 (
 )
 
 if /i "%~1"=="go" if exist "%~2" goto go_local
+if /i "%~1"=="plan" if /i "%~2"=="amend" if exist "%~4" goto amend_local
+if /i "%~1"=="refs" if /i "%~2"=="dxlib" if exist "%~3" goto dxlib_local
 
 ssh -t %SSHHOST% loop %*
+exit /b %errorlevel%
+
+
+:amend_local
+REM `loop plan amend <step> <tasks.json>` with a plan on THIS machine,
+REM e.g. the mirror's plan\tasks.json after editing it.
+scp -q "%~4" %SSHHOST%:loop-amended-tasks.json
+if errorlevel 1 (
+  echo ERROR: could not copy %~4 to the sandbox.
+  exit /b 1
+)
+ssh -t %SSHHOST% loop plan amend %3 ~/loop-amended-tasks.json
+exit /b %errorlevel%
+
+
+:dxlib_local
+REM `loop refs dxlib <DxLib.h>` with the header of the DX Library
+REM installed on THIS machine.
+scp -q "%~3" %SSHHOST%:loop-DxLib.h
+if errorlevel 1 (
+  echo ERROR: could not copy %~3 to the sandbox.
+  exit /b 1
+)
+ssh -t %SSHHOST% loop refs dxlib ~/loop-DxLib.h
 exit /b %errorlevel%
 
 
