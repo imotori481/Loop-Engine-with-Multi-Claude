@@ -15,15 +15,14 @@ ALL_GREEN に対してなされた。クローンの `loop/<branch>` がそれ�
 コマンドは引数配列のまま shell=False で流す。HTTP の値はブランチ名にも引数にも
 入らない。入るのは、人が書いた承認のメモを PR の本文にするところだけだ。
 
-全ステップが緑になる前の状態は、下書きの PR として出せる（`loop-pr`）。緑の判定には
-触れない。出すのは写しの HEAD、つまり最後に緑になったステップのコミットで、本文に
-残りのステップを並べる。承認の PR とはブランチを分け、承認で作り直されないようにする。
+全モジュールが緑になる前の状態は、下書きの PR として出せる（`loop-pr`）。緑の判定には
+触れない。出すのは写しの HEAD、つまり最後に緑になったモジュールのコミットで、本文に
+残りのモジュールを並べる。承認の PR とはブランチを分け、承認で作り直されないようにする。
 """
 
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import re
 import subprocess
@@ -34,12 +33,13 @@ from pathlib import Path
 from typing import Any, Callable
 
 try:
-    from .state import read_jsonl
+    from .state import design_modules, green_modules, read_jsonl
 except ImportError:  # 直接実行したとき: python host/dashboard/pullrequest.py
-    from state import read_jsonl
+    from state import design_modules, green_modules, read_jsonl
 
-# 箱が置いた環境のファイルと計画。PR には要らない。docs/COMMANDS.md の手順と同じ。
-REMOVED = ("plan", "conftest.py", "index.html", "vitest.config.mjs")
+# 箱が置いた環境のファイルと設計。PR には要らない。docs/COMMANDS.md の手順と同じ。
+REMOVED = ("plan", "docs/spec", "docs/basic", "docs/modules",
+           "conftest.py", "index.html", "vitest.config.mjs")
 # .gitignore は箱が行を足している。親ブランチの版に戻し、無ければ消す。
 GITIGNORE = ".gitignore"
 BASE_KEY = "branch.{}.loopBase"
@@ -65,10 +65,10 @@ def github_repo(url: str) -> str:
     return match.group("repo")
 
 
-def pr_body(branch: str, steps: list[str], note: str) -> str:
-    lines = ["Loop Engine が全ステップを緑にし、人が成果物を動かして承認した。", "",
-             f"- ステップ: {', '.join(steps) or '-'}",
-             f"- 作業ブランチ: `{branch}` から、計画と箱の環境のファイルを除いた版"]
+def pr_body(branch: str, modules: list[str], note: str) -> str:
+    lines = ["Loop Engine が全モジュールを緑にし、人が成果物を動かして承認した。", "",
+             f"- モジュール: {', '.join(modules) or '-'}",
+             f"- 作業ブランチ: `{branch}` から、設計と箱の環境のファイルを除いた版"]
     if note.strip():
         lines += ["", "## 承認のメモ", "", note.strip()]
     return "\n".join(lines) + "\n"
@@ -76,29 +76,25 @@ def pr_body(branch: str, steps: list[str], note: str) -> str:
 
 def draft_body(branch: str, green: list[str], remaining: list[str]) -> str:
     return "\n".join([
-        "Loop Engine が途中まで緑にした状態。残りのステップは緑になっておらず、人の承認もまだ。", "",
-        f"- 緑のステップ: {', '.join(green)}",
-        f"- 残りのステップ: {', '.join(remaining)}",
-        f"- 作業ブランチ: `{branch}` から、計画と箱の環境のファイルを除いた版"]) + "\n"
+        "Loop Engine が途中まで緑にした状態。残りのモジュールは緑になっておらず、人の承認もまだ。", "",
+        f"- 緑のモジュール: {', '.join(green)}",
+        f"- 残りのモジュール: {', '.join(remaining)}",
+        f"- 作業ブランチ: `{branch}` から、設計と箱の環境のファイルを除いた版"]) + "\n"
 
 
-def draft_steps(mirror: Path) -> tuple[list[str], list[str]]:
-    """写しの計画の、緑のステップと残りのステップ。下書きにできなければ断る。"""
-    ledger = read_jsonl(mirror / "plan" / "ledger.jsonl")
-    try:
-        tasks = json.loads((mirror / "plan" / "tasks.json").read_text(encoding="utf-8"))
-    except (OSError, ValueError) as error:
-        raise PullRequestError(f"cannot read the plan in {mirror}: {error}") from error
-    steps = tasks.get("steps", []) if isinstance(tasks, dict) else []
-    ids = [step.get("id") for step in steps if isinstance(step, dict) and step.get("id")]
-    done = {record.get("step") for record in ledger if record.get("event") == "GREEN"}
-    green = [step for step in ids if step in done]
-    remaining = [step for step in ids if step not in done]
+def draft_modules(mirror: Path) -> tuple[list[str], list[str]]:
+    """写しの設計の、緑のモジュールと残りのモジュール。下書きにできなければ断る。"""
+    ids = design_modules(mirror)
+    if not ids:
+        raise PullRequestError(f"no module design in {mirror / 'docs' / 'modules'}")
+    done = set(green_modules(read_jsonl(mirror / "plan" / "ledger.jsonl")))
+    green = [module for module in ids if module in done]
+    remaining = [module for module in ids if module not in done]
     if not green:
-        raise PullRequestError("no step is green yet. There is nothing to send")
+        raise PullRequestError("no module is green yet. There is nothing to send")
     if not remaining:
         raise PullRequestError(
-            "every step is green. Approve the review in the dashboard to send the pull request")
+            "every module is green. Approve the review in the dashboard to send the pull request")
     return green, remaining
 
 
@@ -153,15 +149,15 @@ class PullRequests:
             "the approved commit is in no imported project's loop/<branch>. "
             "Run loop-pull, or the project was not made with loop-import")
 
-    def open(self, steps: list[str], note: str) -> dict[str, Any]:
+    def open(self, modules: list[str], note: str) -> dict[str, Any]:
         """承認した ALL_GREEN を、<branch>-pr からの PR にする。"""
         with self._lock:
             return self._open(PR_SUFFIX, lambda branch: (
-                f"{branch}: Loop Engine の成果", pr_body(branch, steps, note)), draft=False)
+                f"{branch}: Loop Engine の成果", pr_body(branch, modules, note)), draft=False)
 
     def open_draft(self) -> dict[str, Any]:
-        """最後に緑になったステップまでを、<branch>-draft からの下書きの PR にする。"""
-        green, remaining = draft_steps(self.mirror)
+        """最後に緑になったモジュールまでを、<branch>-draft からの下書きの PR にする。"""
+        green, remaining = draft_modules(self.mirror)
         with self._lock:
             result = self._open(DRAFT_SUFFIX, lambda branch: (
                 f"{branch}: Loop Engine の途中の成果", draft_body(branch, green, remaining)),
@@ -194,7 +190,7 @@ class PullRequests:
         if existing and existing != "null":
             url, created = existing, False
             if draft:
-                # 下書きは緑が増えるたびに出し直すので、本文のステップの一覧も合わせる。
+                # 下書きは緑が増えるたびに出し直すので、本文のモジュールの一覧も合わせる。
                 self._cmd(["gh", "pr", "edit", url, "--repo", repo, "--body", body], clone)
         else:
             url = self._cmd(["gh", "pr", "create", "--repo", repo, "--base", base,
@@ -228,7 +224,7 @@ class PullRequests:
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
         prog="loop-pr",
-        description="send the steps that are green so far as a draft pull request")
+        description="send the modules that are green so far as a draft pull request")
     parser.add_argument("--project", type=Path, default=MIRROR,
                         help=f"the live mirror loop-pull writes (default: {MIRROR})")
     args = parser.parse_args(argv)

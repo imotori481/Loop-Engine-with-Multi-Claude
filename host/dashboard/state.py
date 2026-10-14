@@ -42,27 +42,31 @@ def read_jsonl(path: Path) -> list[dict[str, Any]]:
     return records
 
 
-# この機械以外の場所から決めてよいもの。作業の差し戻しには判断しか要らない。
-# 走行の停止は、スマホから届いてほしい唯一の操作だ。「遊んでみて良かった」と
-# 言うのは別の行為になる。レビューがあるのは、どの機械も画面を確かめられない
-# からだ。窓を開けない端末に、それを保証させてはならない。
-REMOTE_DECISIONS = {
-    "review": {"revise"},
-    "escalation": {"respond", "stop"},
-    "planner": {"respond", "stop"},
-}
+def design_modules(project: Path) -> list[str]:
+    """写しの詳細設計仕様書が述べるモジュールの id。docs/modules/ の下のパスから .md を落としたもの。"""
+    root = project / "docs" / "modules"
+    if not root.is_dir():
+        return []
+    return sorted(path.relative_to(root).with_suffix("").as_posix()
+                  for path in root.rglob("*.md") if path.is_file())
 
-# 詰まっているのは別々の2者で、詰まった理由も違う。
-# ESCALATION.md は、ランナーがステップを基準に通せなかったことを表す。
-# PLANNER_ESCALATION.md は、プランナーが状況を読み、許された改訂ではどれも
-# 役に立たないと結論したことを表す。これは (b) か (c) で、RUNNER_SPEC 6-2 が
-# 人間に残している判断だ。片方に答えても、もう片方に答えたことにはならない。
-# だから別々の要求にし、別々の ID を振る。
-ESCALATION_FILES = {
-    "escalation": ("ESCALATION.md", "実装が停止し、人間の判断を待っています"),
-    "planner": ("PLANNER_ESCALATION.md",
-                "プランナーが「自分には直せない」と返しました。基準か設計の判断です"),
-}
+
+def green_modules(ledger: list[dict[str, Any]]) -> list[str]:
+    """台帳で今緑のモジュール。GREEN で緑になり、後の REOPEN で緑でなくなる。"""
+    green: list[str] = []
+    for record in ledger:
+        if record.get("event") == "GREEN" and record.get("step") not in green:
+            green.append(record.get("step"))
+        elif record.get("event") == "REOPEN":
+            reopened = record.get("modules") or []
+            green = [module for module in green if module not in reopened]
+    return green
+
+
+# この機械以外の場所から決めてよいもの。作業の差し戻しには判断しか要らない。
+# 「遊んでみて良かった」と言うのは別の行為になる。レビューがあるのは、どの機械も
+# 画面を確かめられないからだ。窓を開けない端末に、それを保証させてはならない。
+REMOTE_DECISIONS = {"review": {"revise"}}
 
 
 # グラフに出す役。台帳の USAGE の who と同じ名前を使う。
@@ -104,19 +108,18 @@ def token_runs(ledger: list[dict[str, Any]], source: str = "") -> list[dict[str,
 
     tokens は役ごとの合計、kinds は役ごとの種類別、usd は役ごとの cost_usd の和。
 
-    1回は PLAN_BOOTSTRAP から始まり、次の PLAN_BOOTSTRAP の手前で終わる。
-    計画づくりと批評は run --all より前に流れるので、RUN_ALL_START では区切らない。
-    PLAN_BOOTSTRAP より前に記録があれば、最初の記録から1回目を始める。
-    USAGE が1件も無い回は、消費を記録する前の台帳なので返さない。
+    1回は SPEC_IMPORT から始まり、次の SPEC_IMPORT の手前で終わる。設計と批評は
+    run --all より前に流れるので、RUN_ALL_START では区切らない。SPEC_IMPORT より前に
+    記録があれば、最初の記録から1回目を始める。USAGE が1件も無い回は返さない。
 
     結果は最後に起きたものを取る。ALL_GREEN なら完了、RUN_ALL_STOP なら停止。
-    次の PLAN_BOOTSTRAP が来た回は、完了していなければ中断とする。
+    次の SPEC_IMPORT が来た回は、完了していなければ中断とする。
     """
     runs: list[dict[str, Any]] = []
     current: dict[str, Any] | None = None
     for record in ledger:
         event = record.get("event")
-        if event == "PLAN_BOOTSTRAP" or current is None:
+        if event == "SPEC_IMPORT" or current is None:
             if current is not None and current["outcome"] != "green":
                 current["outcome"] = "abandoned"
             current = {"source": source, "started": record.get("ts", ""),
@@ -143,14 +146,12 @@ def token_runs(ledger: list[dict[str, Any]], source: str = "") -> list[dict[str,
 
 def ledger_files(root: Path) -> list[Path]:
     """写しの置き場の下にある台帳。loop-pull の projects\\*、runs\\*、project を拾う。
-    それぞれの plan/archive/<番号> にある、終えた計画の台帳も拾う。
 
     同じ回が2か所にあるときは先に拾ったほうの名前が残る。project より
     projects\\<name> のほうが、どのプロジェクトかが分かるので先に拾う。
     """
     found = []
     for mirror in ("*/*", "*"):
-        found += sorted(root.glob(f"{mirror}/plan/archive/*/ledger.jsonl"))
         found += sorted(root.glob(f"{mirror}/plan/ledger.jsonl"))
     return found
 
@@ -229,10 +230,8 @@ def newer_run(kept: dict[str, Any] | None, seen: dict[str, Any]) -> dict[str, An
 def token_history(root: Path) -> list[dict[str, Any]]:
     """控えと写しの全台帳の回を、開始時刻の順に並べて番号を振る。
 
-    1つの台帳には、1つの計画の回が入る。bootstrap は次の計画を起こす前に、
-    前の計画の台帳を plan/archive/ へ移す。だから回の履歴は、写しと退避した
-    台帳を横断して作る。project は今のプロジェクトの写しで、projects の下と
-    同じ回を持つ。
+    回の履歴は、写しの台帳を横断して作る。project は今のプロジェクトの写しで、
+    projects の下と同じ回を持つ。
 
     回は開始時刻で見分ける。箱で一度に走るのは1つだけだ。台帳で見えた回で
     控えを更新し、台帳から消えた回は控えから出す。
@@ -290,43 +289,31 @@ class DashboardState:
 
     def snapshot(self) -> dict[str, Any]:
         ledger = read_jsonl(self.project / "plan" / "ledger.jsonl")
-        tasks = _read_json(self.project / "plan" / "tasks.json", {})
+        stage = _read_json(self.project / "plan" / "stage.json", {})
         decisions = read_jsonl(self.decisions_file)
         answered = {
             (item.get("kind"), item.get("request_id"))
             for item in decisions if item.get("event") == "HUMAN_DECISION"
         }
-        steps = tasks.get("steps", []) if isinstance(tasks, dict) else []
-        step_ids = [step.get("id") for step in steps if isinstance(step, dict)]
-        green = []
-        for record in ledger:
-            if record.get("event") == "GREEN" and record.get("step") not in green:
-                green.append(record.get("step"))
-
-        stuck = []
-        for kind, (filename, title) in ESCALATION_FILES.items():
-            path = self.project / "plan" / filename
-            if not path.is_file():
-                continue
-            text = path.read_text(encoding="utf-8", errors="replace")
-            identifier = request_id(kind, text)
-            if (kind, identifier) in answered:
-                continue
-            stuck.append({"id": identifier, "kind": kind, "title": title, "detail": text})
+        modules = design_modules(self.project)
+        green = [module for module in green_modules(ledger) if module in modules]
 
         all_green = next(
             (record for record in reversed(ledger) if record.get("event") == "ALL_GREEN"),
             None,
         )
+        # 最終確認は段が review のあいだだけ。reopen で中段に戻れば、前の ALL_GREEN は
+        # 今の設計について何も言っていない。
         review = None
-        if all_green is not None:
+        if all_green is not None and stage.get("stage") == "review":
             review_id = request_id("review", all_green)
             if ("review", review_id) not in answered:
                 review = {
                     "id": review_id,
                     "kind": "review",
-                    "title": "全ステップGreenです。成果物を実際に確認してください",
-                    "detail": "機械的な受け入れ条件は完了しました。成果物を起動し、承認または差し戻しを記録してください。",
+                    "title": "全モジュールが緑です。成果物を実際に確認してください",
+                    "detail": "機械的な受け入れ条件は完了しました。成果物を起動し、承認するか、"
+                              "直すモジュールを選んで中段に戻してください。",
                 }
 
         pull_request = None
@@ -336,25 +323,17 @@ class DashboardState:
                 (item for item in reversed(decisions) if item.get("event") == "PULL_REQUEST"
                  and item.get("request_id") == approved["request_id"]), None)}
 
-        pending = stuck + ([review] if review is not None else [])
+        pending = [review] if review is not None else []
         last = ledger[-1] if ledger else None
-        if any(item["kind"] == "planner" for item in stuck):
-            phase = "planner_escalated"
-        elif stuck:
-            phase = "escalated"
-        elif review:
-            phase = "review_required"
-        elif all_green:
+        # 段は写しの plan/stage.json が正。最終確認を記録した後だけ human_reviewed にする。
+        phase = stage.get("stage") or "not_started"
+        if phase == "review" and all_green is not None and review is None:
             phase = "human_reviewed"
-        elif ledger:
-            phase = "running" if last and last.get("event") != "RUN_ALL_STOP" else "stopped"
-        else:
-            phase = "not_started"
 
         return {
             "project": str(self.project),
             "phase": phase,
-            "steps": {"total": len(step_ids), "green": len(green), "ids": step_ids},
+            "steps": {"total": len(modules), "green": len(green), "ids": modules},
             "pending": pending,
             "last_event": last,
             "recent_events": ledger[-50:],
@@ -378,17 +357,13 @@ class DashboardState:
         )
         if matching is None:
             raise ValueError("the request is no longer pending")
-        allowed = {
-            "review": {"approve", "revise"},
-            "escalation": {"respond", "stop"},
-            "planner": {"respond", "stop"},
-        }
+        allowed = {"review": {"approve", "revise"}}
         if decision not in allowed.get(kind, set()):
             raise ValueError("decision is not valid for this request")
         if scope != "local" and decision not in REMOTE_DECISIONS.get(kind, set()):
             raise ValueError(
                 "that has to be decided at the machine that can run the result")
-        if decision in {"revise", "respond"} and not note.strip():
+        if decision == "revise" and not note.strip():
             raise ValueError("this decision requires a note")
         record = {
             "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),

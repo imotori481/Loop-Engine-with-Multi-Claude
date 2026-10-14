@@ -1,7 +1,8 @@
 """箱の「いまの作業」を SSH で引く。
 
-ミラーの台帳が進むのは、ランナーが push する GREEN と plan apply のときだけだ。
-いま誰がどのステップの何をしているかは、箱の `loop now` に訊くしかない。
+ミラーの台帳が進むのは、ランナーが push する GREEN と段のコマンドのときだけで、
+写しは loop-pull しないと進まない。いま誰がどのモジュールの何をしているかと、せきで
+読む設計は、箱に訊く。
 
 コマンドは固定で、HTTP の値は1つも入らない。`shell=False` で引数配列のまま
 実行する。何人がページを開いていても SSH が束にならないよう、数秒だけ控えを返す。
@@ -74,15 +75,6 @@ class Live:
             raise ValueError(lines[-1] if lines else f"the sandbox refused ({proc.returncode})")
         return proc.stdout.strip()
 
-    def rewrite_finding(self, mode: str, index: int, title: str, evidence: str) -> str:
-        """クリティックの指摘1件の title と evidence を書き換える。
-
-        値は標準入力の JSON で渡し、コマンドラインには入れない。何を受け付けるかは
-        箱の loop_findings.py が決める。
-        """
-        request = {"mode": mode, "index": index, "title": title, "evidence": evidence}
-        return self._act(["loop", "findings", "set"], json.dumps(request, ensure_ascii=False))
-
     def _dash(self, request: dict[str, Any]) -> str:
         """`loop dash` に要求を1つ渡す。sudoers が保守ユーザーにこれだけをパスワード無しで許す。
 
@@ -98,19 +90,26 @@ class Live:
     def stop_loop(self) -> str:
         return self._dash({"action": "stop"})
 
-    def reset_step(self, step: str) -> str:
-        """`loop raw reset <ステップ>`。止まったステップの作業ツリーを最後の緑に戻す。"""
-        return self._dash({"action": "reset", "step": step})
+    def reset_module(self, module: str) -> str:
+        """`loop raw reset <モジュール>`。止まったモジュールの作業ツリーを最後のコミットに戻す。"""
+        return self._dash({"action": "reset", "module": module})
 
-    def answer(self, text: str) -> str:
-        """エスカレーションへの答えを箱の human/in/ANSWER.md に置く。次の plan propose が
-        プランナーに渡す。"""
-        return self._dash({"action": "answer", "text": text})
+    def approve(self) -> str:
+        """`loop approve`。今の段の設計を承認し、次の段へ流す。"""
+        return self._dash({"action": "approve"})
 
-    def start_loop(self, requirements: str, language: str, framework: str = "") -> str:
-        """`loop go`。要件の本文は箱の一時ディレクトリに書かれ、そこから置かれる。
+    def reject(self, comment: str) -> str:
+        """`loop reject`。コメントを付けて、今の段の設計をプランナーに書き直させる。"""
+        return self._dash({"action": "reject", "text": comment})
+
+    def reopen(self, modules: list[str]) -> str:
+        """`loop reopen`。詳細設計を直すモジュールを選び、中段に戻す。"""
+        return self._dash({"action": "reopen", "modules": modules})
+
+    def start_loop(self, spec: str, language: str, framework: str = "") -> str:
+        """`loop go`。仕様書の本文は箱の一時ディレクトリに書かれ、そこから置かれる。
         持ち込む先が空なら、箱が言語の既定を選ぶ。"""
-        return self._dash({"action": "go", "requirements": requirements, "language": language,
+        return self._dash({"action": "go", "spec": spec, "language": language,
                            "framework": framework})
 
     def use_project(self, name: str) -> str:
@@ -126,15 +125,23 @@ class Live:
         return self._dash({"action": "init", "project": name, "branch": branch,
                            "src": src, "tests": tests})
 
-    def settings(self) -> dict[str, Any]:
-        """役ごとの LOOP_MODEL と LOOP_EFFORT、選べる effort と言語。資格情報は返らない。"""
+    def _read(self, action: str) -> dict[str, Any]:
+        """読むだけの要求を流し、JSON のオブジェクトを返す。"""
         try:
-            value = json.loads(self._dash({"action": "settings"}))
+            value = json.loads(self._dash({"action": action}))
         except json.JSONDecodeError:
             raise ValueError("the sandbox answered with something that is not JSON")
         if not isinstance(value, dict):
             raise ValueError("unexpected answer")
         return value
+
+    def settings(self) -> dict[str, Any]:
+        """役ごとの LOOP_MODEL と LOOP_EFFORT、選べる effort と言語。資格情報は返らない。"""
+        return self._read("settings")
+
+    def design(self) -> dict[str, Any]:
+        """段、基本設計、詳細設計、受け入れ条件、インターフェースチェック、批評、止まった理由。"""
+        return self._read("design")
 
     def set_model(self, role: str, model: str, effort: str) -> str:
         """/etc/loop/<役>.env の LOOP_MODEL と LOOP_EFFORT を書き換える。"""

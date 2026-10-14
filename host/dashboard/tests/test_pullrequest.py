@@ -53,12 +53,15 @@ class Repositories(unittest.TestCase):
         git(self.clone, "switch", "-q", "--no-track", "-c", "feat", "origin/develop")
         git(self.clone, "config", "branch.feat.loopBase", "develop")
 
-        # 箱の bare。計画と環境のファイルと、作業の成果が載る。
+        # 箱の bare。設計と環境のファイルと、作業の成果が載る。
         box = root / "box"
         git(root, "clone", "-q", "-b", "develop", str(self.origin), str(box))
         git(box, "switch", "-q", "-c", "feat")
         commit_files(box, {".gitignore": "*.tmp\n.venv/\n", "conftest.py": "x\n",
-                           "plan/tasks.json": "{}\n", "src/game.cs": "class Game {}\n"}, "S1")
+                           "plan/stage.json": "{}\n", "docs/spec/spec.md": "# 仕様書\n",
+                           "docs/basic/design.md": "## 概要\n",
+                           "docs/modules/S1.md": "## 振る舞い\n",
+                           "src/game.cs": "class Game {}\n"}, "S1")
         self.bare = root / "box.git"
         git(root, "clone", "-q", "--bare", str(box), str(self.bare))
         git(self.clone, "remote", "add", "loop", str(self.bare))
@@ -89,7 +92,7 @@ class Repositories(unittest.TestCase):
 
 
 class Opening(Repositories):
-    def test_the_pr_branch_drops_the_plan_and_the_environment(self):
+    def test_the_pr_branch_drops_the_design_and_the_environment(self):
         result = self.pulls().open(["S1"], "played it")
         self.assertEqual((result["head"], result["base"], result["created"]),
                          ("feat-pr", "develop", True))
@@ -132,15 +135,15 @@ class Opening(Repositories):
 
 
 class Drafting(Repositories):
-    def plan(self, *green):
-        plan = self.mirror / "plan"
-        (plan / "tasks.json").write_text(
-            '{"steps": [{"id": "S1"}, {"id": "S2"}, {"id": "S3"}]}', encoding="utf-8")
-        (plan / "ledger.jsonl").write_text("".join(
-            f'{{"event": "GREEN", "step": "{step}"}}\n' for step in green), encoding="utf-8")
+    def design(self, *green):
+        for module in ("S2", "S3"):
+            (self.mirror / "docs" / "modules" / f"{module}.md").write_text(
+                "## 振る舞い\n", encoding="utf-8")
+        (self.mirror / "plan" / "ledger.jsonl").write_text("".join(
+            f'{{"event": "GREEN", "step": "{module}"}}\n' for module in green), encoding="utf-8")
 
     def test_the_draft_goes_from_its_own_branch(self):
-        self.plan("S1")
+        self.design("S1")
         result = self.pulls().open_draft()
         self.assertEqual((result["head"], result["green"], result["remaining"]),
                          ("feat-draft", ["S1"], ["S2", "S3"]))
@@ -155,8 +158,8 @@ class Drafting(Repositories):
         self.pulls().open(["S1"], "")
         self.assertNotIn("--draft", self.gh_calls[-1])
 
-    def test_an_open_draft_gets_the_new_list_of_steps(self):
-        self.plan("S1", "S2")
+    def test_an_open_draft_gets_the_new_list_of_modules(self):
+        self.design("S1", "S2")
         self.gh_list = "https://github.com/o/r/pull/7\n"
         result = self.pulls().open_draft()
         self.assertFalse(result["created"])
@@ -165,13 +168,13 @@ class Drafting(Repositories):
         self.assertIn("S3", edit[edit.index("--body") + 1])
 
     def test_nothing_is_sent_before_the_first_green(self):
-        self.plan()
-        with self.assertRaisesRegex(PullRequestError, "no step is green"):
+        self.design()
+        with self.assertRaisesRegex(PullRequestError, "no module is green"):
             self.pulls().open_draft()
         self.assertEqual(self.gh_calls, [])
 
-    def test_a_finished_plan_is_left_to_the_review(self):
-        self.plan("S1", "S2", "S3")
+    def test_a_finished_design_is_left_to_the_review(self):
+        self.design("S1", "S2", "S3")
         with self.assertRaisesRegex(PullRequestError, "Approve the review"):
             self.pulls().open_draft()
         self.assertEqual(self.gh_calls, [])

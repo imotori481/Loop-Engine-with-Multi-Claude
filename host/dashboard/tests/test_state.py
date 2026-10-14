@@ -12,12 +12,23 @@ class DashboardFixture(unittest.TestCase):
         root = Path(self.temp.name)
         self.project = root / "project"
         (self.project / "plan").mkdir(parents=True)
-        (self.project / "plan" / "tasks.json").write_text(
-            json.dumps({"steps": [{"id": "S1"}, {"id": "S2"}]}), encoding="utf-8")
+        modules = self.project / "docs" / "modules"
+        modules.mkdir(parents=True)
+        for module in ("S1", "S2"):
+            (modules / f"{module}.md").write_text("## 振る舞い", encoding="utf-8")
         self.state = DashboardState(self.project, root / "state")
 
     def tearDown(self):
         self.temp.cleanup()
+
+    def stage(self, name):
+        (self.project / "plan" / "stage.json").write_text(
+            json.dumps({"stage": name}), encoding="utf-8")
+
+    def all_green(self):
+        self.stage("review")
+        self.ledger({"event": "GREEN", "step": "S1"}, {"event": "GREEN", "step": "S2"},
+                    {"event": "ALL_GREEN", "steps": ["S1", "S2"]})
 
     def ledger(self, *records):
         (self.project / "plan" / "ledger.jsonl").write_text(
@@ -30,19 +41,32 @@ class ReadingState(DashboardFixture):
         snapshot = self.state.snapshot()
         self.assertEqual(snapshot["steps"], {"total": 2, "green": 1, "ids": ["S1", "S2"]})
 
-    def test_all_green_creates_a_planned_review_not_an_escalation(self):
+    def test_a_reopened_module_is_no_longer_green(self):
         self.ledger({"event": "GREEN", "step": "S1"}, {"event": "GREEN", "step": "S2"},
-                    {"event": "ALL_GREEN", "steps": ["S1", "S2"]})
+                    {"event": "REOPEN", "modules": ["S1"]})
+        self.assertEqual(self.state.snapshot()["steps"]["green"], 1)
+
+    def test_module_ids_follow_the_paths_under_docs_modules(self):
+        nested = self.project / "docs" / "modules" / "game"
+        nested.mkdir()
+        (nested / "board.md").write_text("", encoding="utf-8")
+        self.assertEqual(self.state.snapshot()["steps"]["ids"], ["S1", "S2", "game/board"])
+
+    def test_the_phase_is_the_stage(self):
+        self.assertEqual(self.state.snapshot()["phase"], "not_started")
+        self.stage("midstream")
+        self.assertEqual(self.state.snapshot()["phase"], "midstream")
+
+    def test_all_green_at_the_review_stage_asks_for_the_final_check(self):
+        self.all_green()
         snapshot = self.state.snapshot()
-        self.assertEqual(snapshot["phase"], "review_required")
+        self.assertEqual(snapshot["phase"], "review")
         self.assertEqual(snapshot["pending"][0]["kind"], "review")
 
-    def test_an_escalation_remains_distinct_from_a_review(self):
-        self.ledger({"event": "RUN_ALL_STOP", "reason": "cap reached"})
-        (self.project / "plan" / "ESCALATION.md").write_text("# ESCALATION\nreason", encoding="utf-8")
-        snapshot = self.state.snapshot()
-        self.assertEqual(snapshot["phase"], "escalated")
-        self.assertEqual(snapshot["pending"][0]["kind"], "escalation")
+    def test_an_all_green_left_behind_by_a_reopen_asks_for_nothing(self):
+        self.all_green()
+        self.stage("midstream")
+        self.assertEqual(self.state.snapshot()["pending"], [])
 
     def test_unreadable_lines_are_reported_instead_of_silently_dropped(self):
         path = self.project / "plan" / "ledger.jsonl"
@@ -60,11 +84,11 @@ class TokenRuns(DashboardFixture):
         path.parent.mkdir(parents=True)
         path.write_text("".join(json.dumps(item) + "\n" for item in records), encoding="utf-8")
 
-    def test_a_loop_runs_from_bootstrap_and_counts_the_planning_too(self):
-        # 計画づくりと批評は run --all より前に流れる。そこを落とすと、
+    def test_a_loop_runs_from_the_spec_import_and_counts_the_design_too(self):
+        # 設計と批評は run --all より前に流れる。そこを落とすと、
         # クリティックは常に 0 になる。
         self.ledger(
-            {"ts": "1", "event": "PLAN_BOOTSTRAP"},
+            {"ts": "1", "event": "SPEC_IMPORT"},
             usage("planner", input_tokens=10, cache_read_input_tokens=5, output_tokens=2),
             usage("critic", cache_creation_input_tokens=7),
             {"event": "RUN_ALL_START"},
@@ -82,7 +106,7 @@ class TokenRuns(DashboardFixture):
     def test_each_role_keeps_its_tokens_by_kind_and_its_cost(self):
         # 合計だけでは、ブリーフが大きいのか、ターンが多いのかが分からない。
         self.ledger(
-            {"ts": "1", "event": "PLAN_BOOTSTRAP"},
+            {"ts": "1", "event": "SPEC_IMPORT"},
             {**usage("critic", input_tokens=4, cache_creation_input_tokens=100,
                      cache_read_input_tokens=120, output_tokens=15), "cost_usd": 0.5},
             {**usage("critic", cache_read_input_tokens=30, output_tokens=5), "cost_usd": 0.25},
@@ -94,47 +118,37 @@ class TokenRuns(DashboardFixture):
         self.assertEqual(run["tokens"]["critic"], 274)
         self.assertEqual(run["usd"], {"planner": 0.0, "critic": 0.75, "solver": 0.0})
 
-    def test_a_second_bootstrap_starts_the_next_loop(self):
+    def test_a_second_spec_import_starts_the_next_loop(self):
         self.ledger(
-            {"ts": "1", "event": "PLAN_BOOTSTRAP"}, usage("planner", output_tokens=1),
-            {"ts": "2", "event": "PLAN_BOOTSTRAP"}, usage("planner", output_tokens=2),
+            {"ts": "1", "event": "SPEC_IMPORT"}, usage("planner", output_tokens=1),
+            {"ts": "2", "event": "SPEC_IMPORT"}, usage("planner", output_tokens=2),
         )
         runs = self.state.snapshot()["token_runs"]
         self.assertEqual([(r["outcome"], r["tokens"]["planner"]) for r in runs],
                          [("abandoned", 1), ("running", 2)])
 
-    def test_records_before_any_bootstrap_form_the_first_loop(self):
-        self.ledger({"ts": "1", "event": "PLAN_APPLY"}, usage("solver", input_tokens=5))
+    def test_records_before_any_spec_import_form_the_first_loop(self):
+        self.ledger({"ts": "1", "event": "STAGE"}, usage("solver", input_tokens=5))
         self.assertEqual(self.state.snapshot()["token_runs"][0]["tokens"]["solver"], 5)
 
     def test_a_loop_without_usage_is_left_out(self):
-        self.ledger({"ts": "1", "event": "PLAN_BOOTSTRAP"}, {"event": "ALL_GREEN"})
+        self.ledger({"ts": "1", "event": "SPEC_IMPORT"}, {"event": "ALL_GREEN"})
         self.assertEqual(self.state.snapshot()["token_runs"], [])
 
     def test_the_history_spans_every_mirror_in_start_order(self):
         # 1つの台帳には、ふつう1回分しか入らない。点が1つでは線にならない。
-        self.mirror("runs/run-001", {"ts": "1", "event": "PLAN_BOOTSTRAP"},
+        self.mirror("runs/run-001", {"ts": "1", "event": "SPEC_IMPORT"},
                     usage("planner", output_tokens=1))
-        self.mirror("projects/game", {"ts": "3", "event": "PLAN_BOOTSTRAP"},
+        self.mirror("projects/game", {"ts": "3", "event": "SPEC_IMPORT"},
                     usage("planner", output_tokens=3))
-        self.ledger({"ts": "2", "event": "PLAN_BOOTSTRAP"}, usage("planner", output_tokens=2))
+        self.ledger({"ts": "2", "event": "SPEC_IMPORT"}, usage("planner", output_tokens=2))
         runs = self.state.snapshot()["token_runs"]
         self.assertEqual([(r["run"], r["source"]) for r in runs],
                          [(1, "runs/run-001"), (2, "project"), (3, "projects/game")])
 
-    def test_the_ledger_of_an_archived_plan_is_counted_under_its_mirror(self):
-        # 次の計画を起こすと、前の計画の台帳は plan/archive/<番号> へ移る。
-        archived = Path(self.temp.name) / "projects" / "game" / "plan" / "archive" / "001"
-        archived.mkdir(parents=True)
-        (archived / "ledger.jsonl").write_text(
-            json.dumps({"ts": "1", "event": "PLAN_BOOTSTRAP"}) + "\n"
-            + json.dumps(usage("planner", output_tokens=1)) + "\n", encoding="utf-8")
-        runs = self.state.snapshot()["token_runs"]
-        self.assertEqual([(r["run"], r["source"]) for r in runs], [(1, "projects/game")])
-
     def test_a_run_stays_after_its_ledger_is_gone(self):
         # 写しの台帳は作業ツリーにある。ブランチを切り替えると読めなくなる。
-        self.mirror("projects/game", {"ts": "1", "event": "PLAN_BOOTSTRAP"},
+        self.mirror("projects/game", {"ts": "1", "event": "SPEC_IMPORT"},
                     usage("planner", output_tokens=3))
         self.state.snapshot()
         (Path(self.temp.name) / "projects" / "game" / "plan" / "ledger.jsonl").unlink()
@@ -143,16 +157,16 @@ class TokenRuns(DashboardFixture):
                          [(1, "projects/game", 3)])
 
     def test_a_run_seen_again_updates_the_stored_one(self):
-        self.ledger({"ts": "1", "event": "PLAN_BOOTSTRAP"}, usage("planner", output_tokens=1))
+        self.ledger({"ts": "1", "event": "SPEC_IMPORT"}, usage("planner", output_tokens=1))
         self.state.snapshot()
-        self.ledger({"ts": "1", "event": "PLAN_BOOTSTRAP"}, usage("planner", output_tokens=1),
+        self.ledger({"ts": "1", "event": "SPEC_IMPORT"}, usage("planner", output_tokens=1),
                     usage("solver", input_tokens=4), {"event": "ALL_GREEN"})
         runs = self.state.snapshot()["token_runs"]
         self.assertEqual([(r["outcome"], r["calls"], r["tokens"]["solver"]) for r in runs],
                          [("green", 2, 4)])
 
     def test_the_stored_run_keeps_its_kinds_and_cost(self):
-        self.ledger({"ts": "1", "event": "PLAN_BOOTSTRAP"},
+        self.ledger({"ts": "1", "event": "SPEC_IMPORT"},
                     {**usage("critic", input_tokens=4, cache_creation_input_tokens=100,
                              cache_read_input_tokens=120, output_tokens=15), "cost_usd": 0.5})
         before = self.state.snapshot()["token_runs"]
@@ -161,9 +175,9 @@ class TokenRuns(DashboardFixture):
         self.assertEqual(after, before)
 
     def test_the_project_name_is_kept_when_only_the_live_mirror_is_newer(self):
-        self.mirror("projects/game", {"ts": "1", "event": "PLAN_BOOTSTRAP"},
+        self.mirror("projects/game", {"ts": "1", "event": "SPEC_IMPORT"},
                     usage("planner", output_tokens=1))
-        self.ledger({"ts": "1", "event": "PLAN_BOOTSTRAP"}, usage("planner", output_tokens=1),
+        self.ledger({"ts": "1", "event": "SPEC_IMPORT"}, usage("planner", output_tokens=1),
                     usage("solver", input_tokens=2))
         runs = self.state.snapshot()["token_runs"]
         self.assertEqual([(r["source"], r["calls"]) for r in runs], [("projects/game", 2)])
@@ -171,12 +185,12 @@ class TokenRuns(DashboardFixture):
     def test_an_unreadable_stored_row_is_skipped(self):
         (Path(self.temp.name) / "token-history.csv").write_text(
             "source,started\nbroken,1\n", encoding="utf-8")
-        self.ledger({"ts": "2", "event": "PLAN_BOOTSTRAP"}, usage("planner", output_tokens=1))
+        self.ledger({"ts": "2", "event": "SPEC_IMPORT"}, usage("planner", output_tokens=1))
         runs = self.state.snapshot()["token_runs"]
         self.assertEqual([r["started"] for r in runs], ["2"])
 
     def test_the_live_mirror_does_not_repeat_its_project(self):
-        records = ({"ts": "1", "event": "PLAN_BOOTSTRAP"}, usage("planner", output_tokens=1))
+        records = ({"ts": "1", "event": "SPEC_IMPORT"}, usage("planner", output_tokens=1))
         self.mirror("projects/game", *records)
         self.ledger(*records)
         runs = self.state.snapshot()["token_runs"]
@@ -185,28 +199,22 @@ class TokenRuns(DashboardFixture):
 
 class Decisions(DashboardFixture):
     def test_a_decision_answers_only_the_exact_pending_review(self):
-        self.ledger({"event": "ALL_GREEN", "steps": ["S1", "S2"]})
+        self.all_green()
         request = self.state.snapshot()["pending"][0]
         record = self.state.decide("review", request["id"], "approve", "played it")
         self.assertEqual(record["decision"], "approve")
-        self.assertEqual(self.state.snapshot()["pending"], [])
+        snapshot = self.state.snapshot()
+        self.assertEqual((snapshot["pending"], snapshot["phase"]), ([], "human_reviewed"))
 
     def test_a_stale_or_invented_request_is_refused(self):
         with self.assertRaisesRegex(ValueError, "no longer pending"):
             self.state.decide("review", "invented", "approve", "")
 
-    def test_an_answered_escalation_is_not_presented_again(self):
-        self.ledger({"event": "RUN_ALL_STOP", "reason": "cap reached"})
-        (self.project / "plan" / "ESCALATION.md").write_text("reason", encoding="utf-8")
-        request = self.state.snapshot()["pending"][0]
-        self.state.decide("escalation", request["id"], "respond", "change the boundary")
-        self.assertEqual(self.state.snapshot()["pending"], [])
-
     def test_recording_an_answer_never_rewrites_the_earlier_ones(self):
         self.state.data_dir.mkdir(parents=True, exist_ok=True)
         self.state.decisions_file.write_text('{"event":"HUMAN_DECISION","kind":"old"}\n',
                                              encoding="utf-8")
-        self.ledger({"event": "ALL_GREEN", "steps": ["S1", "S2"]})
+        self.all_green()
         request = self.state.snapshot()["pending"][0]
         self.state.decide("review", request["id"], "approve", "played it")
         lines = self.state.decisions_file.read_text(encoding="utf-8").splitlines()
@@ -214,10 +222,10 @@ class Decisions(DashboardFixture):
         self.assertEqual(json.loads(lines[0])["kind"], "old")
 
     def test_a_phone_may_refuse_the_work_but_may_not_certify_it(self):
-        # レビューがあるのは、どの機械も画面を見られないからだ。窓を開けない
+        # 最終確認があるのは、どの機械も画面を見られないからだ。窓を開けない
         # 端末に、窓が大丈夫だと言わせてはならない。ただし「まだ足りない」と
         # 言わせても、失うものは無い。
-        self.ledger({"event": "ALL_GREEN", "steps": ["S1", "S2"]})
+        self.all_green()
         request = self.state.snapshot()["pending"][0]
         with self.assertRaisesRegex(ValueError, "machine that can run the result"):
             self.state.decide("review", request["id"], "approve", "",
@@ -227,22 +235,14 @@ class Decisions(DashboardFixture):
         self.assertEqual((record["scope"], record["user"]),
                          ("remote", "someone@example.com"))
 
-    def test_an_escalation_can_be_answered_or_stopped_from_anywhere(self):
-        self.ledger({"event": "RUN_ALL_STOP", "reason": "cap reached"})
-        (self.project / "plan" / "ESCALATION.md").write_text("reason", encoding="utf-8")
-        request = self.state.snapshot()["pending"][0]
-        record = self.state.decide("escalation", request["id"], "stop", "",
-                                   scope="remote", user="someone@example.com")
-        self.assertEqual(record["decision"], "stop")
-
     def test_where_the_answer_came_from_is_part_of_the_answer(self):
-        self.ledger({"event": "ALL_GREEN", "steps": ["S1", "S2"]})
+        self.all_green()
         request = self.state.snapshot()["pending"][0]
         record = self.state.decide("review", request["id"], "approve", "played it")
         self.assertEqual((record["scope"], record["user"]), ("local", ""))
 
-    def test_a_revision_or_response_cannot_be_empty(self):
-        self.ledger({"event": "ALL_GREEN", "steps": ["S1", "S2"]})
+    def test_a_revision_cannot_be_empty(self):
+        self.all_green()
         request = self.state.snapshot()["pending"][0]
         with self.assertRaisesRegex(ValueError, "requires a note"):
             self.state.decide("review", request["id"], "revise", "  ")
@@ -250,13 +250,13 @@ class Decisions(DashboardFixture):
 
 class PullRequestRecord(DashboardFixture):
     def approve(self):
-        self.ledger({"event": "ALL_GREEN", "steps": ["S1", "S2"]})
+        self.all_green()
         request = self.state.snapshot()["pending"][0]
         self.state.decide("review", request["id"], "approve", "played it")
         return request["id"]
 
     def test_nothing_to_send_until_the_review_is_approved(self):
-        self.ledger({"event": "ALL_GREEN", "steps": ["S1", "S2"]})
+        self.all_green()
         self.assertIsNone(self.state.approved())
         self.assertIsNone(self.state.snapshot()["pull_request"])
 
@@ -280,53 +280,6 @@ class PullRequestRecord(DashboardFixture):
         self.ledger({"event": "ALL_GREEN", "steps": ["S1", "S2"]},
                     {"event": "ALL_GREEN", "steps": ["S1", "S2", "S3"]})
         self.assertIsNone(self.state.approved())
-
-
-class TwoKindsOfStuck(DashboardFixture):
-    """ランナーが詰まったことと、プランナーが断ったことは別の要求だ。
-
-    どちらも同じ人に届く。だからこそ1つにまとめてはならない。「ランナーが
-    このステップを通せなかった」に答えても、「許された改訂ではどれも役に
-    立たない」には答えていない。基準か設計を変えなければならないのは、
-    後者のほうだ。
-    """
-
-    def planner_escalation(self, text="# ESCALATE -- unreachable criterion"):
-        (self.project / "plan" / "PLANNER_ESCALATION.md").write_text(text, encoding="utf-8")
-
-    def test_the_planners_refusal_reaches_the_dashboard(self):
-        self.planner_escalation()
-        snapshot = self.state.snapshot()
-        self.assertEqual(snapshot["phase"], "planner_escalated")
-        self.assertEqual(snapshot["pending"][0]["kind"], "planner")
-        self.assertIn("unreachable criterion", snapshot["pending"][0]["detail"])
-
-    def test_the_two_escalations_are_separate_requests(self):
-        self.ledger({"event": "RUN_ALL_STOP", "reason": "cap reached"})
-        (self.project / "plan" / "ESCALATION.md").write_text("step S10 stopped", encoding="utf-8")
-        self.planner_escalation()
-        pending = self.state.snapshot()["pending"]
-        self.assertEqual({item["kind"] for item in pending}, {"escalation", "planner"})
-
-        runner_request = next(i for i in pending if i["kind"] == "escalation")
-        self.state.decide("escalation", runner_request["id"], "respond", "criteria widened")
-        remaining = self.state.snapshot()["pending"]
-        self.assertEqual([item["kind"] for item in remaining], ["planner"])
-
-    def test_a_phone_may_answer_or_stop_the_planners_refusal(self):
-        # エスカレーションと同じ理由による。これは基準についての判断で、
-        # 画面に何が出たかの主張ではない。
-        self.planner_escalation()
-        request = self.state.snapshot()["pending"][0]
-        record = self.state.decide("planner", request["id"], "respond", "要件を書き直す",
-                                   scope="remote", user="someone@example.com")
-        self.assertEqual((record["kind"], record["scope"]), ("planner", "remote"))
-
-    def test_an_answered_refusal_is_not_presented_again(self):
-        self.planner_escalation()
-        request = self.state.snapshot()["pending"][0]
-        self.state.decide("planner", request["id"], "stop", "")
-        self.assertEqual(self.state.snapshot()["pending"], [])
 
 
 if __name__ == "__main__":

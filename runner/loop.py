@@ -207,8 +207,8 @@ TIMEOUTS = {"test": 120, "solver": 960, "planner": 1800, "critic": 900}
 BACKSTOP_MARGIN = 120
 
 # 利用上限と一時的な混雑。3役は同じサブスクリプションの枠を使うので、上限に
-# 当たるのは計画の失敗でもソルバーの失敗でもない。それを Halt にすると
-# エスカレーションになり、エスカレーションはプランナーを呼んで、同じ枠を
+# 当たるのは設計の失敗でもソルバーの失敗でもない。それを Halt にすると
+# モジュールが止まって中段に戻り、設計の書き直しがプランナーを呼んで、同じ枠を
 # さらに使う。だから見分けて、待ってから同じ呼び出しをやり直す。
 #
 # 文面は Claude Code のエラーのドキュメントにあるもの。-p では、実行中の
@@ -226,7 +226,7 @@ QUOTA = {"wait_seconds": 900, "waits": 24}
 
 
 class QuotaExhausted(Exception):
-    """待ち切っても枠が戻らなかった。Halt ではないので、エスカレーションしない。"""
+    """待ち切っても枠が戻らなかった。Halt ではないので、中段に戻さない。"""
 
     def __init__(self, who: str, phase: str, kind: str):
         super().__init__(f"{who} is still out of quota ({kind}) in {phase}")
@@ -235,9 +235,9 @@ class QuotaExhausted(Exception):
         self.kind = kind
 
 
-# 箱が書き込みを拒んだ跡。ソルバーにもプランナーにも直せないので、エスカレーション
-# にせずに止める。柵の下のディレクトリが 2755 で作られ、ソルバーの Write がすべて
-# EACCES で落ちたとき、試行もエスカレーションの上限もそれで使い切った。
+# 箱が書き込みを拒んだ跡。ソルバーにもプランナーにも直せないので、中段に
+# 戻さずに止める。柵の下のディレクトリが 2755 で作られ、ソルバーの Write がすべて
+# EACCES で落ちたとき、試行をすべてそれで使い切った。
 # 誤りと取り違えないよう、箱のパス（/srv/loop の下）と同じ行に出たものだけを見る。
 # Node は `EACCES: permission denied, open '<path>'`、Python は
 # `[Errno 13] Permission denied: '<path>'` の形で出す。
@@ -246,7 +246,7 @@ INFRA_ERROR = re.compile(r"\b(?:EACCES|EPERM|EROFS|ENOSPC)\b|\[Errno (?:1|13|28|
 
 
 class InfraBroken(Exception):
-    """箱が書き込みを拒んだ。Halt ではないので、エスカレーションしない。"""
+    """箱が書き込みを拒んだ。Halt ではないので、中段に戻さない。"""
 
     def __init__(self, phase: str, evidence: str):
         super().__init__(f"the sandbox refused the {phase} phase: {evidence}")
@@ -314,8 +314,8 @@ class SolverTimeout(Halt):
 
     Halt の一種なので、受け止めない場所では今までどおりステップを止める。受け止める
     のは IMPL のループだけだ。実装の試行の時間切れは、試行1回分の失敗であって、
-    計画の問題ではない。run 8 の S10 では、残り1回の試行を使わずにエスカレーション
-    になり、上限を使い切って人間で止まった。
+    設計の問題ではない。run 8 の S10 では、残り1回の試行を使わずに止まり、
+    人間の手を待った。
     """
 
 
@@ -708,7 +708,7 @@ ANNOTATION = re.compile(r"(?:->|:)\s*([A-Za-z_][\w.]*)\s*([\[<]?)")
 # ファイルのパスが import できる名前になる規則、形を持たない型名。
 #
 # 違わなかったものにも同じだけ価値がある。junit のレポート、全関門の算術、
-# 書き込みの柵、台帳、エスカレーションの規則、L14 の語彙以外の全リンタ規則。
+# 書き込みの柵、台帳、止まったときの規則、型の語彙以外の設計の検査。
 # 規則はもともと言語に依存していなかった。Python の形をしていたのは表現だけだ。
 #
 # 素の JavaScript ではなく TypeScript にした理由は L14 にある。契約は次の
@@ -1189,7 +1189,7 @@ def use_language(language: str, framework: str | None = None) -> None:
 # pytest は失敗の本文を必ず "<file>:<line>: <ExceptionName>" で終える。例外の
 # クラスが実際に読めるのはその最後の行だ。failure_kind を参照。
 # vitest は変換エラーに色を付け、そのエスケープコードのせいで、引用した先
-# （ブリーフ、エスカレーション、台帳）のどこでも文が読めなくなる。
+# （ブリーフ、FAILURE.md、台帳）のどこでも文が読めなくなる。
 #
 # ESC の無い形も取り除く。JUnit の XML に ESC は書けないので、vitest は
 # ESC だけを落として `[38;5;249m` の部分を残す。構文エラーの位置を示す図は
@@ -1948,7 +1948,7 @@ def parse_junit(xml_path: Path, output: str = "") -> TestRun:
         kinds.extend(f"<did not compile: {name}>" for name in uncompiled)
         # 理由は標準出力ではなくレポートの中にある。`output` だけを渡された
         # 呼び出し側には "JUNIT report written to ..." しか見えない。これについての
-        # 最初のエスカレーションは、まさにそういう見た目だった。
+        # 最初の停止は、まさにそういう見た目だった。
         detail = chr(10).join(
             ANSI.sub("", f.get("message") or "")
             for case in root.iter("testcase")
@@ -5176,7 +5176,7 @@ def restore_to_head(paths: list[str]) -> None:
     `git checkout -- <paths>` は、コミットに無いパスが1つでも混ざると全体を断り、
     ほかのパスも戻さない。取り込んだ Unity のプロジェクトの S1 では、既存のコードの
     スタブを消したまま TEST_WRITE をやり直し、消えたファイルを柵の外への書き込みと
-    読んでエスカレーションした。だから、コミットにあるものだけを渡す。
+    読んで止まった。だから、コミットにあるものだけを渡す。
     """
     present = sorted(head_sources(paths))
     for path in paths:
@@ -6172,12 +6172,12 @@ def test_runner_version() -> str:
 
 
 def python_facts() -> tuple[str, str, str]:
-    """Python の計画に伝える、インタプリタと画面についての事実。
+    """Python の設計に伝える、インタプリタと画面についての事実。
 
     書き写さずに集める。これは効き目が大きい。「窓が開く」のような条件は TclError
     で落ちるテストになり、それは本物の赤で、RED_GATE をきれいに通る。ソルバーが何を
-    書いても緑にならないので、ステップはすべての段の試行を使い、エスカレーション
-    まで使い、その原因はどれにも見えるところに無い。
+    書いても緑にならないので、モジュールはすべての段の試行を使って中段に戻り、
+    その原因はどれにも見えるところに無い。
     """
     interpreter = PROJECT / ".venv" / "bin" / "python"
 
@@ -6876,7 +6876,7 @@ def publish(what: str) -> None:
     branch = run(["git", "push", "--quiet", "origin", "HEAD"])
     if branch.returncode != 0:
         failures.append((branch.stdout + branch.stderr).strip()[-400:])
-    # タグは動く。ステップを reset して走らせ直すと、`git tag -f step-<id>` が
+    # タグは動く。モジュールを reset して走らせ直すと、`git tag -f module-<id>` が
     # 指す先を変える。だからタグだけは強制して送る。
     tags = run(["git", "push", "--quiet", "--force", "origin", "--tags"])
     if tags.returncode != 0:
@@ -7075,7 +7075,7 @@ def run_step(step_id: str) -> int:
                 break
             if crashed:
                 # 最後の試行なら、ファイルを残したまま RED_GATE に渡す。R5 で止まり、
-                # 落ちたテストはエスカレーションに載る。
+                # 落ちたテストは FAILURE.md に載る。
                 if write_attempt == LIMITS["test_writes"]:
                     break
                 ledger("TEST_WRITE", step=step_id, ok=False, attempt=write_attempt,
@@ -7110,8 +7110,8 @@ def run_step(step_id: str) -> int:
         # R1 より先に R2 を見る。順番に意味がある。テストファイルがコンパイル
         # できないとき、件数が合わないのは何も走らなかった「から」だ。
         # 「collected 1, expected 12」と言うと、原因を隠して症状だけを述べる
-        # ことになる。計画の誤りに見え、構文エラーを直せないプランナーに
-        # エスカレーションされる。
+        # ことになる。設計の誤りに見え、構文エラーを直せないプランナーに
+        # 差し戻される。
         if red.errors:                                                     # R2
             raise Halt("RED_GATE", f"R2: {red.errors} test(s) errored instead of failing",
                        (chr(10).join(red.failure_details)
@@ -7182,8 +7182,8 @@ def run_step(step_id: str) -> int:
                 call_solver("IMPL", brief_impl(step, context, tests_text, last_failure),
                             backend=backend)
             except SolverTimeout:
-                # 試行を1回使っただけで、ステップは止めない。残りの試行があれば
-                # 次へ進み、使い切れば下の else がいつもどおりエスカレーションする。
+                # 試行を1回使っただけで、モジュールは止めない。残りの試行があれば
+                # 次へ進み、使い切れば下の else がいつもどおり中段に戻す。
                 last_failure = absorb_timeout(step, attempt, backend, manifest,
                                               last_failure)
                 timeouts += 1

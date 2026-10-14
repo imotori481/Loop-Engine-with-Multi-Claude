@@ -52,9 +52,9 @@ install -d -o runner -g criticw -m 3770 /srv/loop/critic/out
 # 決める。スティッキーにする理由も同じ。runner がディレクトリを所有するので、
 # 使い終えた入力を片付けられ、自分が置いていない入力に不意を突かれることもない。
 #
-# solver と planner からは読めない。要件はシステム全体を述べており、それを
-# solver に渡すとブリーフの横に2つ目の入力経路ができる（SYSTEM_SPEC.md が
-# plan/ の下にあるのと同じ理由）。
+# solver と planner からは読めない。仕様書はシステム全体を述べており、それを
+# solver に渡すとブリーフの横に2つ目の入力経路ができる（設計が docs/ の下に
+# あるのと同じ理由）。planner には、ランナーがブリーフに載せて渡す。
 install -d -o root   -g root   -m 755  /srv/loop/human
 install -d -o runner -g humanw -m 3770 /srv/loop/human/in
 

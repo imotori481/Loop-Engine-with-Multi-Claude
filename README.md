@@ -77,7 +77,7 @@ GitHub の資格情報は Windows 側にだけ置く。AI の役が動く WSL2 �
 
 ほかに、プロジェクトの切り替え、役ごとのモデルと effort の変更、役ごとのトークン消費のグラフも画面にある。
 
-`tailscale serve` で Tailscale のネットワークに出せば、スマホからも見られる。リモートからは差し戻し、停止と続行ができる。承認と走行の開始はできない。
+`tailscale serve` で Tailscale のネットワークに出せば、スマホからも見られる。リモートからは設計のせきの承認と差し戻し、最終確認の差し戻し、停止と続行ができる。最終確認の承認と走行の開始はできない。
 
 画面の詳細は [host/dashboard/README.md](host/dashboard/README.md)、端末から同じことをするコマンドは [docs/COMMANDS.md](docs/COMMANDS.md) にある。
 
@@ -155,8 +155,6 @@ AI の3役は、Windows 側（以下、ホスト）から切り離した WSL2 �
 ├── runner/
 │   ├── loop.py           # ランナー本体（関門の適用、状態遷移、台帳）
 │   └── tests/            # ランナー自身のテスト
-├── plan/
-│   └── fixture/          # ランナーを最初に動かした3ステップの計画の記録
 ├── host/
 │   ├── README.md         # Windows ホスト側の手順
 │   ├── dashboard/        # 人間向けのローカルWeb GUI

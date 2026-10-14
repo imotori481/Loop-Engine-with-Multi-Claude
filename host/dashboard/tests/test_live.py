@@ -77,22 +77,10 @@ class LiveView(unittest.TestCase):
 
 class ActOnTheSandbox(LiveView):
     @patch("host.dashboard.live.subprocess.run")
-    def test_a_rewrite_goes_through_stdin_and_never_into_the_command(self, run):
-        run.return_value = answered("直した")
-        title = "; rm -rf / #"
-        self.assertEqual(self.live.rewrite_finding("trace", 1, title, "S3"), "直した")
-        argv = run.call_args.args[0]
-        self.assertEqual(argv[-4:], ["loop-dev", "loop", "findings", "set"])
-        self.assertNotIn(title, " ".join(argv))
-        self.assertEqual(json.loads(run.call_args.kwargs["input"]),
-                         {"mode": "trace", "index": 1, "title": title, "evidence": "S3"})
-        self.assertIs(run.call_args.kwargs["shell"], False)
-
-    @patch("host.dashboard.live.subprocess.run")
     def test_a_refusal_carries_the_sandbox_reason(self, run):
-        run.return_value = answered(returncode=1, stderr="loop findings: title が空")
-        with self.assertRaisesRegex(ValueError, "title が空"):
-            self.live.rewrite_finding("trace", 0, "", "")
+        run.return_value = answered(returncode=1, stderr="loop: 承認するせきに来ていない")
+        with self.assertRaisesRegex(ValueError, "承認するせきに来ていない"):
+            self.live.approve()
 
     def dash_request(self, run):
         """`loop dash` に渡った要求。コマンドは sudoers が許すものから動かない。"""
@@ -107,36 +95,37 @@ class ActOnTheSandbox(LiveView):
         self.assertEqual(self.dash_request(run), {"action": "continue"})
         self.live.stop_loop()
         self.assertEqual(self.dash_request(run), {"action": "stop"})
-        self.live.reset_step("S12")
-        self.assertEqual(self.dash_request(run), {"action": "reset", "step": "S12"})
+        self.live.reset_module("game/board")
+        self.assertEqual(self.dash_request(run), {"action": "reset", "module": "game/board"})
 
     @patch("host.dashboard.live.subprocess.run")
-    def test_the_requirements_travel_on_stdin_and_never_on_the_command_line(self, run):
+    def test_the_spec_travels_on_stdin_and_never_on_the_command_line(self, run):
         run.return_value = answered("裏で走らせた")
-        text = "# 要件\n$(rm -rf /)\n"
+        text = "# 仕様書\n$(rm -rf /)\n"
         self.live.start_loop(text, "csharp", "unity")
         self.assertEqual(self.dash_request(run),
-                         {"action": "go", "requirements": text, "language": "csharp",
+                         {"action": "go", "spec": text, "language": "csharp",
                           "framework": "unity"})
         self.assertNotIn("rm -rf", " ".join(run.call_args.args[0]))
 
     @patch("host.dashboard.live.subprocess.run")
-    def test_an_answer_travels_on_stdin_and_never_on_the_command_line(self, run):
-        run.return_value = answered("答えを置いた")
-        self.live.answer("S2 の条件を外す; $(id)")
+    def test_the_gate_actions_are_requests_too(self, run):
+        run.return_value = answered("裏で走らせた")
+        self.live.approve()
+        self.assertEqual(self.dash_request(run), {"action": "approve"})
+        self.live.reject("盤の端を決める; $(id)")
         self.assertEqual(self.dash_request(run),
-                         {"action": "answer", "text": "S2 の条件を外す; $(id)"})
+                         {"action": "reject", "text": "盤の端を決める; $(id)"})
         self.assertNotIn("$(id)", " ".join(run.call_args.args[0]))
+        self.live.reopen(["game/board", "game/score"])
+        self.assertEqual(self.dash_request(run),
+                         {"action": "reopen", "modules": ["game/board", "game/score"]})
 
     @patch("host.dashboard.live.subprocess.run")
-    def test_an_answer_that_did_not_arrive_is_reported_not_raised(self, run):
-        # 記録は残る。箱に届いたかは別の事実として返す。
-        from host.dashboard.server import send_answer
-        run.return_value = answered(returncode=1, stderr="loop: 答えを待つエスカレーションが無い")
-        self.assertEqual(send_answer(self.live, {"note": "x"}),
-                         {"error": "loop: 答えを待つエスカレーションが無い"})
-        self.assertEqual(send_answer(None, {"note": "x"}),
-                         {"error": "live view is not configured"})
+    def test_the_design_is_read_as_json(self, run):
+        run.return_value = answered('{"stage": {"stage": "upstream"}, "modules": {}}')
+        self.assertEqual(self.live.design()["stage"], {"stage": "upstream"})
+        self.assertEqual(self.dash_request(run), {"action": "design"})
 
     @patch("host.dashboard.live.subprocess.run")
     def test_switching_removal_and_model_changes_are_requests_too(self, run):
