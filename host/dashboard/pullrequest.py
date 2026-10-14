@@ -1,4 +1,4 @@
-"""予定レビューを承認したら、承認した状態を親ブランチへの PR として出す。
+"""最終確認を承認したら、承認した状態を親ブランチへの PR として出す。
 
 GitHub とやり取りするのはホストだけだ。箱には GitHub の資格情報を置かない。
 ここで使うのは、`loop-import` が作ったクローン（`<mirrors>\\projects\\<name>`）と、
@@ -17,7 +17,10 @@ ALL_GREEN に対してなされた。クローンの `loop/<branch>` がそれ�
 
 全モジュールが緑になる前の状態は、下書きの PR として出せる（`loop-pr`）。緑の判定には
 触れない。出すのは写しの HEAD、つまり最後に緑になったモジュールのコミットで、本文に
-残りのモジュールを並べる。承認の PR とはブランチを分け、承認で作り直されないようにする。
+残りのモジュールを並べる。箱の作業ブランチが写しの HEAD より先にあれば、本文に印を付ける。
+
+最終確認を承認したとき、下書きの PR が開いていれば、承認した状態をその下書きのブランチに
+push し、下書きを正式な PR にする。開いていなければ <branch>-pr から出す。
 """
 
 from __future__ import annotations
@@ -48,6 +51,8 @@ DRAFT_SUFFIX = "-draft"
 # loop-pull のライブの写し。loop-dashboard.cmd の PROJECT と同じ。
 MIRROR = Path(r"C:\dev\roop-engin\project")
 TIMEOUT_SECONDS = 120
+# 箱の作業ブランチの先を読むときの ssh。箱が止まっていても待ち続けない。
+BOX_SSH = "ssh -o BatchMode=yes -o ConnectTimeout=10"
 GITHUB = re.compile(r"github\.com[:/](?P<repo>[^/]+/[^/]+?)(?:\.git)?/?$")
 
 Runner = Callable[..., subprocess.CompletedProcess]
@@ -74,12 +79,17 @@ def pr_body(branch: str, modules: list[str], note: str) -> str:
     return "\n".join(lines) + "\n"
 
 
-def draft_body(branch: str, green: list[str], remaining: list[str]) -> str:
-    return "\n".join([
-        "Loop Engine が途中まで緑にした状態。残りのモジュールは緑になっておらず、人の承認もまだ。", "",
-        f"- 緑のモジュール: {', '.join(green)}",
-        f"- 残りのモジュール: {', '.join(remaining)}",
-        f"- 作業ブランチ: `{branch}` から、設計と箱の環境のファイルを除いた版"]) + "\n"
+def draft_body(branch: str, green: list[str], remaining: list[str],
+               behind: bool | None = False) -> str:
+    lines = ["Loop Engine が途中まで緑にした状態。残りのモジュールは緑になっておらず、人の承認もまだ。", "",
+             f"- 緑のモジュール: {', '.join(green)}",
+             f"- 残りのモジュール: {', '.join(remaining)}",
+             f"- 作業ブランチ: `{branch}` から、設計と箱の環境のファイルを除いた版"]
+    if behind:
+        lines += ["", "> 箱の作業ブランチは、この版より先に進んでいる。写しが箱に追いついていない。"]
+    elif behind is None:
+        lines += ["", "> 箱に届かず、この版が箱の作業ブランチの先かを確かめられなかった。"]
+    return "\n".join(lines) + "\n"
 
 
 def draft_modules(mirror: Path) -> tuple[list[str], list[str]]:
@@ -150,21 +160,38 @@ class PullRequests:
             "Run loop-pull, or the project was not made with loop-import")
 
     def open(self, modules: list[str], note: str) -> dict[str, Any]:
-        """承認した ALL_GREEN を、<branch>-pr からの PR にする。"""
+        """承認した ALL_GREEN を PR にする。下書きが開いていれば、それを正式にする。"""
         with self._lock:
-            return self._open(PR_SUFFIX, lambda branch: (
+            return self._open(PR_SUFFIX, lambda branch, behind: (
                 f"{branch}: Loop Engine の成果", pr_body(branch, modules, note)), draft=False)
 
     def open_draft(self) -> dict[str, Any]:
         """最後に緑になったモジュールまでを、<branch>-draft からの下書きの PR にする。"""
         green, remaining = draft_modules(self.mirror)
         with self._lock:
-            result = self._open(DRAFT_SUFFIX, lambda branch: (
-                f"{branch}: Loop Engine の途中の成果", draft_body(branch, green, remaining)),
-                draft=True)
+            result = self._open(DRAFT_SUFFIX, lambda branch, behind: (
+                f"{branch}: Loop Engine の途中の成果",
+                draft_body(branch, green, remaining, behind)), draft=True)
         return {**result, "green": green, "remaining": remaining}
 
-    def _open(self, suffix: str, describe: Callable[[str], tuple[str, str]],
+    def _find(self, clone: Path, repo: str, head_branch: str, base: str) -> str:
+        """head_branch から base への開いている PR の URL。無ければ空。"""
+        url = self._cmd(["gh", "pr", "list", "--repo", repo, "--head", head_branch,
+                         "--base", base, "--state", "open",
+                         "--json", "url", "--jq", ".[0].url"], clone)
+        return "" if url == "null" else url
+
+    def _behind(self, clone: Path, branch: str, head: str) -> bool | None:
+        """箱の作業ブランチが写しの HEAD より先にあるか。箱に届かなければ None。"""
+        try:
+            line = self._git(clone, "-c", f"core.sshCommand={BOX_SSH}", "ls-remote", "loop",
+                             f"refs/heads/{branch}", check=False)
+        except PullRequestError:
+            return None
+        tip = line.split()[0] if line else ""
+        return None if not tip else tip != head
+
+    def _open(self, suffix: str, describe: Callable[[str, bool | None], tuple[str, str]],
               draft: bool) -> dict[str, Any]:
         clone, branch, head = self.locate()
         branch = safe_ref(branch, "the working branch")
@@ -174,8 +201,18 @@ class PullRequests:
                 f"the parent branch of {branch} is not recorded. In {clone} run: "
                 f"git config {BASE_KEY.format(branch)} <base-branch>")
         base = safe_ref(base, BASE_KEY.format(branch))
-        head_branch = branch + suffix
         repo = github_repo(self._git(clone, "remote", "get-url", "origin"))
+        behind = self._behind(clone, branch, head) if draft else False
+        title, body = describe(branch, behind)
+
+        head_branch = branch + suffix
+        existing = self._find(clone, repo, head_branch, base)
+        # 承認の PR がまだ無く、下書きが開いていれば、その下書きを正式にする。
+        promoted = False
+        if not draft and not existing:
+            drafted = self._find(clone, repo, branch + DRAFT_SUFFIX, base)
+            if drafted:
+                head_branch, existing, promoted = branch + DRAFT_SUFFIX, drafted, True
 
         self._git(clone, "fetch", "--quiet", "origin", base)
         commit = self._strip(clone, head, base)
@@ -183,23 +220,27 @@ class PullRequests:
         self._git(clone, "push", "--quiet", "--force", "origin",
                   f"{commit}:refs/heads/{head_branch}")
 
-        existing = self._cmd(["gh", "pr", "list", "--repo", repo, "--head", head_branch,
-                              "--base", base, "--state", "open",
-                              "--json", "url", "--jq", ".[0].url"], clone)
-        title, body = describe(branch)
-        if existing and existing != "null":
+        if existing:
             url, created = existing, False
             if draft:
                 # 下書きは緑が増えるたびに出し直すので、本文のモジュールの一覧も合わせる。
                 self._cmd(["gh", "pr", "edit", url, "--repo", repo, "--body", body], clone)
+            elif promoted:
+                self._cmd(["gh", "pr", "edit", url, "--repo", repo, "--title", title,
+                           "--body", body], clone)
+                # 出し直しのときは、もう正式になっている。
+                if self._cmd(["gh", "pr", "view", url, "--repo", repo,
+                              "--json", "isDraft", "--jq", ".isDraft"], clone) == "true":
+                    self._cmd(["gh", "pr", "ready", url, "--repo", repo], clone)
         else:
             url = self._cmd(["gh", "pr", "create", "--repo", repo, "--base", base,
                              "--head", head_branch, "--title", title, "--body", body,
                              *(["--draft"] if draft else [])],
                             clone).splitlines()[-1]
             created = True
-        return {"url": url, "created": created, "project": clone.name,
-                "branch": branch, "head": head_branch, "base": base, "commit": commit}
+        return {"url": url, "created": created, "promoted": promoted, "behind": behind,
+                "project": clone.name, "branch": branch, "head": head_branch, "base": base,
+                "commit": commit}
 
     def _strip(self, clone: Path, head: str, base: str) -> str:
         """head から環境のファイルを除いたコミットを、作業ツリーに触れずに作る。"""
@@ -239,6 +280,10 @@ def main(argv: list[str]) -> int:
     print(f"{result['head']} -> {result['base']}  "
           f"({'opened' if result['created'] else 'updated'})")
     print(result["url"])
+    if result["behind"]:
+        print("NOTE: the box is ahead of the mirror. Run loop-pull, then loop-pr again")
+    elif result["behind"] is None:
+        print("NOTE: could not reach the box to see whether the mirror is behind it")
     return 0
 
 

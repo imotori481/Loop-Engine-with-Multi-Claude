@@ -75,13 +75,21 @@ class Repositories(unittest.TestCase):
         # Unity が書き換えた未コミットのアセット。
         (self.clone / "a.txt").write_text("edited in Unity\n", encoding="utf-8")
 
+        self.box = box
         self.gh_calls = []
-        self.gh_list = ""
+        # 開いている PR。head のブランチから URL へ。
+        self.gh_open = {}
+        self.gh_draft = "true"
 
     def fake_run(self, argv, **kwargs):
         if argv[0] == "gh":
             self.gh_calls.append(argv)
-            out = self.gh_list if argv[2] == "list" else "https://github.com/o/r/pull/1\n"
+            if argv[2] == "list":
+                out = self.gh_open.get(argv[argv.index("--head") + 1], "")
+            elif argv[2] == "view":
+                out = self.gh_draft
+            else:
+                out = "https://github.com/o/r/pull/1\n"
             return subprocess.CompletedProcess(argv, 0, out, "")
         if argv[:3] == ["git", "-C", str(self.clone)] and argv[3:5] == ["remote", "get-url"]:
             return subprocess.CompletedProcess(argv, 0, "https://github.com/o/r.git\n", "")
@@ -115,11 +123,30 @@ class Opening(Repositories):
         self.assertIn("clear works", create[create.index("--body") + 1])
 
     def test_an_open_pr_is_updated_instead_of_opened_twice(self):
-        self.gh_list = "https://github.com/o/r/pull/7\n"
+        self.gh_open = {"feat-pr": "https://github.com/o/r/pull/7"}
         result = self.pulls().open(["S1"], "")
         self.assertEqual((result["url"], result["created"]),
                          ("https://github.com/o/r/pull/7", False))
         self.assertEqual([call[2] for call in self.gh_calls], ["list"])
+
+    def test_an_open_draft_becomes_the_approved_pr(self):
+        self.gh_open = {"feat-draft": "https://github.com/o/r/pull/3"}
+        result = self.pulls().open(["S1"], "played it")
+        self.assertEqual((result["url"], result["head"], result["created"], result["promoted"]),
+                         ("https://github.com/o/r/pull/3", "feat-draft", False, True))
+        self.assertEqual([call[2] for call in self.gh_calls],
+                         ["list", "list", "edit", "view", "ready"])
+        edit = self.gh_calls[2]
+        self.assertIn("played it", edit[edit.index("--body") + 1])
+        self.assertEqual(git(self.origin, "rev-parse", "feat-draft^"), self.approved)
+        files = git(self.origin, "ls-tree", "-r", "--name-only", "feat-draft").splitlines()
+        self.assertEqual(sorted(files), [".gitignore", "a.txt", "src/game.cs"])
+
+    def test_a_draft_already_made_ready_is_not_readied_again(self):
+        self.gh_open = {"feat-draft": "https://github.com/o/r/pull/3"}
+        self.gh_draft = "false"
+        self.pulls().open(["S1"], "")
+        self.assertEqual([call[2] for call in self.gh_calls], ["list", "list", "edit", "view"])
 
     def test_a_branch_without_a_recorded_parent_is_refused(self):
         git(self.clone, "config", "--unset", "branch.feat.loopBase")
@@ -160,12 +187,35 @@ class Drafting(Repositories):
 
     def test_an_open_draft_gets_the_new_list_of_modules(self):
         self.design("S1", "S2")
-        self.gh_list = "https://github.com/o/r/pull/7\n"
+        self.gh_open = {"feat-draft": "https://github.com/o/r/pull/7"}
         result = self.pulls().open_draft()
         self.assertFalse(result["created"])
         edit = self.gh_calls[-1]
         self.assertEqual(edit[:4], ["gh", "pr", "edit", "https://github.com/o/r/pull/7"])
         self.assertIn("S3", edit[edit.index("--body") + 1])
+
+    def body(self):
+        call = self.gh_calls[-1]
+        return call[call.index("--body") + 1]
+
+    def test_a_mirror_level_with_the_box_carries_no_mark(self):
+        self.design("S1")
+        self.assertFalse(self.pulls().open_draft()["behind"])
+        self.assertNotIn("箱", self.body().split("版")[-1])
+
+    def test_a_box_ahead_of_the_mirror_is_marked(self):
+        # loop-pull の後に、箱が次のモジュールを緑にした。
+        self.design("S1")
+        commit_files(self.box, {"src/board.cs": "class Board {}\n"}, "S2")
+        git(self.box, "push", "-q", str(self.bare), "feat")
+        self.assertTrue(self.pulls().open_draft()["behind"])
+        self.assertIn("写しが箱に追いついていない", self.body())
+
+    def test_a_box_out_of_reach_is_marked_as_unknown(self):
+        self.design("S1")
+        git(self.clone, "remote", "set-url", "loop", str(self.clones / "missing.git"))
+        self.assertIsNone(self.pulls().open_draft()["behind"])
+        self.assertIn("確かめられなかった", self.body())
 
     def test_nothing_is_sent_before_the_first_green(self):
         self.design()

@@ -187,12 +187,14 @@ git merge loop/<branch>
 ### PR に出す（ホスト）
 
 全モジュールが緑になると、段は最終確認に移る。ダッシュボードで最終確認を承認すると、`<branch>-pr` から `<base-branch>` への PR が出る。
+`loop-pr` の下書きの PR が開いていれば、新しく出さずに、その下書きが承認した状態で正式な PR になる。
 先に `loop-pull` を流して、写しを箱の先まで進めておく。仕組みと前提は
 [host/dashboard/README.md](../host/dashboard/README.md) の「プルリクエスト」にある。
 
 全モジュールが緑になる前に出すなら、`loop-pull` のあとに `loop-pr` を打つ。最後に緑になったモジュールまでが、
 `<branch>-draft` から `<base-branch>` への下書きの PR になる。
 緑が増えたら、`loop-pull` と `loop-pr` をもう一度打てば同じ PR が更新される。
+箱が写しより先に進んでいると、`loop-pr` は `NOTE` を出し、PR の本文にも印が付く。そのときは `loop-pull` から打ち直す。
 
 | やりたいこと | コマンド |
 |---|---|

@@ -69,7 +69,7 @@ function renderPullRequest(value) {
     const link = document.createElement("a");
     link.href = result.url; link.textContent = result.url; link.target = "_blank"; link.rel = "noopener";
     box.append(text("strong", `${result.head} → ${result.base}`), link,
-               text("p", `${result.created ? "作成" : "更新"}: ${result.ts}`, "why"));
+               text("p", `${result.created ? "作成" : result.promoted ? "下書きを正式にした" : "更新"}: ${result.ts}`, "why"));
   } else {
     box.classList.add("error");
     box.append(text("strong", result ? "PR を出せませんでした" : "PR はまだ出していません"));
@@ -269,6 +269,58 @@ function reopenActions(modules) {
   return box;
 }
 
+// 依存関係の図。使われる側ほど左の列に置き、矢印は使う側から使われる側へ向ける。
+// 縁の明るい箱は "entry": true を持つモジュール。
+function dependencyGraph(iface) {
+  const deps = iface.depends_on || {};
+  const ids = [...new Set([...(iface.order || []), ...Object.keys(deps), ...Object.values(deps).flat()])];
+  if (!ids.length) return text("p", "—", "why");
+  const level = {};
+  const depth = (id, seen) => {
+    if (id in level) return level[id];
+    if (seen.has(id)) return 0;  // 循環はインターフェースチェックが問題として出す
+    seen.add(id);
+    const below = (deps[id] || []).map(dep => depth(dep, seen));
+    return level[id] = below.length ? Math.max(...below) + 1 : 0;
+  };
+  ids.forEach(id => depth(id, new Set()));
+  const columns = [];
+  ids.forEach(id => (columns[level[id]] ||= []).push(id));
+
+  const node = {width: 176, height: 28}, gap = {x: 64, y: 14}, pad = 4;
+  const at = {};
+  columns.forEach((column, x) => column.forEach((id, y) => {
+    at[id] = {x: pad + x * (node.width + gap.x), y: pad + y * (node.height + gap.y)};
+  }));
+  const width = pad * 2 + columns.length * node.width + (columns.length - 1) * gap.x;
+  const height = pad * 2 + Math.max(...columns.map(c => c.length)) * (node.height + gap.y) - gap.y;
+  const root = svg("svg", {viewBox: `0 0 ${width} ${height}`, width, height,
+                           role: "img", "aria-label": "モジュールの依存関係"});
+  const marker = svg("marker", {id: "dep-arrow", viewBox: "0 0 8 8", refX: 8, refY: 4,
+                                markerWidth: 8, markerHeight: 8, orient: "auto"});
+  marker.append(svg("path", {d: "M0,0 L8,4 L0,8 z"}));
+  const defs = svg("defs", {}); defs.append(marker); root.append(defs);
+  for (const [id, used] of Object.entries(deps)) {
+    for (const dep of used) {
+      if (!at[id] || !at[dep]) continue;
+      root.append(svg("line", {x1: at[id].x, y1: at[id].y + node.height / 2,
+                               x2: at[dep].x + node.width, y2: at[dep].y + node.height / 2,
+                               class: "edge", "marker-end": "url(#dep-arrow)"}));
+    }
+  }
+  const entries = new Set(Object.keys(iface.entries || {}));
+  for (const id of ids) {
+    const group = svg("g", {class: entries.has(id) ? "node entry" : "node"});
+    const title = svg("title", {}); title.textContent = id;
+    const label = svg("text", {x: at[id].x + 8, y: at[id].y + node.height / 2 + 4});
+    label.textContent = id.length > 24 ? `${id.slice(0, 23)}…` : id;
+    group.append(title, svg("rect", {x: at[id].x, y: at[id].y, width: node.width, height: node.height, rx: 4}), label);
+    root.append(group);
+  }
+  const plot = document.createElement("div"); plot.className = "plot graph"; plot.append(root);
+  return plot;
+}
+
 function renderDesign(value) {
   const key = JSON.stringify([value, liveState.running]);
   if (key === drawnDesign) return;
@@ -297,7 +349,8 @@ function renderDesign(value) {
     const entries = Object.entries(iface.entries || {}).flatMap(([id, sigs]) => sigs.map(sig => `${id}: ${sig}`));
     box.append(details("インターフェースチェック",
       text("p", iface.problems?.length ? iface.problems.join("\n") : "問題なし（最後に承認した設計）", "why"),
-      text("h4", "依存の順（左が右を使う）"), text("pre", order.join("\n") || "—"),
+      text("h4", "依存関係（矢印は使う側から使われる側へ。縁の明るいものは入口）"), dependencyGraph(iface),
+      details("依存の順を文字で見る（左が右を使う）", text("pre", order.join("\n") || "—")),
       text("h4", "入口（\"entry\": true）"), text("pre", entries.join("\n") || "—")));
   }
 

@@ -176,7 +176,9 @@ SSH は3秒に1回までしか流さない。止めるときは `"live": {"enabl
 - 下流で止まっていれば、`plan/FAILURE.md` の全文を先頭に出す
 - 基本設計仕様書、モジュールごとの詳細設計仕様書と受け入れ条件、インターフェースチェックを折りたたんで出す。
   受け入れ条件は `case`、`kind`、`given`、`then` の表にし、JSON として読めなければそのまま出す
-- インターフェースチェックは `plan/INTERFACE.json` の問題、依存の順、`"entry": true` の入口を出す
+- インターフェースチェックは `plan/INTERFACE.json` の問題、依存関係の図、`"entry": true` の入口を出す
+- 依存関係の図は、使われる側ほど左の列に置き、矢印を使う側から使われる側へ向ける。入口のモジュールは縁を明るくする。
+  同じ順を文字でも出す
 
 走っている間は操作を出さない。走っていなければ、段に応じて次を出す。
 
@@ -204,14 +206,17 @@ SSH は3秒に1回までしか流さない。止めるときは `"live": {"enabl
 4. 一時的な index の上で、`loop/<branch>` から `plan`、`docs/spec`、`docs/basic`、`docs/modules`、
    `conftest.py`、`index.html`、`vitest.config.mjs` を除き、`.gitignore` を親ブランチの版に戻したコミットを作る。
    親ブランチに `.gitignore` が無ければ消す
-5. そのコミットを `origin` の `<branch>-pr` に強制 push する
-6. `gh pr create` で `<branch>-pr` から親ブランチへの PR を出す。同じ組の PR が開いていれば、
-   5 の push で更新されたものとして作らない
+5. 出す先のブランチを決める。`<branch>-pr` からの PR が開いていればそれを使う。無く、`<branch>-draft` からの
+   下書きの PR が開いていれば、その下書きを使う。どちらも無ければ `<branch>-pr`
+6. 4 のコミットを、5 で決めたブランチに強制 push する
+7. PR を出す。`<branch>-pr` の PR が開いていれば、6 の push で更新されたものとして作らない。
+   下書きを使うときは、`gh pr edit` で題と本文を承認の PR のものに書き換え、`gh pr ready` で正式にする。
+   どちらも開いていなければ、`gh pr create` で `<branch>-pr` から親ブランチへの PR を出す
 
 クローンの作業ツリーと手元のブランチには触れない。Unity が書き換えた未コミットの変更が
 残っていても、そのまま出せる。
 
-`<branch>-pr` は承認のたびに作り直すので、そこに手でコミットしない。PR の本文には、
+`<branch>-pr` と `<branch>-draft` は出すたびに作り直すので、そこに手でコミットしない。PR の本文には、
 モジュールの一覧と承認のメモが入る。
 
 結果は `.state/decisions.jsonl` に `PULL_REQUEST` として追記し、画面の「プルリクエスト」に
@@ -231,16 +236,19 @@ git -C <clone-dir> config branch.<branch>.loopBase <base-branch>
 ### 下書きの PR
 
 全モジュールが緑になる前の状態は、ホストの `loop-pr` で下書きの PR として出す。画面には無い。
-中身は `pullrequest.py` の `open_draft` で、手順は上の 1〜6 と同じ。違うのは次の点だ。
+中身は `pullrequest.py` の `open_draft` で、手順は上の 1〜7 と同じ。違うのは次の点だ。
 
 - 承認は求めない。写しの HEAD、つまり最後に緑になったモジュールのコミットを出す。緑の判定には触れない
-- ブランチは `<branch>-draft`。承認で作り直す `<branch>-pr` とは分ける
+- ブランチは `<branch>-draft`。最終確認の承認のとき、この下書きが開いていれば正式な PR になる
 - `gh pr create` に `--draft` を付ける。本文には、写しの `docs/modules/` と台帳から、緑のモジュールと残りのモジュールを並べる。
   緑は `GREEN` で付き、後の `REOPEN` で外れる
 - 同じ組の PR が開いていれば、push で中身を更新し、`gh pr edit` で本文のモジュールの一覧を書き直す
 - 緑のモジュールが1つも無ければ断る。全モジュールが緑なら、最終確認の承認に回すよう断る
+- 箱の bare の作業ブランチの先を `git ls-remote loop` で読み、写しの HEAD と比べる。箱が先にあれば、
+  本文に「写しが箱に追いついていない」と書き、`loop-pr` は `NOTE` を出す。箱に届かなければ、
+  確かめられなかったと書く。ssh は `BatchMode=yes` と `ConnectTimeout=10` で流す
 
-結果は `decisions.jsonl` に記録しない。残りが緑になって承認の PR が出たら、下書きは人が閉じる。
+結果は `decisions.jsonl` に記録しない。
 
 ## トークン消費
 
