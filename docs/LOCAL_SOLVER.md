@@ -108,21 +108,23 @@ sudo -u solver /srv/loop/bin/smoke-local
 ### 1-6. 1本回す
 
 ```bash
-# run 5 のプランをそのまま使う。題材を変えない ── 変えると
+# 承認済みの設計をそのまま使う。題材を変えない ── 変えると
 # 「モデルが弱い」のか「その題材が難しい」のかが分離できない
-sudo -u runner python3 /srv/loop/runner/loop.py reset S1     # 必要なら
+sudo -u runner python3 /srv/loop/runner/loop.py reset <モジュール>     # 必要なら
 ```
 
-`plan/tasks.json` の最上位に足す:
+`/srv/loop/settings.json` に書く（root 所有。`sudo` で書く）:
 
 ```json
-"solver_tiers": ["local", "claude"],
-"policy":       {"retry": "resample"},
-"limits":       {"attempts": 8}
+{
+  "solver_tiers": ["local", "claude"],
+  "policy":       {"retry": "resample"},
+  "limits":       {"attempts": 8}
+}
 ```
 
 `solver_tiers` は必ず書く ── **既定は `["claude"]`** で、書かなければローカルモデルは
-呼ばれない（RUNNER_SPEC §7 末尾）。`local` が試行を使い切ったステップだけを `claude` が
+呼ばれない（RUNNER_SPEC §7-5）。`local` が試行を使い切ったモジュールだけを `claude` が
 引き継ぐ。ローカルだけで測るなら `["local"]` にする。
 
 `resample` と温度 0.7 は**対で意味を持つ**。温度 0 で `resample` すると8回とも同じ
@@ -146,11 +148,11 @@ sudo -u runner python3 -u /srv/loop/runner/loop.py run --all 2>&1 \
 | 0 | 動いた（**中身が駄目でも 0**） | 下記「0 で返るのに何も起きない」参照 |
 | 2 | 引数かブリーフが読めない | `solver-run` の呼び方。通常は起きない |
 | 5 | ブリーフに `# Files you may create or modify` が無い | `loop.py` のブリーフ書式が変わった。`brief_impl()` と突き合わせる |
-| 6 | プロンプトがコンテキストに入らない | `llm-serve` の `--ctx-size` と `LOOP_LLM_CTX` を上げる。上げられないならステップを分割 |
+| 6 | プロンプトがコンテキストに入らない | `llm-serve` の `--ctx-size` と `LOOP_LLM_CTX` を上げる。上げられないならモジュールを分割 |
 | 7 | 推論サーバに届かない／拒否された | `pgrep -a -u llm llama-server`。落ちていれば 1-4 |
 | 124 | 制限時間内に返らない | `timeouts.solver` を上げる。CPU 推論なら数倍必要 |
 
-**非ゼロは全部エスカレーション＝プランナー呼び出し＝Claude の消費**になる。
+**非ゼロは全部モジュールの停止＝中段への差し戻し＝人の手**になる。
 だから「モデルが下手」は**絶対に非ゼロにしない**設計にしてある（下記）。
 
 ### 症状から引く
@@ -158,13 +160,13 @@ sudo -u runner python3 -u /srv/loop/runner/loop.py run --all 2>&1 \
 **0 で返るのに何も書かれない / VERIFY が毎回同じ失敗**
 モデルが JSON を守れなかったか、許可外のパスを返した。`solver-local` が
 `wrote nothing` / `refused [...]` と標準出力に書いている。台帳ではなく `/srv/loop/logs/` の走行ログを見る。
-これは**設計どおり**の挙動 ── モデルの失敗は試行を1回消費するだけで、プランナーには届かない。
-何度も続くならステップが大きすぎる（次項）。
+これは**設計どおり**の挙動 ── モデルの失敗は試行を1回消費するだけで、モジュールは止まらない。
+何度も続くならモジュールが大きすぎる（次項）。
 
-**ステップが大きすぎる**
-`files_write` が2ファイル以上、あるいは実装が100行を超える見込みなら、9B には重い。
-対処は `max_attempts` を増やすことではなく、**bootstrap をやり直してステップを細かくする**
-（1ステップ＝1関数、`files_write` は1つ、テストは3本まで）。ただし bootstrap は
+**モジュールが大きすぎる**
+実装が100行を超える見込みなら、9B には重い。
+対処は試行回数を増やすことではなく、**詳細設計を書き直してモジュールを細かくする**
+（受け入れ条件は3本まで）。ただし書き直しは
 プランナー＝Claude を使うので、**1本目の結果を見てから**判断する。
 
 **thinking が消えていない**（`smoke-local` の 6 が FAIL、または `<think>` 警告）
@@ -201,13 +203,13 @@ run 5（Codex）が比較対象。**run 6 の実測値を入れてある**（202
 | 最終スイート | 48 passed | **48 passed**（skipped 0 / regressions []） |
 | 消費した課金アカウント | Codex | **なし** |
 
-**エスカレーション回数が最重要**。それが Claude の消費そのもので、
+**止まったモジュールの数が最重要**（run 5 と run 6 の表ではエスカレーション回数）。それが設計の書き直し＝Claude の消費そのもので、
 「ソルバーを安くしたら費用がプランナー側へ移った」かどうかはこの数字だけで分かる。
 
 台帳から取れる:
 
 ```bash
-sudo -u runner grep -c ESCALATED /srv/loop/project/plan/ledger.jsonl
+sudo -u runner grep -c '"event":"FAILED"' /srv/loop/project/plan/ledger.jsonl
 sudo -u runner grep '"phase":"VERIFY"' /srv/loop/project/plan/ledger.jsonl \
   | python3 -c 'import sys,json,collections
 c=collections.Counter()
@@ -250,4 +252,5 @@ R1（収集数の不一致）／R4（スタブで通る）／R5（赤が本物�
 
 ## 更新履歴
 
+- 2026/10/14: ソルバー段の設定の置き場を `/srv/loop/settings.json` に、詰まったときの扱いをモジュールの停止と中段への差し戻しに変更
 - 2026/09/26: 既定のソルバー段を `claude` とし、`solver_tiers` を必ず書く手順に変更。配布と走行ログの場所を箱のクローン構成に合わせて変更

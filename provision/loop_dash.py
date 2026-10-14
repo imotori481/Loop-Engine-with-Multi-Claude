@@ -35,11 +35,10 @@ PROJECT = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}")
 # 取り込むブランチ。行にもオプションにもならない文字だけを通す。git の規則
 # （check-ref-format）は loop-project.sh の init が確かめる。
 BRANCH = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,199}")
-# やり直すステップの ID。ランナーは凍結のマニフェストのファイル名に使うので、/ は通さない。
-STEP = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
+# 仕様書の本文。ホストのダッシュボードは "requirements" のキーで送る。
 MAX_REQUIREMENTS = 200_000
-# エスカレーションへの答え。ダッシュボードの欄は 4000 字までだが、箱の側でも絞る。
-MAX_ANSWER = 20_000
+# 差し戻しのコメント。ダッシュボードの欄は 4000 字までだが、箱の側でも絞る。
+MAX_COMMENT = 20_000
 KEYS = {"model": "LOOP_MODEL", "effort": "LOOP_EFFORT"}
 
 
@@ -77,9 +76,10 @@ def check_branch(value: object) -> str:
     return value
 
 
-def check_step(value: object) -> str:
-    if not isinstance(value, str) or not STEP.fullmatch(value):
-        raise Refused(f"ステップの ID に使えない: {value!r}")
+def check_module(value: object) -> str:
+    """モジュールの id。src/ の下のパスから拡張子を落としたもの（loop.MODULE_ID）。"""
+    if not isinstance(value, str) or len(value) > 200 or not loop.MODULE_ID.fullmatch(value):
+        raise Refused(f"モジュールの id に使えない: {value!r}")
     return value
 
 
@@ -95,11 +95,11 @@ def check_fence(src: object, tests: object) -> tuple[str, str]:
 
 
 def parse(request: object, work: str) -> list[str]:
-    """要求を確かめ、`loop` に返す行を作る。要件の本文だけは作業ディレクトリに書く。"""
+    """要求を確かめ、`loop` に返す行を作る。仕様書とコメントの本文は作業ディレクトリに書く。"""
     if not isinstance(request, dict):
         raise Refused("JSON のオブジェクトを渡す")
     action = request.get("action")
-    if action in ("settings", "continue", "stop"):
+    if action in ("settings", "continue", "stop", "approve"):
         return [action]
     if action == "model":
         return ["model", check_role(request.get("role")), check_model(request.get("model")),
@@ -107,7 +107,12 @@ def parse(request: object, work: str) -> list[str]:
     if action in ("use", "remove"):
         return [action, check_project(request.get("project"))]
     if action == "reset":
-        return ["reset", check_step(request.get("step"))]
+        return ["reset", check_module(request.get("step"))]
+    if action == "reopen":
+        modules = request.get("modules")
+        if not isinstance(modules, list) or not modules:
+            raise Refused("中段に戻すモジュールを1つ以上選ぶ")
+        return ["reopen", *(check_module(m) for m in modules)]
     if action == "init":
         # ホストの取り込みの3つ目の手順。空の bare を用意し、push を待つ。
         src, tests = check_fence(request.get("src", ""), request.get("tests", ""))
@@ -124,22 +129,22 @@ def parse(request: object, work: str) -> list[str]:
         if framework not in loop.FRAMEWORKS[language]:
             raise Refused(f"{language} の持ち込む先に無い: {framework!r}")
         if not isinstance(text, str) or not text.strip():
-            raise Refused("要件が空")
+            raise Refused("仕様書が空")
         if len(text) > MAX_REQUIREMENTS:
-            raise Refused(f"要件が長すぎる。{MAX_REQUIREMENTS} 字まで")
-        with open(os.path.join(work, "requirements.md"), "w", encoding="utf-8") as handle:
+            raise Refused(f"仕様書が長すぎる。{MAX_REQUIREMENTS} 字まで")
+        with open(os.path.join(work, "spec.md"), "w", encoding="utf-8") as handle:
             handle.write(text)
         return ["go", language, framework]
-    if action == "answer":
-        # 答えの本文も要件と同じく作業ディレクトリに書き、行には載せない。
+    if action == "reject":
+        # コメントの本文も仕様書と同じく作業ディレクトリに書き、行には載せない。
         text = request.get("text")
         if not isinstance(text, str) or not text.strip():
-            raise Refused("答えが空")
-        if len(text) > MAX_ANSWER:
-            raise Refused(f"答えが長すぎる。{MAX_ANSWER} 字まで")
-        with open(os.path.join(work, "answer.md"), "w", encoding="utf-8") as handle:
+            raise Refused("コメントが空")
+        if len(text) > MAX_COMMENT:
+            raise Refused(f"コメントが長すぎる。{MAX_COMMENT} 字まで")
+        with open(os.path.join(work, "comment.md"), "w", encoding="utf-8") as handle:
             handle.write(text.strip() + "\n")
-        return ["answer"]
+        return ["reject"]
     raise Refused(f"知らない操作: {action!r}")
 
 

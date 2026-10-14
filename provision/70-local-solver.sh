@@ -124,10 +124,10 @@ cat <<'EOF'
 次:
     sudo -u solver /srv/loop/bin/smoke-local
 
-そのあと、plan/tasks.json に:
-    "solver_tiers": ["local", "claude"],
-    "policy": {"retry": "resample"},
-    "limits": {"attempts": 8}
+そのあと、root で /srv/loop/settings.json に:
+    {"solver_tiers": ["local", "claude"],
+     "policy": {"retry": "resample"},
+     "limits": {"attempts": 8}}
 
 solver_tiers は必須だ。既定は ["claude"] で、書かなければローカルモデルは一度も
 呼ばれない。

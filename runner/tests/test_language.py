@@ -1,8 +1,8 @@
-"""計画を別の言語で書くと何が変わり、何が変わらないか。
+"""設計を別の言語で書くと何が変わり、何が変わらないか。
 
 変える必要のあったものの一覧は短く、それ自体が分かったことだ。関門の算術、
-書き込みの柵、台帳、エスカレーションの規則、L14 の語彙以外のすべてのリンタ規則は、
-もともと言語に依存していなかった。Python の形をしていたのは表現だけだ。
+書き込みの柵、台帳、「形」の語彙以外の設計の検査は、もともと言語に依存して
+いなかった。Python の形をしていたのは表現だけだ。
 
 ここのテストは、変わった4つと、変わらなかったが「誤っていた」1つだ。
 parse_junit は最初の <testsuite> を読み、pytest はそれを1つしか書かないので、
@@ -24,7 +24,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import loop  # noqa: E402
 from loop import (  # noqa: E402
     LANGUAGE, LANGUAGES, failure_kind, load_settings, modules_of, parse_junit,
-    test_argv, validate_plan,
+    test_argv,
 )
 
 
@@ -86,8 +86,8 @@ class WhereTheCodeGoes(Language):
         self.assertIn("THE PAGE ALREADY EXISTS", LANGUAGE["layout_note"])
         self.assertNotIn("THE PAGE", loop.LANGUAGE_BASES["typescript"]["layout_note"])
 
-    def test_validating_a_plan_takes_its_framework(self):
-        loop.adopt_language({"language": "cpp", "framework": "dxlib"})
+    def test_the_stage_s_framework_is_used(self):
+        loop.use_stage_language({"language": "cpp", "framework": "dxlib"})
         self.assertEqual(LANGUAGE["framework"], "dxlib")
 
 
@@ -135,169 +135,79 @@ class WhereAThingLives(Language):
             ["idlegame/engine", "idlegame"])
 
     def test_the_other_language_s_files_are_not_modules(self):
-        # .py を挙げた TypeScript の計画はモジュールを書いていない。書いたと言うと、
-        # 何も満たせない契約を L15 が通してしまう。
+        # .py を挙げた TypeScript の設計はモジュールを書いていない。
         self.speak("typescript")
         self.assertEqual(modules_of(["src/idlegame/engine.py"]), [])
 
 
 class ContractsMustStateAShape(Language):
-    """L14 を、各言語自身の型の構文で確かめる。規則そのものは変わらない。"""
+    """「形」の検査を、各言語自身の型の構文で確かめる。規則そのものは変わらない。"""
 
-    def plan(self, provides: str) -> dict:
-        return {
-            "steps": [{
-                "id": "S1", "kind": "skeleton", "goal": "g", "depends_on": [],
-                "acceptance": [
-                    {"case": "normal", "given": "g", "then": "x == 1"},
-                    {"case": "boundary", "given": "g", "then": "x == 0"},
-                    {"case": "error", "given": "g", "then": "raises ValueError"},
-                ],
-                "contracts": {"provides": [provides], "requires": [],
-                              "invariants": ["one"]},
-                "files_write": ["src/pkg/models" + LANGUAGE["source_suffix"]],
-                "files_test": ["tests/models_test" + LANGUAGE["source_suffix"]],
-                "expected_tests": 3, "max_attempts": 2, "review_gate": False,
-            }],
-        }
-
-    def l14(self, provides: str) -> list[str]:
-        return [p for p in validate_plan(self.plan(provides)) if p.startswith("L14")]
+    def shape(self, provides: str) -> list[str]:
+        doc = ("# モデル\n\n## 振る舞い\n品目を並べる。\n\n## 契約\n```ndjson contract\n"
+               + json.dumps({"provides": provides, "entry": True}) + "\n```\n")
+        ac = json.dumps({"criteria": [
+            {"case": "normal", "kind": "unit", "given": "g", "then": "x == 1"},
+            {"case": "boundary", "kind": "unit", "given": "g", "then": "x == 0"},
+            {"case": "error", "kind": "unit", "given": "g", "then": "raises ValueError"},
+        ]})
+        _, problems = loop.design_problems({"pkg/models": doc}, {"pkg/models": ac})
+        return [p for p in problems if p.startswith("形")]
 
     def test_a_bare_python_container_is_refused(self):
         self.speak("python")
-        self.assertTrue(self.l14("src/pkg/models.py: def catalog() -> dict"))
+        self.assertTrue(self.shape("def catalog() -> dict"))
 
     def test_a_parameterised_python_container_passes(self):
         self.speak("python")
-        self.assertFalse(self.l14("src/pkg/models.py: def catalog() -> dict[str, Spec]"))
+        self.assertFalse(self.shape("def catalog() -> dict[str, Spec]"))
 
     def test_a_bare_typescript_container_is_refused(self):
         self.speak("typescript")
-        self.assertTrue(self.l14("src/pkg/models.ts: function catalog(): Record"))
+        self.assertTrue(self.shape("export function catalog(): Record"))
 
     def test_a_parameterised_typescript_container_passes(self):
         self.speak("typescript")
-        self.assertFalse(
-            self.l14("src/pkg/models.ts: function catalog(): Record<string, Spec>"))
+        self.assertFalse(self.shape("export function catalog(): Record<string, Spec>"))
 
     def test_each_language_only_knows_its_own_shapeless_names(self):
         # `dict` は TypeScript の型ではなく、`Record` は Python の型ではない。
         # 語彙を1つにすると、両方で正しい契約を拒むことになる。
         self.speak("typescript")
-        self.assertFalse(self.l14("src/pkg/models.ts: function f(): dict"))
+        self.assertFalse(self.shape("export function f(): dict"))
         self.speak("python")
-        self.assertFalse(self.l14("src/pkg/models.py: def f() -> Record"))
+        self.assertFalse(self.shape("def f() -> Record"))
 
 
-class ContractsMustSayWhereAThingLives(Language):
-    """L15 と、行がモジュールを名指ししているかを決める境界。"""
+class TheSolverIsToldWhereAThingLives(Language):
+    """契約の行に置き場は無い。下流へ渡すときに、モジュールのパスから足す。"""
 
-    def plan(self, provides: str, source: str) -> dict:
-        return {
-            "steps": [{
-                "id": "S1", "kind": "skeleton", "goal": "g", "depends_on": [],
-                "acceptance": [
-                    {"case": "normal", "given": "g", "then": "x == 1"},
-                    {"case": "boundary", "given": "g", "then": "x == 0"},
-                    {"case": "error", "given": "g", "then": "raises ValueError"},
-                ],
-                "contracts": {"provides": [provides], "requires": [],
-                              "invariants": ["one"]},
-                "files_write": [source],
-                "files_test": ["tests/models_test" + LANGUAGE["source_suffix"]],
-                "expected_tests": 3, "max_attempts": 2, "review_gate": False,
-            }],
-        }
-
-    def l15(self, provides: str, source: str) -> list[str]:
-        return [p for p in validate_plan(self.plan(provides, source))
-                if p.startswith("L15")]
-
-    def test_a_typescript_path_names_its_own_module(self):
-        # モジュール名の後のドットは拡張子で、区切り文字ではない。パスを書いた
-        # プランナーに名前を繰り返させると、誤っているのは計画ではなく規則なのに
-        # 試行を1回使う。最初の TypeScript の bootstrap の1回目で、まさにそれが
-        # 起きた。
-        self.speak("typescript")
-        self.assertFalse(self.l15(
-            "src/idlegame/model.ts :: interface GameState { resource: number }",
-            "src/idlegame/model.ts"))
-
-    def test_a_typescript_signature_with_no_module_at_all_is_refused(self):
-        self.speak("typescript")
-        self.assertTrue(self.l15("interface GameState { resource: number }",
-                                 "src/idlegame/model.ts"))
-
-    def test_a_longer_name_does_not_count_as_the_shorter_one(self):
-        self.speak("typescript")
-        self.assertTrue(self.l15("src/idlegame/models.ts :: interface X",
-                                 "src/idlegame/model.ts"))
-
-    def test_python_still_treats_the_dot_as_a_separator(self):
-        # incgame.engine.sub の中に現れる incgame.engine は別のモジュールを指す
-        # ので、Python の境界にはドットを残す。
+    def test_python_names_the_module_it_is_defined_in(self):
         self.speak("python")
-        self.assertFalse(self.l15(
-            "src/incgame/engine.py: def f() -> int -- defined in incgame.engine",
-            "src/incgame/engine.py"))
-        self.assertTrue(self.l15("def f() -> int", "src/incgame/engine.py"))
+        self.assertEqual(
+            loop.legacy_line("def f() -> int", loop.module_files("incgame/engine")),
+            "def f() -> int -- defined in incgame.engine")
+
+    def test_typescript_puts_the_file_in_front_and_drops_the_export(self):
+        self.speak("typescript")
+        self.assertEqual(
+            loop.legacy_line("export interface GameState { resource: number }",
+                             loop.module_files("idlegame/model")),
+            "src/idlegame/model.ts: interface GameState { resource: number }")
 
 
-class StampingTheLanguage(Language):
-    """計画に言語を書き込むのはランナーで、プランナーは決して書かない。
+class TheLanguageComesFromTheStage(Language):
+    """下流の計画に言語を書くのはランナーで、プランナーは決して書かない。
 
     この機械がどの言語を持つかは箱の性質で、プロジェクトがどれを使うかは誰かに
-    計画を頼む前に決まる。solver_tiers と同じ理屈だ。選べるプランナーは、入って
+    設計を頼む前に決まる（basic draft --language）。選べるプランナーは、入って
     いないツールチェーンを選ぶことがある。
     """
 
-    def setUp(self) -> None:
-        super().setUp()
-        self.temp = tempfile.TemporaryDirectory()
-        self.out = Path(self.temp.name)
-        self.saved_out = loop.PLANNER_OUT
-        loop.PLANNER_OUT = self.out
-
-    def tearDown(self) -> None:
-        loop.PLANNER_OUT = self.saved_out
-        self.temp.cleanup()
-        super().tearDown()
-
-    def test_the_value_lands_in_the_proposal(self):
-        (self.out / "tasks.json").write_text('{"version": 1, "steps": []}',
-                                             encoding="utf-8")
-        loop.stamp_language("typescript")
-        written = json.loads((self.out / "tasks.json").read_text(encoding="utf-8"))
-        self.assertEqual(written["language"], "typescript")
-        self.assertEqual(written["steps"], [])
-
-    def test_the_framework_lands_beside_the_language(self):
-        (self.out / "tasks.json").write_text('{"version": 1, "steps": []}',
-                                             encoding="utf-8")
-        loop.stamp_language("csharp", "unity")
-        written = json.loads((self.out / "tasks.json").read_text(encoding="utf-8"))
-        self.assertEqual((written["language"], written["framework"]), ("csharp", "unity"))
-
-    def test_a_plan_from_before_frameworks_is_not_given_one(self):
-        # 改訂は計画が持つ値を刻み直す。持っていなければ、言語の既定で読まれ続ける。
-        (self.out / "tasks.json").write_text('{"version": 1, "steps": []}',
-                                             encoding="utf-8")
-        loop.stamp_language("csharp", None)
-        written = json.loads((self.out / "tasks.json").read_text(encoding="utf-8"))
-        self.assertNotIn("framework", written)
-
-    def test_an_escalation_leaves_nothing_to_stamp(self):
-        # プランナーは計画を書かず ESCALATE.md だけで答えることがある。書き込みで
-        # 計画をこしらえてはならない。
-        loop.stamp_language("typescript")
-        self.assertFalse((self.out / "tasks.json").exists())
-
-    def test_unreadable_json_is_left_alone_rather_than_replaced(self):
-        (self.out / "tasks.json").write_text("{ not json", encoding="utf-8")
-        loop.stamp_language("typescript")
-        self.assertEqual((self.out / "tasks.json").read_text(encoding="utf-8"),
-                         "{ not json")
+    def test_the_tasks_carry_the_stage_s_language_and_framework(self):
+        with patch.object(loop, "basic_overview", return_value=""):
+            tasks = loop.build_tasks({}, {"language": "csharp", "framework": "unity"})
+        self.assertEqual((tasks["language"], tasks["framework"]), ("csharp", "unity"))
 
 
 class ReadingTheReport(unittest.TestCase):
@@ -420,8 +330,8 @@ class TheStubBrief(unittest.TestCase):
 class RewritingTestsThatDoNotCompile(unittest.TestCase):
     """TEST_WRITE をやり直す唯一の理由と、それが唯一である理由。
 
-    構文エラーはソルバーの誤りで、ほかの誰にも直せない。プランナーは直せず、
-    エスカレーションすれば、それを言われるために28分の呼び出しを使う。run 8 の
+    構文エラーはソルバーの誤りで、ほかの誰にも直せない。設計を直しても直らず、
+    当時は計画の手直しの28分の呼び出しを、それを言われるために使った。run 8 の
     S1 はそれを2回やった。落ちるだけのテストや、スタブに対して通るテストは、
     「頼んだ」内容の問題で、もう一度頼んでも同じ誤解を引き直すために払うだけだ。
     """
@@ -525,10 +435,10 @@ class RewritingACrashedTestFile(Language):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         root = Path(self.temp.name)
-        (root / "plan").mkdir()
-        (root / "plan" / "tasks.json").write_text('{"steps": []}', encoding="utf-8")
+        (root / ".runner").mkdir()
+        (root / ".runner" / "tasks.json").write_text('{"steps": []}', encoding="utf-8")
         self.briefs: list[str] = []
-        self.escalated: list[loop.Halt] = []
+        self.failed: list[loop.Halt] = []
         self.greens: list[int] = []
         self.restored = 0
         self.runs: list[loop.TestRun] = []
@@ -542,8 +452,7 @@ class RewritingACrashedTestFile(Language):
             self.restored += 1
 
         patches = {
-            "PLAN": root / "plan", "STATE": root / ".runner",
-            "validate_plan": lambda tasks: [],
+            "STATE": root / ".runner", "TASKS": root / ".runner" / "tasks.json",
             "load_settings": lambda tasks: None,
             "load_plan": lambda sid: (self.STEP, "context"),
             "ledger": lambda event, **f: None,
@@ -560,8 +469,8 @@ class RewritingACrashedTestFile(Language):
             "frozen_tests_text": lambda step: "",
             "pytest_run": lambda tag, files: self.runs.pop(0),
             "call_solver": call,
-            "complete_green": lambda sid, goal, n: self.greens.append(n),
-            "escalate": lambda step, halt, n, run: self.escalated.append(halt),
+            "complete_green": lambda sid, goal, n, design="": self.greens.append(n),
+            "fail_module": lambda step, halt, n, run: self.failed.append(halt),
         }
         for name, value in patches.items():
             p = patch.object(loop, name, value)
@@ -585,11 +494,11 @@ class RewritingACrashedTestFile(Language):
                      for _ in range(loop.LIMITS["test_writes"])]
         self.assertEqual(loop.run_step("S3"), 2)
         self.assertEqual(len(self.briefs), loop.LIMITS["test_writes"])
-        # 最後の試行のファイルは残す。エスカレーションが読む。
+        # 最後の試行のファイルは残す。止まった理由を人が読む。
         self.assertEqual(self.restored, loop.LIMITS["test_writes"] - 1)
-        self.assertEqual(len(self.escalated), 1)
-        self.assertTrue(self.escalated[0].reason.startswith("R5"))
-        self.assertIn("T1", self.escalated[0].detail)
+        self.assertEqual(len(self.failed), 1)
+        self.assertTrue(self.failed[0].reason.startswith("R5"))
+        self.assertIn("T1", self.failed[0].detail)
 
 
 class TellingTheSolverWhatFailed(unittest.TestCase):
@@ -632,8 +541,8 @@ class TheRunnerWritesTheStub(Language):
     """8回の run のあいだ、判断の要らないものをモデルに頼んでいた。
 
     スタブの仕事は1つ（形は正しく、値は間違っている）で、contracts.provides が
-    すでに署名、すべての型の形、それぞれの置き場を運んでいる。L14 と L15 は
-    それを保証するためにある。頼んだ結果、run 8 の S1 は、条件に正しく答える
+    すでに署名とすべての型の形を運び、置き場はモジュールのパスが決める。
+    設計の検査の「形」はそれを保証するためにある。頼んだ結果、run 8 の S1 は、条件に正しく答える
     スタブのせいで RED_GATE で4回拒まれた。
     """
 
@@ -957,7 +866,7 @@ class TheSolverIsToldTheFileExists(unittest.TestCase):
 class TheExistingCodeReachesTheSolver(unittest.TestCase):
     """requires が名指しした既存の宣言は、依存先の契約と一緒にソルバーへ届く。
 
-    L3 が認めても、ブリーフに行が無ければ、テストを書くソルバーは import する
+    「存在」の検査が認めても、ブリーフに行が無ければ、テストを書くソルバーは import する
     モジュールも署名も知らない。行は HEAD から読んだものを渡す。
     """
 

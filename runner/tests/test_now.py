@@ -1,7 +1,7 @@
 """いまの作業を、人が読める形で書き出すこと。
 
-台帳は起きたことの記録で、ホストに届くのは GREEN と plan apply のときだけだ。
-「いま誰がどのステップの何をしているか」は now.json で伝える。人が見るための
+台帳は起きたことの記録だ。「いま誰がどのモジュールの何をしているか」は
+now.json で伝える。人が見るための
 写しなので、書けなくても走行は止めない。
 
     python3 -m unittest discover -s runner/tests
@@ -27,9 +27,11 @@ class Now(unittest.TestCase):
         root = Path(temp.name)
         (root / "logs").mkdir()
         (root / "plan").mkdir()
+        (root / ".runner").mkdir()
         self.now_file = root / "logs" / "now.json"
         self.plan = root / "plan"
-        (self.plan / "tasks.json").write_text(json.dumps({"steps": [
+        self.tasks = root / ".runner" / "tasks.json"
+        self.tasks.write_text(json.dumps({"steps": [
             {"id": "S1", "goal": "model the game state"},
             {"id": "S2", "goal": "buy a generator"},
             {"id": "S3", "goal": "render the page"},
@@ -39,6 +41,8 @@ class Now(unittest.TestCase):
         for p in (mock.patch.object(loop, "NOW_FILE", self.now_file),
                   mock.patch.object(loop, "PLAN", self.plan),
                   mock.patch.object(loop, "LEDGER", self.plan / "ledger.jsonl"),
+                  mock.patch.object(loop, "STAGE_FILE", self.plan / "stage.json"),
+                  mock.patch.object(loop, "TASKS", self.tasks),
                   mock.patch.dict(loop.NOW, {"command": "run --all", "step": "S2",
                                              "attempt": None, "key": None, "since": None})):
             p.start()
@@ -58,17 +62,15 @@ class WhoIsDoingWhat(Now):
         self.assertEqual(activity["text_ja"], "S2 を実装している（試行 2）")
 
     def test_the_planner_is_described_by_the_command_it_is_in(self):
-        cases = {"plan bootstrap": "要件から計画を書いている",
-                 "plan refine": "クリティックの指摘を受けて計画を直している",
-                 "run --all": "S2 のエスカレーションに答えて計画を直している"}
+        cases = {"basic draft": "仕様書から基本設計仕様書を書いている",
+                 "modules draft": "基本設計仕様書からモジュールの詳細設計仕様書を書いている"}
         for command, text in cases.items():
             with self.subTest(command=command):
                 loop.NOW["command"] = command
                 self.assertEqual(loop.describe_now("planner", "PLAN_PROPOSE"), text)
 
-    def test_the_critic_names_what_it_is_looking_for(self):
-        self.assertIn("要件", loop.describe_now("critic", "CRITIQUE", "coverage"))
-        self.assertIn("届かない", loop.describe_now("critic", "CRITIQUE", "trace"))
+    def test_the_critic_reads_the_detailed_design(self):
+        self.assertIn("詳細設計仕様書", loop.describe_now("critic", "CRITIQUE"))
 
     def test_the_runner_says_which_gate_it_is_running(self):
         self.assertIn("落ちる", loop.describe_now("runner", "red"))
@@ -88,8 +90,8 @@ class TheSteps(Now):
                          [("S1", "green"), ("S2", "active"), ("S3", "pending")])
         self.assertEqual(steps[1]["goal"], "buy a generator")
 
-    def test_no_plan_yet_is_an_empty_list(self):
-        (self.plan / "tasks.json").unlink()
+    def test_no_tasks_yet_is_an_empty_list(self):
+        self.tasks.unlink()
         loop.report_now("planner", "PLAN_PROPOSE")
         self.assertEqual(self.read()["steps"], [])
 

@@ -30,8 +30,9 @@ PowerShell なら `.\host\loop.cmd <args>`、Git Bash なら `./host/loop.cmd <a
 | 記号 | 何を入れるか |
 |---|---|
 | `<repo-dir>` | ホストにクローンした Loop Engine のリポジトリ |
-| `<requirements>` | 要件のファイルのパス。手元だけで使うものは `<repo-dir>\requirements\local\` に置く |
-| `<step>` | ステップの ID（`S3` など） |
+| `<spec>` | 仕様書のファイルのパス。手元だけで使うものは `<repo-dir>\requirements\local\` に置く |
+| `<module>` | モジュールの ID。詳細設計仕様書のパスから `docs/modules/` と `.md` を除いたもの（`core/board` など） |
+| `<comment>` | 設計を書き直させるときに人が付けるコメント |
 | `<project>` | 箱の中でのプロジェクトの名前。英小文字、数字、`.` `_` `-` |
 | `<repo-url>` | 対象のリポジトリの GitHub の URL |
 | `<clone-dir>` | ホストで対象のリポジトリをクローンしたディレクトリ |
@@ -48,50 +49,59 @@ PowerShell なら `.\host\loop.cmd <args>`、Git Bash なら `./host/loop.cmd <a
 
 ## 走らせる（ホストでも箱でも）
 
+流れは3段で、各段の出口で人が止める。上流で基本設計、中段で詳細設計と受け入れ条件、下流で
+実装を作る。段を進めるのは `loop approve` だけだ。
+
 | やりたいこと | コマンド |
 |---|---|
-| 要件から最後まで走らせる | `loop go <requirements>` |
-| TypeScript で走らせる | `loop go <requirements> --language typescript` |
-| C++ で走らせる | `loop go <requirements> --language cpp` |
-| 持ち込む先を選んで走らせる | `loop go <requirements> --language <言語> --framework <持ち込む先>` |
+| 仕様書を置き、基本設計を書かせる | `loop go <spec>... --language <言語>` |
+| 持ち込む先を選んで始める | `loop go <spec>... --language <言語> --framework <持ち込む先>` |
+| 今の段の設計を承認して次へ流す | `loop approve` |
+| コメントを付けて今の段の設計を書き直させる | `loop reject <comment>` |
+| 直すモジュールを選んで中段に戻す | `loop reopen <module>...` |
+| 止まったところから続ける | `loop continue` |
 | 状態を見る | `loop status` |
 | ログを追う（Ctrl-C で抜けても走行は続く） | `loop log` |
-| 止まったところから続ける | `loop continue` |
 | 止める | `loop stop` |
 | いまの作業を JSON で見る | `loop now` |
 
-`loop go` は、要件の配置、`plan bootstrap`、`plan refine`、`plan apply`、`run --all` を順に裏で流す。
-ホストで打つときは、`<requirements>` にホストのファイルのパスをそのまま渡せる。
+言語は `python`、`typescript`、`cpp`、`csharp` のどれかで、省くと `python`。ホストで打つときは、
+`<spec>` にホストのファイルのパスを1つだけそのまま渡せる。箱で打つときは複数渡せる。
+
+段ごとに `loop approve` と `loop reject` がすることは次のとおり。
+
+| 段 | `loop approve` | `loop reject <comment>` |
+|---|---|---|
+| 上流 | 基本設計を承認し、詳細設計を書かせてクリティックに読ませる | 基本設計を書き直させる |
+| 中段 | 詳細設計を承認し、全モジュールを実装する | 詳細設計を書き直させ、クリティックに読ませ直す |
+
+上流の成果物は `docs/basic/`、中段の成果物は `docs/modules/` と `ac/` にある。写しには `docs/`
+だけが入る。受け入れ条件は箱で読む。
+
+```bash
+sudo -u runner cat /srv/loop/project/ac/<module>.json
+```
 
 ## 止まったとき（ホストでも箱でも）
 
 止まった理由と次の手は、`loop status` とログの最後の行に出る。
 
-改訂の上限まで回してもクリティックの指摘が残るか、改訂が済まずに止まると、指摘は人を待つ。改訂が済まないのは、プランナーが判断を返したとき、改訂に失敗したとき、改訂の途中で走行を止めたときだ。的外れな指摘や、プランナーの問いに答える指摘を書き換えてから `loop continue` を流すと、
-書き換えた指摘でプランナーが1回だけ計画を直し、適用して走らせる。何も書き換えなければ、そのまま適用する。
-ダッシュボードの「クリティックの指摘」からも、書き換えと続行ができる。
+モジュールが下流で試行を使い切ると、走行は中段に戻って止まる。止まった理由は
+`plan/FAILURE.md` にあり、`loop status` が先頭を見せる。直すモジュールを `loop reopen` で選び、
+`loop reject <comment>` で書き直させる。設計を変えないなら、そのまま `loop approve` で流し直す。
 
 | やりたいこと | コマンド |
 |---|---|
-| 途中で止まったステップを最後の緑に戻す | `loop raw reset <step>` |
-| 計画をリンタにかける | `loop raw validate` |
-| 適用待ちの提案を見る | `loop raw plan show` |
-| 適用待ちの提案を適用して続ける | `loop continue` |
+| 途中で止まったモジュールを最後のコミットに戻す | `loop raw reset <module>` |
+| 今の設計を検査する | `loop raw check` |
 | クリティックの指摘を見る | `loop findings` |
-| 残った指摘を1件書き換える（番号は0から） | `echo '{"mode": "<mode>", "index": <n>, "title": "<題>", "evidence": "<根拠>"}' \| loop findings set` |
-| エスカレーションへの改訂案をプランナーに書かせる | `loop raw plan propose --step <step>` |
-| 受け入れ条件を書き換えた計画を入れ、ステップを最後の緑に戻す | `loop plan amend <step> <tasks.json>` |
-| 計画を批評だけする | `loop raw critique` |
+| 批評だけをやり直す | `loop raw modules critique` |
 
 `loop raw` は `loop.py` をそのまま runner として前面で呼ぶ。動詞の一覧は `loop raw --help`。
 
-受け入れ条件の書き換えと上流からの作り直しは人の判断で、プランナーの提案では拒まれる。
-写しの `plan/tasks.json` を書き換えて `loop plan amend` に渡す。ホストで打つときは、ホストの
-ファイルのパスをそのまま渡せる。リンタに通らなければ何も変わらない。通れば計画をコミットし、
-そのステップを最後の緑に戻す。次は `loop continue`。
+クリティックの指摘はプランナーに戻らない。書き直させたい指摘は、`loop reject` のコメントに書く。
 
-ダッシュボードでエスカレーションに「回答を記録」すると、回答は箱に届く。次の `loop continue` は
-ステップを走らせ直す前に、その回答をプランナーに渡して計画を直させる。
+走行の設定（試行回数、時間切れ、ソルバーの段）は `/srv/loop/settings.json` に置く。root が書く。
 
 ## プロジェクトを切り替える（ホストでも箱でも）
 
@@ -155,7 +165,7 @@ loop-import <project> <repo-url> <branch> [<base-branch>] [--src <src-dir>] [--t
 
     ```bash
     loop project use <project>
-    loop go <requirements>
+    loop go <spec> --language <言語>
     ```
 
     `use` は、ブランチが push されていなければ何も動かさずに止まる。初回はプロビジョニングが
@@ -176,12 +186,12 @@ git merge loop/<branch>
 
 ### PR に出す（ホスト）
 
-ダッシュボードで予定レビューを承認すると、`<branch>-pr` から `<base-branch>` への PR が出る。
+全モジュールが緑になると、段は最終確認に移る。ダッシュボードで予定レビューを承認すると、`<branch>-pr` から `<base-branch>` への PR が出る。
 先に `loop-pull` を流して、写しを箱の先まで進めておく。仕組みと前提は
 [host/dashboard/README.md](../host/dashboard/README.md) の「プルリクエスト」にある。
 
-全ステップが緑になる前に出すなら、`loop-pull` のあとに `loop-pr` を打つ。最後に緑になったステップまでが、
-`<branch>-draft` から `<base-branch>` への下書きの PR になる。本文には残りのステップが並ぶ。
+全モジュールが緑になる前に出すなら、`loop-pull` のあとに `loop-pr` を打つ。最後に緑になったモジュールまでが、
+`<branch>-draft` から `<base-branch>` への下書きの PR になる。
 緑が増えたら、`loop-pull` と `loop-pr` をもう一度打てば同じ PR が更新される。
 
 | やりたいこと | コマンド |
@@ -196,12 +206,12 @@ git -C <clone-dir> config branch.<branch>.loopBase <base-branch>
 ```
 
 手で出すときは次のとおり。`<branch>` には、箱が置いた環境のファイル（`conftest.py`、`index.html`、`vitest.config.mjs`、
-`.gitignore` への追記）と計画（`plan/`）がコミットされている。PR には要らないので、別のブランチで
+`.gitignore` への追記）と設計（`plan/`、`docs/spec/`、`docs/basic/`、`docs/modules/`）がコミットされている。PR には要らないので、別のブランチで
 消してから出す。`<branch>` そのものは消さずに残す。箱はこれからもそこで作業する。
 
 ```bash
 git switch -c <pr-branch> <branch>
-git rm -r -q --ignore-unmatch plan conftest.py index.html vitest.config.mjs
+git rm -r -q --ignore-unmatch plan docs/spec docs/basic docs/modules conftest.py index.html vitest.config.mjs
 git checkout origin/<base-branch> -- .gitignore
 git commit -m "chore: Loop Engineの環境のファイルを除く"
 git push origin <pr-branch>
@@ -218,21 +228,21 @@ git push origin <pr-branch>
 - 自前の `conftest.py`、`index.html`、`vitest.config.mjs` があると、プロビジョニングは上書きせずに止まる
 - `.gitignore` に `node_modules/` があると `35-node.sh` が止まる
 - 依存パッケージは入らない。箱にあるのは pytest と vitest だけだ
-- 既存のファイルでは、スタブは計画が挙げた名前の宣言だけを差し替える。既存のテストは凍結されるので、振る舞いを変えるとそのテストが回帰として落ちる
+- 既存のファイルでは、スタブは契約が挙げた名前の宣言だけを差し替える。既存のテストは凍結されるので、振る舞いを変えるとそのテストが回帰として落ちる
 
 ## C++ で作業させる
 
 ```bash
-loop go <requirements> --language cpp
+loop go <spec> --language cpp
 ```
 
 箱は標準の C++17 のロジックだけを g++ と GoogleTest で確かめる。DXライブラリや Windows の API は箱に無い。
 
-- `DxLib.h` や `windows.h` のように、標準でもリポジトリのものでもないヘッダを include するファイルはビルドから外す。外したファイルは計画づくりのブリーフに並ぶ
+- `DxLib.h` や `windows.h` のように、標準でもリポジトリのものでもないヘッダを include するファイルはビルドから外す。外したファイルはプランナーのブリーフに並ぶ
 - 描画、入力、音を扱うファイルもソルバーが書けるが、箱ではビルドも実行もしない。人が Visual Studio でビルドして画面を確かめる
 - `DxLib.h` を include するファイルがあるか、要件が DXライブラリに触れていれば、プランナーに DXライブラリの主な関数の早見表を渡す
 - 手元の `DxLib.h` を `loop refs dxlib <DxLib.h>` で送ると、箱の `/srv/loop/refs/dxlib` に置かれ、ソルバーが早見表に無い関数と定数をそこから引く。ホストで打つときは、ホストのファイルのパスをそのまま渡せる。DXライブラリを入れ替えたら送り直す
-- 新しい `.cpp` と `.h` は Visual Studio のプロジェクト（`.vcxproj`）に入らない。CONTEXT.md の一覧を見て、人が足す
+- 新しい `.cpp` と `.h` は Visual Studio のプロジェクト（`.vcxproj`）に入らない。詳細設計仕様書のパスを見て、人が足す
 - ソースは ASCII だけで書かせる。画面に日本語を出すなら、Visual Studio でソースの文字コードの扱い（`/utf-8` など）を決めてから人が書き足す
 - C++ の既存コードの宣言はまだプランナーに渡らない。スタブはソルバーが書き、ランナーは既存のファイルの残りが変わっていないかを確かめない
 
@@ -275,10 +285,10 @@ loop go <requirements> --language cpp
 
 | やりたいこと | 欄 | 同じことをするコマンド |
 |---|---|---|
-| 要件から走らせる | 走行 | `loop go <requirements> --language <言語>` |
+| 仕様書から始める | 走行 | `loop go <spec> --language <言語>` |
 | 止まったところから続ける | 走行 | `loop continue` |
 | 止める | 走行 | `loop stop` |
-| 途中で止まったステップを最後の緑に戻す | 走行 | `loop raw reset <step>` |
+| 途中で止まったモジュールを最後のコミットに戻す | 走行 | `loop raw reset <module>` |
 | プロジェクトを切り替える | プロジェクト | `loop project use <project>` |
 | 役ごとのモデルと effort を変える | 役のモデル | `/etc/loop/<役>.env` の `LOOP_MODEL` と `LOOP_EFFORT` を書き換える |
 | 写しを最新にする | ホストの写し | `loop-pull` |
@@ -301,7 +311,7 @@ Tailscale のログインを書く。どちらかが無ければ、tailnet か�
 `tailscale funnel` は使わない。インターネット全体に公開される。
 
 リモートから、予定レビューの承認、走行の開始、プロジェクトの切り替え、モデルの変更、写しの更新、
-取り込みはできない。差し戻し、エスカレーションへの回答、走行の停止と続行、止まったステップのやり直しはできる。
+取り込みはできない。差し戻し、走行の停止と続行、止まったモジュールのやり直しはできる。
 
 設定の詳細: [host/dashboard/README.md](../host/dashboard/README.md)
 
@@ -339,7 +349,7 @@ runner として流す。
 |---|---|
 | `smoke-solver` | ランナーがソルバーを別の uid で起動できるか。認証、端末なしの実行、書いたファイルの所有者 |
 | `smoke-pytest` | ソルバーが pytest を実行できないこと |
-| `smoke-planner` | プランナーが動き、計画にもコードにも直接触れないこと |
+| `smoke-planner` | プランナーが動き、設計にもテストにも直接触れず、コードを読めても書けないこと |
 | `smoke-critic` | クリティックが起動でき、書いたファイルを読み戻せること |
 | `smoke-dom` | happy-dom の UI の関門が、生きた UI で通り、壊れた UI で落ちること |
 | `smoke-page` | 開発サーバで `index.html` を開くと `src/main.ts` の `start` まで届くこと |
@@ -374,7 +384,7 @@ python3 -m unittest discover -s host/dashboard/tests
 
 ## 詳しい説明
 
-- 走らせ方と止まる場面: [provision/README.md](../provision/README.md) §2-10
+- 段と止まる場面: [RUNNER_SPEC.md](RUNNER_SPEC.md) §3、§7
 - プロジェクトの切り替え: [provision/README.md](../provision/README.md) §2-11
 - ホスト側のスクリプトと SSH の設定: [host/README.md](../host/README.md)
 - ダッシュボードの設計と設定: [host/dashboard/README.md](../host/dashboard/README.md)

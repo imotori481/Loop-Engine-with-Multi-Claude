@@ -5,7 +5,7 @@
 /srv/loop/logs だけだ。ここは humanw 経由で保守ユーザーが読める。
 
 今の回のトークン数も、クリティックの指摘も、ログから読む。写しの台帳に届くのは
-コミットのときだけで、計画づくりの途中や、refine で止まったときには届かない。
+コミットのときだけで、設計を書いている途中や、批評の前に止まったときには届かない。
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ import time
 
 ROLES = ("planner", "critic", "solver")
 
-# 行の形は loop（finish と step）と loop.py（record_usage と cmd_plan_refine）が決める。
+# 行の形は loop（finish と step）と loop.py（record_usage と cmd_modules_critique）が決める。
 # 変えるときはここも合わせる。
 LOOP_HEADER = re.compile(r"^=== loop (\w+) 開始 \((\d{4}-\d\d-\d\d) (\d\d:\d\d:\d\d)\)")
 STEP_HEADER = re.compile(r"^--- loop\.py .* \((\d{4}-\d\d-\d\d) (\d\d:\d\d:\d\d)\)$")
@@ -27,7 +27,7 @@ USAGE = re.compile(r"^\[USAGE\] who=(\w+) ")
 FIELD = re.compile(r"(\w+)=(\S+)")
 KINDS = ("input", "cache_write", "cache_read", "output")
 CRITIQUE_HEADER = "=== critique "
-ALL_GREEN = "全ステップが緑"
+ALL_GREEN = "全モジュールが緑"
 
 
 def read(path, parse):
@@ -96,7 +96,7 @@ def add_usage(loop: dict, line: str) -> None:
 def current_loop(paths: list[str]) -> dict | None:
     """最後の `loop go` から後のログを足し、今の回のトークン数と最後の指摘を返す。
 
-    1回は `loop go` から完了まで。途中の `loop continue` は同じ回に入る。
+    1回は `loop go` から完了まで。途中の承認、差し戻し、`loop continue` は同じ回に入る。
     `loop go` のログが無ければ None。
     """
     loop = None
@@ -142,9 +142,9 @@ def outcome(running: bool, last: str | None) -> str:
 
 
 def findings(logs: str) -> dict | None:
-    """plan refine が書いた、人が直す指摘の写し。human/in は humanw で読める。
+    """modules critique が書いた、指摘の写し。human/in は humanw で読める。
 
-    bootstrap が消すので、あれば今の計画への批評だ。waiting なら人が直してよい。
+    批評のたびに書き直すので、あれば最後に読んだ詳細設計への批評だ。
     """
     path = os.path.join(os.path.dirname(logs), "human", "in", "CRITIQUE.json")
     value = read(path, json.load)

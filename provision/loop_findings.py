@@ -1,11 +1,11 @@
 """`loop findings` の中身。クリティックの指摘の、人が直す写しを見せ、書き換える。
 
 保守ユーザーが sudo なしで流す。ホストのダッシュボードも SSH でこれを呼ぶ。
-写し（/srv/loop/human/in/CRITIQUE.json）は、plan refine が批評のたびに書いて止まる。
+写し（/srv/loop/human/in/CRITIQUE.json）は、modules critique が批評のたびに書く。
 グループ humanw に書き込みを許してあり、プランナーとクリティックは読めない。
 
-書き換えてよいのは、ランナーが人を待っているあいだの、指摘1件の title と evidence
-だけ。指摘を消すことも足すこともできない。ランナーも再開のときに同じことを確かめる。
+指摘はプランナーに戻らない。書き直させるかは人が決め、コメントで伝える。だから
+写しの "waiting" はいつも偽で、`set` は断る。
 
     python3 loop_findings.py show <写し>
     python3 loop_findings.py set <写し>   # 標準入力に {"mode", "index", "title", "evidence"}
@@ -16,8 +16,7 @@ from __future__ import annotations
 import json
 import sys
 
-MODE_JA = {"coverage": "要件を満たすか（coverage）",
-           "trace": "使う人の操作で届くか（trace）"}
+MODE_JA = {"modules": "詳細設計の批評（modules）"}
 # 1つの欄の上限。ダッシュボードの入力欄と合わせる。
 MAX_CHARS = 4000
 
@@ -55,7 +54,7 @@ def show(path: str) -> int:
 def rewrite(value: dict, request: object) -> str | None:
     """指摘1件の title と evidence を書き換える。断る理由を返す。"""
     if not value.get("waiting"):
-        return "ランナーは人を待っていない。直せるのは plan refine が止まっているあいだだけ"
+        return "この指摘はプランナーに戻らない。直させるなら 'loop reject <コメント>'"
     if not isinstance(request, dict):
         return "JSON のオブジェクトを渡す"
     mode, index = request.get("mode"), request.get("index")

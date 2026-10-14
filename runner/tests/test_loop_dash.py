@@ -34,14 +34,14 @@ class Request(unittest.TestCase):
             self.parse(request)
 
     def test_actions_without_values_pass_as_one_line(self):
-        for action in ("settings", "continue", "stop"):
+        for action in ("settings", "continue", "stop", "approve"):
             self.assertEqual(self.parse({"action": action}), [action])
 
-    def test_the_requirements_go_to_a_file_and_never_into_a_line(self):
-        text = "# 要件\n$(rm -rf /)\n"
+    def test_the_specification_goes_to_a_file_and_never_into_a_line(self):
+        text = "# 仕様書\n$(rm -rf /)\n"
         self.assertEqual(self.parse({"action": "go", "requirements": text, "language": "csharp"}),
                          ["go", "csharp", "unity"])
-        self.assertEqual((self.work / "requirements.md").read_text(encoding="utf-8"), text)
+        self.assertEqual((self.work / "spec.md").read_text(encoding="utf-8"), text)
 
     def test_a_framework_left_empty_becomes_the_language_s_own(self):
         # ダッシュボードは選ばれていない持ち込む先を空で送る。loop には名前で渡す。
@@ -57,7 +57,7 @@ class Request(unittest.TestCase):
         self.refused({"action": "go", "requirements": "x", "language": "csharp",
                       "framework": "unity\n--from /etc/shadow"})
 
-    def test_a_run_needs_a_known_language_and_some_requirements(self):
+    def test_a_run_needs_a_known_language_and_a_specification(self):
         self.refused({"action": "go", "requirements": "x", "language": "cobol"})
         self.refused({"action": "go", "requirements": "  \n", "language": "python"})
         self.refused({"action": "go", "requirements": "x" * (loop_dash.MAX_REQUIREMENTS + 1),
@@ -102,21 +102,34 @@ class Request(unittest.TestCase):
             self.refused({"action": "init", "project": "game", "branch": "main",
                           "src": src, "tests": tests})
 
-    def test_a_reset_passes_only_a_step_id_that_is_safe_as_a_file_name(self):
-        self.assertEqual(self.parse({"action": "reset", "step": "S12"}), ["reset", "S12"])
-        for step in ("", "-x", "../S1", "S1/x", "a b", "a\nb", "$(id)", None, 12):
-            self.refused({"action": "reset", "step": step})
+    BAD_MODULES = ("", "-x", "../game", "/game", "game/", "a//b", "a b", "a\nb", "$(id)",
+                   "game/board.py", None, 12)
 
-    def test_an_answer_goes_to_a_file_and_never_into_a_line(self):
-        text = "S2 の時間の条件を外す\n$(rm -rf /)"
-        self.assertEqual(self.parse({"action": "answer", "text": text}), ["answer"])
-        self.assertEqual((self.work / "answer.md").read_text(encoding="utf-8"), text + "\n")
-        for text in ("", "  \n", None, 5, "x" * (loop_dash.MAX_ANSWER + 1)):
-            self.refused({"action": "answer", "text": text})
+    def test_a_reset_passes_only_a_module_id(self):
+        self.assertEqual(self.parse({"action": "reset", "step": "game/board"}),
+                         ["reset", "game/board"])
+        for module in self.BAD_MODULES:
+            self.refused({"action": "reset", "step": module})
+
+    def test_a_reopen_passes_each_module_on_its_own_line(self):
+        self.assertEqual(self.parse({"action": "reopen", "modules": ["game/board", "ui/menu"]}),
+                         ["reopen", "game/board", "ui/menu"])
+        for module in self.BAD_MODULES:
+            self.refused({"action": "reopen", "modules": ["game/board", module]})
+        for modules in ([], None, "game/board"):
+            self.refused({"action": "reopen", "modules": modules})
+
+    def test_a_comment_goes_to_a_file_and_never_into_a_line(self):
+        text = "モジュールを分けすぎている\n$(rm -rf /)"
+        self.assertEqual(self.parse({"action": "reject", "text": text}), ["reject"])
+        self.assertEqual((self.work / "comment.md").read_text(encoding="utf-8"), text + "\n")
+        for text in ("", "  \n", None, 5, "x" * (loop_dash.MAX_COMMENT + 1)):
+            self.refused({"action": "reject", "text": text})
 
     def test_anything_else_is_refused(self):
         self.refused([])
         self.refused({"action": "raw"})
+        self.refused({"action": "answer", "text": "x"})
         self.refused({})
 
 

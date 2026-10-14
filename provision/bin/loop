@@ -15,15 +15,13 @@ set -euo pipefail
 LOOP="${LOOP_ROOT:-/srv/loop}"
 UNIT=loop-run
 LOGS=$LOOP/logs
-REQUIREMENTS=$LOOP/human/in/REQUIREMENTS.md
-PENDING=$LOOP/planner/out/tasks.json
+# 人の受け渡し口。loop.py の HUMAN_SPEC、HUMAN_COMMENT、CRITIQUE_FOR_HUMAN。
+SPEC_IN=$LOOP/human/in/spec
+COMMENT=$LOOP/human/in/COMMENT.md
 CRITIQUE=$LOOP/human/in/CRITIQUE.json
-# plan refine が人を待っているあいだの控え。改訂の途中で止まると out/ が空のこともある。
-REFINE_STATE=$LOOP/project/.runner/refine.json
 PLAN=$LOOP/project/plan
-# エスカレーションへの人の答えと、人が書き換えた計画。loop.py の HUMAN_ANSWER と AMENDED_PLAN。
-ANSWER=$LOOP/human/in/ANSWER.md
-AMENDED=$LOOP/human/in/tasks.json
+STAGE=$PLAN/stage.json
+FAILURE=$PLAN/FAILURE.md
 ENGINE="${LOOP_ENGINE:-/opt/loop-engine}"
 PROJECT_SH="$ENGINE/provision/loop-project.sh"
 DASH_PY="$ENGINE/provision/loop_dash.py"
@@ -70,30 +68,17 @@ finish() {
   exit "$1"
 }
 
-apply_pending() {
-  local rc=0
-  step plan apply || rc=$?
+# loop.py を1つ呼び、0 でなければ走行を終える。`what` は何をしていたか。
+# 利用枠と箱の故障は、設計を差し戻さずに止まったことを伝える。
+call() {
+  local what="$1" rc=0
+  shift
+  step "$@" || rc=$?
   case "$rc" in
-    0) ;;
-    2) finish 2 "提案が拒まれた。提案は $LOOP/planner/out に残っている。上の違反を読む" ;;
-    3) finish 3 "プランナーがあんたに判断を返した。$PLAN/PLANNER_ESCALATION.md を読む" ;;
-    *) finish "$rc" "plan apply が失敗した（終了コード $rc）" ;;
-  esac
-}
-
-# 上限まで改訂しても指摘が残れば 4 で、改訂の途中でプランナーが判断を返せば 3 で止まる。
-# 改訂に失敗したときと、改訂の途中で走行を止めたときも、指摘は人を待つ。
-# 人がダッシュボードか 'loop findings set' で指摘を書き換えてから 'loop continue' を流すと、
-# --resume が書き換えた指摘で1回だけ改訂させる。書き換えが無ければ何もしない。どちらも、
-# その後に提案を適用する。
-refine() {
-  local rc=0
-  step plan refine "$@" || rc=$?
-  case "$rc" in
-    0) ;;
-    3) finish 3 "plan refine の途中でプランナーが判断を返した。$LOOP/project/.runner/refine-escalation.md を読み、答えを指摘に書き込むならダッシュボードか 'loop findings set'。次は 'loop continue'" ;;
-    4) finish 4 "クリティックの指摘が残った。直すならダッシュボードか 'loop findings set'。直しても直さなくても、次は 'loop continue'" ;;
-    *) finish "$rc" "plan refine が失敗した（終了コード $rc）。指摘を直すならダッシュボードか 'loop findings set'。次は 'loop continue'" ;;
+    0) return 0 ;;
+    5) finish 5 "$what の途中で利用枠が尽きた。枠が戻ったら同じ操作をやり直す。途中のモジュールがあれば先に 'loop raw reset <モジュール>'" ;;
+    6) finish 6 "$what の途中で箱が書き込みを拒んだ。設計は差し戻していない。上の INFRA の行のパスの権限を直し、'loop raw reset <モジュール>' のあと 'loop continue'" ;;
+    *) finish "$rc" "$what が失敗した（終了コード $rc）。上の出力を読む" ;;
   esac
 }
 
@@ -101,39 +86,67 @@ run_all() {
   local rc=0
   step run --all || rc=$?
   case "$rc" in
-    0) finish 0 "全ステップが緑になった" ;;
-    5) finish 5 "利用枠が尽きた。枠が戻ったら 'loop continue'。途中のステップがあれば先に 'loop raw reset <ステップ>'" ;;
-    6) finish 6 "箱が書き込みを拒んだ。エスカレーションにはしていない。上の INFRA の行のパスの権限を直し、'loop raw reset <ステップ>' のあと 'loop continue'" ;;
+    0) finish 0 "全モジュールが緑になった。最終確認の段にいる" ;;
+    2) finish 2 "モジュールが下流で止まり、中段に戻った。$FAILURE を読み、直すモジュールを 'loop reopen <モジュール>...' で選ぶ" ;;
+    5) finish 5 "利用枠が尽きた。枠が戻ったら 'loop continue'。途中のモジュールがあれば先に 'loop raw reset <モジュール>'" ;;
+    6) finish 6 "箱が書き込みを拒んだ。設計は差し戻していない。上の INFRA の行のパスの権限を直し、'loop raw reset <モジュール>' のあと 'loop continue'" ;;
     *) finish "$rc" "run --all が止まった（終了コード $rc）。'loop status' を見る" ;;
   esac
 }
 
+# 中段のせきで止まる。詳細設計とクリティックの指摘を人が読む。
+at_midstream_gate() {
+  finish 0 "詳細設計を書き、クリティックが読んだ。'loop findings' で指摘を見て、'loop approve' か 'loop reject <コメント>'"
+}
+
 work() {
-  local log="$1" mode="$2" language="${3:-python}" framework="${4:-}" rc=0
+  local log="$1" mode="$2"
+  shift 2
   exec >>"$log" 2>&1
   echo "=== loop $mode 開始 ($(date '+%F %T')) プロジェクト=$(project_name)"
 
-  if [ "$mode" = go ]; then
-    step plan bootstrap --language "$language" ${framework:+--framework "$framework"} || rc=$?
-    [ "$rc" -eq 0 ] || finish "$rc" "plan bootstrap が失敗した（終了コード $rc）"
-    if [ -f "$LOOP/planner/out/ESCALATE.md" ]; then
-      finish 3 "プランナーが計画を書かずに判断を返した。$LOOP/planner/out/ESCALATE.md を読む"
-    fi
+  case "$mode" in
+    go)
+      local language="$1" framework="${2:-}"
+      call "仕様書の取り込み" spec import
+      call "基本設計" basic draft --language "$language" ${framework:+--framework "$framework"}
+      finish 0 "基本設計を書いた。docs/basic/ を読み、'loop approve' か 'loop reject <コメント>'" ;;
+    redraft-basic)
+      call "基本設計の書き直し" basic draft
+      finish 0 "基本設計を書き直した。'loop approve' か 'loop reject <コメント>'" ;;
+    approve-basic)
+      call "基本設計の承認" basic approve
+      call "詳細設計" modules draft
+      at_midstream_gate ;;
+    redraft-modules)
+      call "詳細設計の書き直し" modules draft
+      at_midstream_gate ;;
+    critique)
+      call "批評" modules critique
+      at_midstream_gate ;;
+    approve-modules)
+      call "詳細設計の承認" modules approve
+      run_all ;;
+    continue)
+      run_all ;;
+    *) finish 2 "知らない走行: $mode" ;;
+  esac
+}
 
-    refine
-    apply_pending
-  elif [ -f "$PENDING" ] || [ -f "$REFINE_STATE" ]; then
-    # 人を待つ批評が無ければ、--resume は何もせずに 0 で戻り、提案を適用する。
-    refine --resume
-    apply_pending
-  fi
-  run_all
+# いまの段。plan/ は runner だけが読める。
+stage_now() {
+  as_runner python3 -c 'import json, sys
+try:
+    print(json.load(open(sys.argv[1], encoding="utf-8")).get("stage") or "")
+except (OSError, ValueError):
+    print("")' "$STAGE"
 }
 
 # ---- 保守ユーザーが打つ側 ----------------------------------------------------
 
 start() {
-  local mode="$1" language="${2:-}" framework="${3:-}" log
+  local mode="$1" log
+  shift
   running && die "もう走っている。追うなら 'loop log'、止めるなら 'loop stop'"
   switching && die "プロジェクトを切り替えている。終わるのを待つ"
   log="$LOGS/$(project_name)-$(date +%Y%m%d-%H%M%S).log"
@@ -141,35 +154,89 @@ start() {
   as_runner ln -sfn "$(basename "$log")" "$(latest_log)"
   sudo systemd-run --quiet --collect --unit="$UNIT" \
     --uid=runner --gid=runner --working-directory=/tmp \
-    "$SELF" __work "$log" "$mode" ${language:+"$language"} ${framework:+"$framework"}
+    "$SELF" __work "$log" "$mode" "$@"
   echo "裏で走らせた。ログ: $log"
   echo "追うなら 'loop log'、状態を見るなら 'loop status'"
 }
 
+# 人が書いた仕様書を受け渡し口に置き、上流を始める。ファイルはいくつでも渡せる。
 cmd_go() {
-  local requirements="" language="python" framework=""
+  local language="python" framework="" f
+  local -a specs=()
   while [ $# -gt 0 ]; do
     case "$1" in
       --language) [ $# -ge 2 ] || die "--language に値が無い"; language="$2"; shift 2 ;;
       --framework) [ $# -ge 2 ] || die "--framework に値が無い"; framework="$2"; shift 2 ;;
       -*) die "知らないオプション: $1" ;;
-      *) [ -z "$requirements" ] || die "要件のファイルは1つだけ渡す"; requirements="$1"; shift ;;
+      *) specs+=("$1"); shift ;;
     esac
   done
-  [ -n "$requirements" ] || die "使い方: loop go <要件>.md [--language <言語>] [--framework <持ち込む先>]"
-  [ -f "$requirements" ] || die "ファイルが無い: $requirements"
-  [ -d "$(dirname "$REQUIREMENTS")" ] || die "$(dirname "$REQUIREMENTS") が無い。プロジェクトは作ってある？"
+  [ ${#specs[@]} -gt 0 ] || die "使い方: loop go <仕様書>... [--language <言語>] [--framework <持ち込む先>]"
+  for f in "${specs[@]}"; do
+    [ -f "$f" ] || die "ファイルが無い: $f"
+  done
+  [ -d "$(dirname "$SPEC_IN")" ] || die "$(dirname "$SPEC_IN") が無い。プロジェクトは作ってある？"
   running && die "もう走っている。先に 'loop stop'"
+  case "$(stage_now)" in
+    ""|upstream) ;;
+    *) die "上流はもう終わっている。仕様書を差し替えて作り直すなら、新しいプロジェクトで始める" ;;
+  esac
 
-  sudo install -o root -g humanw -m 644 "$requirements" "$REQUIREMENTS"
-  echo "要件を置いた: $REQUIREMENTS"
+  sudo rm -rf "$SPEC_IN"
+  sudo install -d -o root -g humanw -m 755 "$SPEC_IN"
+  for f in "${specs[@]}"; do
+    sudo install -o root -g humanw -m 644 "$f" "$SPEC_IN/$(basename "$f")"
+  done
+  echo "仕様書を置いた: $SPEC_IN"
   start go "$language" "$framework"
 }
 
+# せきを開けて次の段へ流す。上流なら中段の詳細設計まで、中段なら下流の全モジュールまで。
+cmd_approve() {
+  case "$(stage_now)" in
+    upstream)  start approve-basic ;;
+    midstream) start approve-modules ;;
+    "")        die "まだ始まっていない。'loop go <仕様書>' から始める" ;;
+    *)         die "承認するせきに来ていない。'loop status' を見る" ;;
+  esac
+}
+
+# コメントを付けて、今の段の設計をプランナーに書き直させる。
+cmd_reject() {
+  local mode work
+  [ $# -gt 0 ] || die "使い方: loop reject <コメント>"
+  case "$(stage_now)" in
+    upstream)  mode=redraft-basic ;;
+    midstream) mode=redraft-modules ;;
+    *)         die "差し戻す設計が無い。下流のモジュールを直すなら 'loop reopen <モジュール>...'" ;;
+  esac
+  running && die "もう走っている。先に 'loop stop'"
+  work="$(mktemp)"
+  printf '%s\n' "$*" > "$work"
+  sudo install -o root -g humanw -m 644 "$work" "$COMMENT"
+  rm -f "$work"
+  echo "コメントを置いた: $COMMENT"
+  start "$mode"
+}
+
+# 下流で止まったあとや最終確認で、詳細設計を直すモジュールを選んで中段に戻す。
+cmd_reopen() {
+  [ $# -gt 0 ] || die "使い方: loop reopen <モジュール>..."
+  running && die "走っている間は戻せない。先に 'loop stop'"
+  switching && die "プロジェクトを切り替えている。終わるのを待つ"
+  as_runner python3 -u "$LOOP/runner/loop.py" reopen "$@"
+  echo "次は 'loop reject <コメント>' で直させるか、そのまま 'loop approve'"
+}
+
+# 止まった走行を同じところから続ける。下流ならモジュールを流し、中段で批評が
+# 済んでいなければ批評だけをやり直す。
 cmd_continue() {
-  as_runner test -f "$PLAN/tasks.json" || as_runner test -f "$PENDING" \
-    || as_runner test -f "$REFINE_STATE" || die "まだ計画が無い。'loop go <要件>.md' から始める"
-  start continue
+  case "$(stage_now)" in
+    downstream) start continue ;;
+    midstream)  start critique ;;
+    "")         die "まだ始まっていない。'loop go <仕様書>' から始める" ;;
+    *)          die "続ける走行が無い。'loop status' を見る" ;;
+  esac
 }
 
 cmd_status() {
@@ -188,15 +255,13 @@ cmd_status() {
     [ -z "$last" ] || echo "最後:         ${last#=== }"
   fi
 
-  as_runner test -f "$PENDING" && echo "適用待ち:     $LOOP/planner/out に提案がある（'loop continue' で適用する）"
-  local f
-  for f in ESCALATION.md PLANNER_ESCALATION.md; do
-    if as_runner test -f "$PLAN/$f"; then
-      echo
-      echo "--- $PLAN/$f（先頭20行）"
-      as_runner head -n 20 "$PLAN/$f"
-    fi
-  done
+  echo
+  as_runner python3 "$LOOP/runner/loop.py" status || true
+  if as_runner test -f "$FAILURE"; then
+    echo
+    echo "--- $FAILURE（先頭20行）"
+    as_runner head -n 20 "$FAILURE"
+  fi
 
   if as_runner test -f "$PLAN/ledger.jsonl"; then
     echo
@@ -229,8 +294,8 @@ switch_project() {
   echo "'$name' への切り替えを裏で始めた"
 }
 
-# 止まったステップの作業ツリーを最後の緑に戻す（'loop raw reset' と同じ）。走行中に戻すと、
-# 走っているステップのファイルを消すので断る。root で動く（cmd_dash から呼ぶ）。
+# 止まったモジュールの作業ツリーを最後の緑に戻す（'loop raw reset' と同じ）。走行中に戻すと、
+# 走っているモジュールのファイルを消すので断る。root で動く（cmd_dash から呼ぶ）。
 reset_step() {
   local id="$1"
   running && die "走っている間はやり直せない。先に止める"
@@ -274,25 +339,18 @@ cmd_dash() {
   case "$action" in
     settings) python3 "$DASH_PY" settings "$ROLE_ENV" ;;
     model)    python3 "$DASH_PY" set-model "$ROLE_ENV" "${req[1]}" "${req[2]}" "${req[3]}" ;;
-    go)       cmd_go "$work/requirements.md" --language "${req[1]}" --framework "${req[2]}" ;;
+    go)       cmd_go "$work/spec.md" --language "${req[1]}" --framework "${req[2]}" ;;
+    approve)  cmd_approve ;;
+    reject)   cmd_reject "$(cat "$work/comment.md")" ;;
+    reopen)   cmd_reopen "${req[@]:1}" ;;
     continue) cmd_continue ;;
     stop)     cmd_stop ;;
     use)      switch_project "${req[1]}" "$admin" ;;
     reset)    reset_step "${req[1]}" ;;
     init)     init_project "${req[1]}" "${req[2]}" "${req[3]}" "${req[4]}" "$admin" ;;
     remove)   remove_project "${req[1]}" "$admin" ;;
-    answer)   place_answer "$work/answer.md" ;;
     *)        die "知らない操作: $action" ;;
   esac
-}
-
-# エスカレーションへの人の答えを置く。次の plan propose がプランナーに渡す。root で動く
-# （cmd_dash から呼ぶ）。
-place_answer() {
-  as_runner test -f "$PLAN/ESCALATION.md" || as_runner test -f "$PLAN/PLANNER_ESCALATION.md" \
-    || die "答えを待つエスカレーションが無い"
-  install -o root -g humanw -m 644 "$1" "$ANSWER"
-  echo "答えを置いた。'loop continue' でプランナーに渡る"
 }
 
 # 持ち込む先のライブラリの参照を置く。DXライブラリは箱で取れないので、人の手元の DxLib.h を
@@ -320,22 +378,6 @@ cmd_refs() {
   esac
 }
 
-# 人が書き換えた計画を取り込み、そのステップを最後の緑に戻す。受け入れ条件の書き換えと
-# 上流からの作り直しは人の権限で、プランナーの経路では拒まれる。
-cmd_plan() {
-  case "${1:-}" in
-    amend)
-      [ $# -eq 3 ] || die "使い方: loop plan amend <ステップ> <tasks.json>"
-      [ -f "$3" ] || die "ファイルが無い: $3"
-      running && die "走っている間は直せない。先に 'loop stop'"
-      switching && die "プロジェクトを切り替えている。終わるのを待つ"
-      sudo install -o root -g humanw -m 644 "$3" "$AMENDED"
-      as_runner python3 -u "$LOOP/runner/loop.py" plan amend "$2"
-      echo "次は 'loop continue'" ;;
-    *) die "使い方: loop plan amend <ステップ> <tasks.json>" ;;
-  esac
-}
-
 # クリティックの指摘を見せ、直す。sudo を使わない。写しはグループ humanw に
 # 書き込みを許してある。中身は loop_findings.py。
 cmd_findings() {
@@ -359,8 +401,8 @@ cmd_stop() {
   running || { echo "走っていない"; return 0; }
   sudo systemctl stop "$UNIT"
   echo "止めた。"
-  echo "途中のステップはそのまま残っている。'loop continue' の前に次を流す:"
-  echo "    loop raw reset <ステップ>"
+  echo "途中のモジュールはそのまま残っている。'loop continue' の前に次を流す:"
+  echo "    loop raw reset <モジュール>"
 }
 
 # このリポジトリを pull し、プロビジョニングを流し直す。最後にプロビジョニングが通った
@@ -391,19 +433,18 @@ usage() {
   cat >&2 <<'EOF'
 使い方: loop <コマンド>
 
-  go <要件>.md [--language <言語>] [--framework <持ち込む先>]
-                    要件を置き、計画づくりから全ステップまでを裏で流す。持ち込む先を
-                    省くと言語の既定になる
-  continue          直したクリティックの指摘があればプランナーに渡し、適用待ちの
-                    提案を適用して、全ステップを裏で流す
-  status            プロジェクト、走っているか、人への問い、台帳の末尾を出す
+  go <仕様書>... [--language <言語>] [--framework <持ち込む先>]
+                    仕様書を置き、プランナーに基本設計を書かせる。持ち込む先を省くと
+                    言語の既定になる
+  approve           せきを開ける。上流なら詳細設計と批評まで、中段なら全モジュールの
+                    実装までを裏で流す
+  reject <コメント> コメントを付けて、今の段の設計をプランナーに書き直させる
+  reopen <モジュール>...
+                    詳細設計を直すモジュールを選び、中段に戻す
+  continue          止まった走行を続ける。下流なら残りのモジュールを、中段なら批評を流す
+  status            プロジェクト、走っているか、段とモジュールの状態、台帳の末尾を出す
   now               いまの作業を JSON で出す（ホストのダッシュボードが読む）
   findings          クリティックの指摘を出す
-  findings set      指摘1件の title と evidence を書き換える。標準入力に
-                    {"mode", "index", "title", "evidence"} の JSON を渡す
-  plan amend <ステップ> <tasks.json>
-                    書き換えた計画をリンタに通して取り込み、そのステップを最後の緑に
-                    戻す。受け入れ条件の書き換えと作り直しはこれで入れる
   refs dxlib <DxLib.h>
                     DXライブラリのヘッダをソルバーが引ける参照として置く
   log               走行ログを追う。Ctrl-C で抜けても走行は続く
@@ -420,11 +461,13 @@ EOF
 
 case "${1:-}" in
   go)       shift; cmd_go "$@" ;;
+  approve)  cmd_approve ;;
+  reject)   shift; cmd_reject "$@" ;;
+  reopen)   shift; cmd_reopen "$@" ;;
   continue) cmd_continue ;;
   status)   cmd_status ;;
   now)      cmd_now ;;
   findings) shift; cmd_findings "$@" ;;
-  plan)     shift; cmd_plan "$@" ;;
   refs)     shift; cmd_refs "$@" ;;
   log)      cmd_log ;;
   stop)     cmd_stop ;;
