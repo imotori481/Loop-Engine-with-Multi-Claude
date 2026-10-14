@@ -230,6 +230,23 @@ class Drafting(Repositories):
         self.assertEqual(self.gh_calls, [])
 
 
+class FromTheDashboard(Repositories):
+    design = Drafting.design
+
+    def test_the_button_sends_the_same_draft_as_loop_pr(self):
+        from host.dashboard.server import send_draft_pull_request
+        self.design("S1")
+        result = send_draft_pull_request(self.pulls())
+        self.assertEqual((result["head"], result["remaining"]), ("feat-draft", ["S2", "S3"]))
+
+    def test_a_refusal_comes_back_as_a_reason(self):
+        from host.dashboard.server import send_draft_pull_request
+        self.design()
+        self.assertIn("no module is green", send_draft_pull_request(self.pulls())["error"])
+        self.assertEqual(send_draft_pull_request(None),
+                         {"error": "pull requests are not configured"})
+
+
 class Names(unittest.TestCase):
     def test_the_repository_is_read_from_either_url_form(self):
         self.assertEqual(github_repo("https://github.com/o/r.git"), "o/r")

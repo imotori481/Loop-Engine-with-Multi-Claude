@@ -191,7 +191,8 @@ git merge loop/<branch>
 先に `loop-pull` を流して、写しを箱の先まで進めておく。仕組みと前提は
 [host/dashboard/README.md](../host/dashboard/README.md) の「プルリクエスト」にある。
 
-全モジュールが緑になる前に出すなら、`loop-pull` のあとに `loop-pr` を打つ。最後に緑になったモジュールまでが、
+全モジュールが緑になる前に出すなら、`loop-pull` のあとに `loop-pr` を打つ。ダッシュボードの「ホストの写し」タブの
+「下書きの PR を出す」も同じことをする。最後に緑になったモジュールまでが、
 `<branch>-draft` から `<base-branch>` への下書きの PR になる。
 緑が増えたら、`loop-pull` と `loop-pr` をもう一度打てば同じ PR が更新される。
 箱が写しより先に進んでいると、`loop-pr` は `NOTE` を出し、PR の本文にも印が付く。そのときは `loop-pull` から打ち直す。
@@ -294,6 +295,7 @@ loop go <spec> --language cpp
 | プロジェクトを切り替える | プロジェクト | `loop project use <project>` |
 | 役ごとのモデルと effort を変える | 役のモデル | `/etc/loop/<役>.env` の `LOOP_MODEL` と `LOOP_EFFORT` を書き換える |
 | 写しを最新にする | ホストの写し | `loop-pull` |
+| 途中の成果を下書きの PR に出す | ホストの写し | `loop-pr` |
 | 既存リポジトリのブランチを取り込む | 取り込み | `loop-import <project> <repo-url> <branch> [<base-branch>]` |
 
 画面の「設計」で、段のせきをコマンドなしで済ませる。走っている間は出ない。
@@ -324,7 +326,7 @@ Tailscale のログインを書く。どちらかが無ければ、tailnet か�
 `tailscale funnel` は使わない。インターネット全体に公開される。
 
 リモートから、最終確認の承認、走行の開始、プロジェクトの切り替え、モデルの変更、写しの更新、
-取り込みはできない。最終確認の差し戻し、設計のせきの承認と差し戻し、中段に戻すモジュールの選択、
+下書きの PR、取り込みはできない。最終確認の差し戻し、設計のせきの承認と差し戻し、中段に戻すモジュールの選択、
 走行の停止と続行、止まったモジュールのやり直しはできる。
 
 設定の詳細: [host/dashboard/README.md](../host/dashboard/README.md)

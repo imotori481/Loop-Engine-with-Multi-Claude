@@ -51,6 +51,9 @@
           <p class="why">loop-pull で、ホストの写しを箱の先まで進める。最終確認と台帳の欄は写しを読む。</p>
           <div class="actions"><span id="pull-state"></span><button id="pull">写しを更新（loop-pull）</button></div>
           <pre id="pull-log" hidden></pre>
+          <p class="why">下書きの PR は、写しで最後に緑になったモジュールまでを &lt;branch&gt;-draft から親ブランチへ出す（loop-pr と同じ）。先に写しを更新する。最終確認を承認すると、開いている下書きが正式な PR になる。</p>
+          <div class="actions"><span id="draft-state"></span><button id="draft-pr" class="quiet">下書きの PR を出す（loop-pr）</button></div>
+          <div id="draft-result" class="live" hidden></div>
         </article>
         <article id="import-panel" class="panel" role="tabpanel" hidden>
           <p class="why">既存リポジトリのブランチを、箱の新しいプロジェクトにする（loop-import と同じ）。ホストにクローンし、箱にプロジェクトを作ってブランチを push し、そこへ切り替える。</p>

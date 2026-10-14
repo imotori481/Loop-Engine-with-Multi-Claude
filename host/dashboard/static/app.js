@@ -801,6 +801,8 @@ function renderPull(value) {
   const state = document.querySelector("#pull-state"), log = document.querySelector("#pull-log");
   const button = document.querySelector("#pull");
   button.disabled = Boolean(value.running);
+  // 写しが動いている間に下書きを出すと、どの版を出したかが定まらない。
+  document.querySelector("#draft-pr").disabled = Boolean(value.running);
   log.hidden = !value.output?.length;
   log.textContent = (value.output || []).join("\n");
   state.textContent = value.error || (value.running ? "更新中"
@@ -814,6 +816,33 @@ async function watchPull() {
   renderPull(value);
   if (value.running) pullTimer = setTimeout(watchPull, 2000);
   else if (value.finished) await refresh();
+}
+
+// 下書きの PR を出した結果。記録には残らないので、この画面にだけ出す。
+function renderDraft(value) {
+  const box = document.querySelector("#draft-result"); box.replaceChildren(); box.className = "live";
+  box.hidden = false;
+  document.querySelector("#draft-state").textContent = "";
+  if (value.error) {
+    box.classList.add("error");
+    box.append(text("strong", "下書きの PR を出せませんでした"), text("p", value.error, "why"));
+    return;
+  }
+  const link = document.createElement("a");
+  link.href = value.url; link.textContent = value.url; link.target = "_blank"; link.rel = "noopener";
+  box.append(text("strong", `${value.head} → ${value.base}（${value.created ? "作成" : "更新"}）`), link,
+             text("p", `緑: ${value.green.join(", ")} / 残り: ${value.remaining.join(", ")}`, "why"));
+  if (value.behind) box.append(text("p", "箱が写しより先に進んでいます。写しを更新してから出し直してください。", "why"));
+  else if (value.behind === null) box.append(text("p", "箱に届かず、写しが箱の先かを確かめられませんでした。", "why"));
+}
+
+async function sendDraft(element) {
+  if (!confirm("写しで最後に緑になったモジュールまでを、下書きの PR として GitHub に出します。よいですか？")) return;
+  element.disabled = true;
+  document.querySelector("#draft-state").textContent = "出しています";
+  try { renderDraft(await api("/api/draft-pull-request", {method: "POST", body: "{}"})); }
+  catch (error) { renderDraft({error: error.message}); }
+  finally { element.disabled = false; }
 }
 
 let importTimer = null, importing = false;
@@ -880,7 +909,7 @@ function setupControl() {
     for (const element of document.querySelectorAll(".local-only")) element.hidden = true;
     const note = document.querySelector("#control-note");
     note.hidden = false;
-    note.textContent = "リモートからは停止、続行、モジュールのやり直し、設計の承認と差し戻しができます。開始、最終確認の承認、プロジェクトの切り替え、モデルの変更、写しの更新、取り込みはこの機械の前で。";
+    note.textContent = "リモートからは停止、続行、モジュールのやり直し、設計の承認と差し戻しができます。開始、最終確認の承認、プロジェクトの切り替え、モデルの変更、写しの更新、下書きの PR、取り込みはこの機械の前で。";
   }
   // リモートで隠した「ホストの写し」と「取り込み」のタブを選ばないよう、隠したあとで開く。
   setupTabs();
@@ -903,6 +932,8 @@ function setupControl() {
     try { renderPull(await api("/api/pull", {method: "POST", body: "{}"})); watchPull(); }
     catch (error) { alert(error.message); pull.disabled = false; }
   };
+  const draft = document.querySelector("#draft-pr");
+  draft.onclick = () => sendDraft(draft);
   const doImport = document.querySelector("#import");
   doImport.onclick = () => startImport(doImport);
   updateRunButtons();

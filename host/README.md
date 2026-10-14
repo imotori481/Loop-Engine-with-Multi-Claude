@@ -237,7 +237,7 @@ git clone loop-runner:/srv/loop/repo.git <置き場所>
 
 - 箱が作業するブランチは bare の HEAD から読む。手元のそのブランチは、早送りできるときだけ進める。早送りできないときと、手元の変更が邪魔をするときは `NOTE` を出して動かさない。写しは `loop/<ブランチ>` に入っているので、失敗とは数えない
 - ランナーのタグ（`module-<id>`）は `refs/loop-tags/` に入れる。`refs/tags/` に入れると、`git push --tags` で GitHub に届く
-- GitHub への push は、ダッシュボードで最終確認を承認したときに PR として行う（`dashboard/README.md`）。全モジュールが緑になる前は `loop-pr` で下書きの PR として出す。手で出す手順は `docs/COMMANDS.md`
+- GitHub への push は、ダッシュボードで最終確認を承認したときに PR として行う（`dashboard/README.md`）。全モジュールが緑になる前は `loop-pr` かダッシュボードの「ホストの写し」タブで下書きの PR として出す。手で出す手順は `docs/COMMANDS.md`
 
 `/srv/loop/repo.git` が今のプロジェクトへのリンクのときも、`project` は今のプロジェクトの写しになる。
 作り直す先は、bare の HEAD が指すブランチだ。
@@ -270,6 +270,7 @@ git clone loop-runner:/srv/loop/repo.git <置き場所>
 
 ## 更新履歴
 
+- 2026/10/14: 下書きの PR を出す操作をオペレーターGUIの「ホストの写し」タブに追加
 - 2026/10/14: オペレーターGUIの扱うものをエスカレーションと予定レビューから設計のせきと最終確認に変更
 - 2026/10/07: 途中の成果を下書きの PR として出す `loop-pr.cmd` を追加
 - 2026/09/27: `loop-import.cmd` が親ブランチを `branch.<branch>.loopBase` に記録するように変更

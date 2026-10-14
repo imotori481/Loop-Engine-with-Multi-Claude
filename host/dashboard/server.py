@@ -56,6 +56,19 @@ def send_pull_request(state: DashboardState, pulls: PullRequests | None) -> dict
     return state.record_pull_request(approval["request_id"], outcome)
 
 
+def send_draft_pull_request(pulls: PullRequests | None) -> dict:
+    """最後に緑になったモジュールまでを下書きの PR にする（loop-pr と同じ）。
+
+    断られたら理由を返す。下書きは承認ではないので、判断の記録には残さない。
+    """
+    if pulls is None:
+        return {"error": "pull requests are not configured"}
+    try:
+        return pulls.open_draft()
+    except PullRequestError as error:
+        return {"error": str(error)}
+
+
 def handler_for(state: DashboardState, launchers: Launchers, reach: Reach, token: str,
                 live: Live | None = None, pulls: PullRequests | None = None,
                 mirror: MirrorSync | None = None, imports: ImportJob | None = None):
@@ -177,6 +190,13 @@ def handler_for(state: DashboardState, launchers: Launchers, reach: Reach, token
                         raise ValueError(
                             "a pull request can only be sent from the machine itself")
                     self._json(send_pull_request(state, pulls), HTTPStatus.CREATED)
+                    return
+                if path == "/api/draft-pull-request":
+                    # 下書きでも GitHub に書き込む。承認の PR と同じく、この機械の前でだけ。
+                    if scope != LOCAL:
+                        raise ValueError(
+                            "a pull request can only be sent from the machine itself")
+                    self._json(send_draft_pull_request(pulls), HTTPStatus.CREATED)
                     return
                 if path in ("/api/continue", "/api/stop", "/api/approve"):
                     # 続行、停止、上流と中段のせきの承認はどこからでもよい。設計は文書で、

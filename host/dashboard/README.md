@@ -78,6 +78,7 @@ python host/dashboard/server.py --project C:\dev\roop-engin\project
 | 走行 | 止める | `loop stop` | どこからでも |
 | 走行 | 緑でないモジュールを選び、作業ツリーを最後の緑に戻す。走行中と切り替え中は断る | `loop raw reset <モジュール>` | どこからでも |
 | ホストの写し | 写しを箱の先まで進める | ホストの `loop-pull.cmd` | ローカル |
+| ホストの写し | 最後に緑になったモジュールまでを下書きの PR にする | ホストの `loop-pr.cmd` と同じ `open_draft` | ローカル |
 
 箱への要求は、どれも SSH で `sudo -n /usr/local/bin/loop dash` に標準入力の JSON で渡す。
 `25-runner.sh` が sudoers で保守ユーザーにこの1つだけをパスワード無しで許す。`loop dash` は
@@ -235,7 +236,8 @@ git -C <clone-dir> config branch.<branch>.loopBase <base-branch>
 
 ### 下書きの PR
 
-全モジュールが緑になる前の状態は、ホストの `loop-pr` で下書きの PR として出す。画面には無い。
+全モジュールが緑になる前の状態は、「ホストの写し」タブの「下書きの PR を出す」か、ホストの `loop-pr` で
+下書きの PR として出す。どちらも同じ `open_draft` を流す。画面のボタンは、写しの更新が走っている間は押せない。
 中身は `pullrequest.py` の `open_draft` で、手順は上の 1〜7 と同じ。違うのは次の点だ。
 
 - 承認は求めない。写しの HEAD、つまり最後に緑になったモジュールのコミットを出す。緑の判定には触れない
@@ -245,7 +247,7 @@ git -C <clone-dir> config branch.<branch>.loopBase <base-branch>
 - 同じ組の PR が開いていれば、push で中身を更新し、`gh pr edit` で本文のモジュールの一覧を書き直す
 - 緑のモジュールが1つも無ければ断る。全モジュールが緑なら、最終確認の承認に回すよう断る
 - 箱の bare の作業ブランチの先を `git ls-remote loop` で読み、写しの HEAD と比べる。箱が先にあれば、
-  本文に「写しが箱に追いついていない」と書き、`loop-pr` は `NOTE` を出す。箱に届かなければ、
+  本文に「写しが箱に追いついていない」と書き、`loop-pr` は `NOTE` を出す。画面は結果の欄に同じことを出す。箱に届かなければ、
   確かめられなかったと書く。ssh は `BatchMode=yes` と `ConnectTimeout=10` で流す
 
 結果は `decisions.jsonl` に記録しない。
