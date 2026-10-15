@@ -344,6 +344,58 @@ namespace Logic
         self.assertNotIn("UnityEngine", plain)
         self.assertIn("using UnityEngine;\n", unity)
 
+    def library(self, step, requires=(), originals=None):
+        """Promete の参照を置いて、スタブを書く。"""
+        with tempfile.TemporaryDirectory() as t:
+            (Path(t) / "promete").mkdir()
+            (Path(t) / "promete" / "MEMBERS.txt").write_text("", encoding="utf-8")
+            (Path(t) / "promete" / "TYPES.txt").write_text(
+                "Promete.Scene  シーン\nPromete.Input.Mouse  マウス\n"
+                "Promete.Nodes.Container`1  入れ物\nPromete.Input.Mouse.Button  入れ子\n"
+                "Promete.Board  同じ名前\n", encoding="utf-8")
+            with mock.patch.object(loop, "REFS", Path(t)), \
+                    mock.patch.dict(loop.LANGUAGE, {"refs": "promete"}):
+                return loop.generate_stub(step, list(requires), originals or {})
+
+    def test_a_library_type_a_signature_names_is_brought_in_by_its_namespace(self):
+        # Promete の Scene と Mouse を口にする MenuScene が、using 無しで書かれ、
+        # ビルドが CS0246 で落ちていた。
+        step = {"files_write": ["src/Scenes/MenuScene.cs"], "contracts": {"provides": [
+            "src/Scenes/MenuScene.cs: class MenuScene : Scene",
+            "src/Scenes/MenuScene.cs: MenuScene.MenuScene(Mouse mouse)",
+            "src/Scenes/MenuScene.cs: override void MenuScene.OnStart()"]}}
+        text = self.library(step)["src/Scenes/MenuScene.cs"]
+        self.assertIn("using Promete;\nusing Promete.Input;\n", text)
+        self.assertNotIn("Promete.Nodes", text)
+
+    def test_a_primary_constructor_is_kept_in_the_type_head(self):
+        # Promete のシーンの書き方（layout_note）。読めずにソルバーに回していた。
+        step = {"files_write": ["src/Scenes/MenuScene.cs"], "contracts": {"provides": [
+            "src/Scenes/MenuScene.cs: class MenuScene(Mouse mouse) : Scene",
+            "src/Scenes/MenuScene.cs: override void MenuScene.OnUpdate()"]}}
+        text = self.library(step)["src/Scenes/MenuScene.cs"]
+        self.assertIn("    public class MenuScene(Mouse mouse) : Scene\n", text)
+        self.assertIn("using Promete;\nusing Promete.Input;\n", text)
+
+    def test_a_library_name_the_project_also_declares_is_the_projects(self):
+        step = {"files_write": ["src/Rules/Scorer.cs"],
+                "contracts": {"provides": ["src/Rules/Scorer.cs: static int Scorer.Total(Board board)"]}}
+        text = self.library(step, ["src/Logic/Board.cs: class Board { }"])["src/Rules/Scorer.cs"]
+        self.assertIn("using Logic;\n", text)
+        self.assertNotIn("using Promete;", text)
+
+    def test_a_nested_or_generic_library_type_is_not_a_namespace(self):
+        with tempfile.TemporaryDirectory() as t:
+            (Path(t) / "promete").mkdir()
+            (Path(t) / "promete" / "MEMBERS.txt").write_text("", encoding="utf-8")
+            (Path(t) / "promete" / "TYPES.txt").write_text(
+                "Promete.Input.Mouse  マウス\nPromete.Input.Mouse.Button  入れ子\n"
+                "Promete.Nodes.Container`1  入れ物\n", encoding="utf-8")
+            with mock.patch.object(loop, "REFS", Path(t)), \
+                    mock.patch.dict(loop.LANGUAGE, {"refs": "promete"}):
+                self.assertEqual(loop.library_namespaces(),
+                                 {"Mouse": "Promete.Input", "Container": "Promete.Nodes"})
+
     def test_what_it_cannot_read_goes_back_to_the_solver(self):
         for provides in (["src/Logic/Board.cs: something in prose"],
                          ["Board.Score(Board board)"]):

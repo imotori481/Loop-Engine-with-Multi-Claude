@@ -1300,6 +1300,31 @@ def library_types() -> str:
     return "\n".join(f"    {space}: {', '.join(names)}" for space, names in sorted(spaces.items()))
 
 
+def library_namespaces() -> dict[str, str]:
+    """参照にある型の短い名前から名前空間への対応。スタブの using に使う。
+
+    総称型の印（`Container`1`）は外す。入れ子の型（外側が型の名前）と、2つの
+    名前空間にある名前は入れない。どちらも using で正しく指せない。
+    """
+    path = library_refs()
+    if path is None or not (path / "TYPES.txt").is_file():
+        return {}
+    names = [line.split(None, 1)[0].split("`")[0]
+             for line in (path / "TYPES.txt").read_text(encoding="utf-8").splitlines()
+             if line.strip()]
+    full = set(names)
+    found: dict[str, str] = {}
+    twice: set[str] = set()
+    for name in names:
+        space, _, short = name.rpartition(".")
+        if not space or space in full:
+            continue
+        if short in found and found[short] != space:
+            twice.add(short)
+        found[short] = space
+    return {short: space for short, space in found.items() if short not in twice}
+
+
 def library_refs_section() -> str:
     """ソルバーのブリーフの、ライブラリの参照の節。参照が無ければ空。"""
     path = library_refs()
@@ -2609,8 +2634,11 @@ CSHARP_ACCESS = re.compile(r"^(?:public|internal|protected|private)\b")
 CSHARP_MODIFIERS = r"(?:(?:public|internal|protected|private|static|abstract|sealed|partial|readonly|virtual|override|new)\s+)*"
 # 型の名前はドットで区切れる。`Board.Cell` は Board の中の入れ子の型。
 CSHARP_TYPE_NAME = r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*"
+# `(...)` はプライマリコンストラクタ（C# 12）。Promete のシーンはこの形で書く
+# （`class MainScene(Keyboard keyboard) : Scene`）。
 CSHARP_TYPE_LINE = re.compile(
     rf"^(?P<mods>{CSHARP_MODIFIERS})(?P<kind>class|struct|interface|enum)\s+(?P<name>{CSHARP_TYPE_NAME})"
+    r"(?P<params>\s*\([^()]*\))?"
     r"(?P<bases>\s*:\s*[^{]+?)?\s*(?:\{(?P<body>.*)\})?\s*;?\s*$")
 CSHARP_CTOR_LINE = re.compile(
     rf"^(?P<mods>{CSHARP_MODIFIERS})(?P<type>(?:[A-Za-z_]\w*\.)*(?P<last>[A-Za-z_]\w*))\.(?P=last)"
@@ -2716,7 +2744,8 @@ def generate_csharp_stub(step: dict, requires: list[str],
             if entry["path"] != path or "head" in entry:
                 return None
             short = name.rpartition(".")[2]
-            entry["head"] = f"{mods} {kind} {short}{declared.group('bases') or ''}".rstrip()
+            entry["head"] = (f"{mods} {kind} {short}{(declared.group('params') or '').strip()}"
+                             f"{declared.group('bases') or ''}").rstrip()
             entry["kind"] = kind
             entry["bases"] = declared.group("bases") or ""
             body = entry["body"] = declared.group("body") or ""
@@ -2812,6 +2841,10 @@ def generate_csharp_stub(step: dict, requires: list[str],
             ns = csharp_file_namespace(m.group(1))
         namespaces.setdefault(m.group(1), ns)
         known.setdefault(declared_name(line).split(".")[0], ns)
+    # 持ち込む先のライブラリの型（Promete の Scene や Mouse）。契約が口にすれば using を
+    # 足す。プロジェクトの型と同じ名前なら、プロジェクトの型を取る。
+    library = {name: ns for name, ns in library_namespaces().items() if name not in known}
+    known.update(library)
 
     unity = unity_refs() and any(
         CSHARP_UNITY_TYPES.search(line) for line in step["contracts"]["provides"] + requires)
@@ -2826,11 +2859,13 @@ def generate_csharp_stub(step: dict, requires: list[str],
             files[path] = merged
             continue
         own = namespaces.get(path, "")
-        usings = ["System", "System.Collections.Generic", "System.Linq"] \
-            + (["UnityEngine"] if unity else []) \
-            + sorted({ns for ns in namespaces.values() if ns and ns != own})
         text = "\n\n".join(csharp_type_block(types[name]) for name in order
                            if types[name]["path"] == path)
+        used = {ns for name, ns in library.items()
+                if re.search(rf"(?<![\w.]){re.escape(name)}(?!\w)", text)}
+        usings = ["System", "System.Collections.Generic", "System.Linq"] \
+            + (["UnityEngine"] if unity else []) \
+            + sorted({ns for ns in namespaces.values() if ns and ns != own} | used)
         if own:
             text = f"namespace {own}\n{{\n" + "\n".join(
                 f"    {line}" if line else "" for line in text.splitlines()) + "\n}"
