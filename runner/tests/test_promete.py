@@ -225,12 +225,25 @@ class WhatThePlannerIsTold(Promete):
         self.assertNotIn("C# 9 is the ceiling", note)
 
     def test_the_window_and_the_mouse_are_the_2_1_0_api(self):
-        # 2.1.0 の IWindow.Size と MouseButton.IsButtonDown。窓を禁じると大きさが渡らず、
-        # ボタンを知らないとソルバーは反射で名前を当て推量する。
+        # 2.1.0 の IGameView.Size と MouseButton.IsButtonDown。App.Window は旧形式で
+        # ビルドが警告を出し、ボタンを知らないとソルバーは反射で名前を当て推量する。
         note = loop.LANGUAGE["layout_note"]
-        self.assertIn("App.Window.Size", note)
+        self.assertIn("Promete.Backends.IGameView", note)
+        self.assertIn("view.Size = (640, 480)", note)
+        self.assertNotIn("App.Window.Size", note)
         self.assertIn("mouse[MouseButtonType.Left]", note)
-        self.assertNotIn("do not\nuse them", note)
+
+    def test_a_rectangle_takes_two_corners(self):
+        # 幅と高さを渡すと、ボタンが大きい矩形1つに重なって描かれた。
+        note = loop.LANGUAGE["layout_note"]
+        self.assertIn("Shape.CreateRect(540, 300, 740, 356, color)", note)
+
+    def test_the_entry_runs_the_scene_of_the_run(self):
+        # テンプレの Program.cs のままだと、同じファイルの MainScene が起動し、
+        # Mouse も登録されない。
+        note = loop.LANGUAGE["layout_note"]
+        self.assertIn("deletes the template's scene", note)
+        self.assertIn(".Use<Mouse>()", note)
 
     def test_the_entry_cannot_be_tested(self):
         # ランナーはコードをライブラリとして組む。入口を確かめる条件はビルドで通らない。

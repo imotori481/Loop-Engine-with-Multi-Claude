@@ -1113,15 +1113,28 @@ selects a step's tests by that class name.
 Promete here is version 2, and older examples show version 1. A scene takes the
 plugins it uses through its constructor (`public class MainScene(Keyboard
 keyboard) : Scene`) and reads the screen through `View` and the clock through
-`Time`. A scene reaches the app through `App`. The window is `App.Window`: its
-size is `App.Window.Size = (640, 480)` and its title `App.Window.Title`, set
-in the first scene's `OnStart`, or the window keeps Promete's default size.
+`Time`. A scene reaches the app through `App`. The window is
+`Promete.Backends.IGameView`, taken through the constructor like a plugin: its
+size is `view.Size = (640, 480)` and its title `view.Title`, set in the first
+scene's `OnStart`, or the window keeps Promete's default size. `App.Window`
+and `IWindow` are obsolete in version 2 and removed in 3; do not use them.
+`Shape.CreateRect(left, top, right, bottom, color)` takes two corners, not a
+position and a size: a 200x56 rectangle at (540, 300) is
+`Shape.CreateRect(540, 300, 740, 356, color)`.
 Input is a plugin taken through the constructor. `mouse[MouseButtonType.Left]`
 is the left button: `IsButtonDown` is true on the frame it goes down,
 `IsPressed` while it is held, `IsButtonUp` on the frame it is released, and
 `mouse.Position` is the pointer. A key has `IsKeyDown`, `IsPressed` and
 `IsKeyUp` in the same sense. No test can see the window or press a button; the
 person checks both after the run.
+
+The entry `Program.cs` starts as Promete's template: it runs a `MainScene`
+declared in the same file. A scene declared elsewhere never starts until the
+entry changes, and a plugin a scene takes must be registered there with
+`.Use<T>()` (`.Use<Mouse>()`), or the scene cannot be built. So when the run
+adds the first scene or a plugin a scene takes, the entry is a module of its
+own: it deletes the template's scene, adds `using <the scene's namespace>;`,
+runs the run's first scene, and registers every plugin the scenes take.
 """,
             "facts": lambda: ("Runtime: .NET 10 for the code and the tests; Promete 2.1.0",
                               *promete_facts()),
