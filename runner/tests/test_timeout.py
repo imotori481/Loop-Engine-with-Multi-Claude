@@ -1,8 +1,7 @@
-"""実装の試行の時間切れは、試行1回分の失敗で、ステップを止める理由ではない。
+"""実装の試行の時間切れは、試行1回分の失敗で、モジュールを止める理由ではない。
 
 run 8 の S10 では、2回目の実装でソルバーが制限時間内に終わらず、それがそのまま
-エスカレーションになった。残り1回の試行は使われず、エスカレーションの上限を
-使い切って人間で止まった。
+停止になった。残り1回の試行は使われなかった。
 
     python3 -m unittest discover -s runner/tests
 """
@@ -111,9 +110,9 @@ class TheLoopMovesOn(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
         root = Path(self.temp.name)
-        (root / "plan").mkdir()
-        (root / "plan" / "tasks.json").write_text('{"steps": []}', encoding="utf-8")
-        self.escalated: list[loop.Halt] = []
+        (root / ".runner").mkdir()
+        (root / ".runner" / "tasks.json").write_text('{"steps": []}', encoding="utf-8")
+        self.failed: list[loop.Halt] = []
         self.greens: list[int] = []
         red = loop.TestRun(1, 1, 0, 0, ["AssertionError"], [], "")
         self.green = loop.TestRun(1, 0, 0, 0, [], ["t"], "")
@@ -121,8 +120,8 @@ class TheLoopMovesOn(unittest.TestCase):
                                  failure_details=["t\n    expected 0 to be 1"])
         self.runs = [red]
         patches = {
-            "PLAN": root / "plan", "STATE": root / ".runner",
-            "validate_plan": lambda tasks: [],
+            "STATE": root / ".runner", "TASKS": root / ".runner" / "tasks.json",
+            "load_settings": lambda tasks: None,
             "load_plan": lambda sid: (self.FULL_STEP, "context"),
             "ledger": lambda event, **f: None,
             "touched_paths": lambda: set(),
@@ -136,8 +135,8 @@ class TheLoopMovesOn(unittest.TestCase):
             "frozen_tests_text": lambda step: "",
             "pytest_run": lambda tag, files: self.runs.pop(0),
             "absorb_timeout": lambda *a: "ran out of time",
-            "complete_green": lambda sid, goal, n: self.greens.append(n),
-            "escalate": lambda step, halt, n, run: self.escalated.append(halt),
+            "complete_green": lambda sid, goal, n, design="": self.greens.append(n),
+            "fail_module": lambda step, halt, n, run: self.failed.append(halt),
         }
         for name, value in patches.items():
             p = mock.patch.object(loop, name, value)
@@ -163,15 +162,15 @@ class TheLoopMovesOn(unittest.TestCase):
         with self.solver(["timeout", "ok"]):
             self.assertEqual(loop.run_step("S10"), 0)
         self.assertEqual(self.greens, [2])
-        self.assertEqual(self.escalated, [])
+        self.assertEqual(self.failed, [])
 
-    def test_running_out_of_attempts_still_escalates_and_says_why(self):
+    def test_running_out_of_attempts_still_fails_and_says_why(self):
         self.runs.append(self.fail)
         with self.solver(["timeout", "ok", "timeout"]):
             self.assertEqual(loop.run_step("S10"), 2)
-        self.assertEqual(len(self.escalated), 1)
-        self.assertIn("still failing after 3 attempts", self.escalated[0].reason)
-        self.assertIn("2 of them ran out of time", self.escalated[0].reason)
+        self.assertEqual(len(self.failed), 1)
+        self.assertIn("still failing after 3 attempts", self.failed[0].reason)
+        self.assertIn("2 of them ran out of time", self.failed[0].reason)
 
 
 if __name__ == "__main__":

@@ -104,7 +104,7 @@ class AProject(Cpp):
         self.addCleanup(temp.cleanup)
         self.root = Path(temp.name).resolve()
         self.patch(PROJECT=self.root, SRC=self.root / "src", TESTS=self.root / "tests",
-                   CPP_BUILD=self.root / "build", REQUIREMENTS=self.root / "REQUIREMENTS.md")
+                   CPP_BUILD=self.root / "build", DOCS_SPEC=self.root / "docs" / "spec")
 
     def write(self, path, text):
         target = self.root / path
@@ -268,8 +268,8 @@ class WhatThePlannerIsTold(AProject):
         with mock.patch.object(loop, "REFS", Path("/nonexistent/refs")):
             self.assertIn("loop refs dxlib", loop.cpp_facts()[1])
 
-    def test_requirements_that_ask_for_dxlib_get_the_sheet_before_any_code(self):
-        self.write("REQUIREMENTS.md", "DXライブラリで動くブロック崩し\n")
+    def test_a_spec_that_asks_for_dxlib_gets_the_sheet_before_any_code(self):
+        self.write("docs/spec/spec.md", "DXライブラリで動くブロック崩し\n")
         self.assertIn("ScreenFlip", loop.cpp_facts()[1])
 
     def test_other_projects_are_not_told_about_dxlib(self):

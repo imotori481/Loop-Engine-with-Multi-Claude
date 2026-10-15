@@ -1,1 +1,1 @@
-"""Loop Engine の、ホスト側で動く運用者向けダッシュボード。"""
+"""Sleep Walking Alternator の、ホスト側で動く運用者向けダッシュボード。"""

@@ -65,21 +65,25 @@ class CurrentLoop(unittest.TestCase):
     def test_the_last_critique_is_kept_with_the_time_of_its_command(self):
         self.log("game-20260102-000000.log",
                  "=== loop go 開始 (2026-01-02 00:00:00) プロジェクト=game",
-                 "--- loop.py plan refine (2026-01-02 00:05:00)",
-                 "=== critique 1 of at most 3 ===",
-                 "## coverage",
+                 "--- loop.py modules draft (2026-01-02 00:05:00)",
+                 "=== critique of the module design ===",
+                 "## modules",
                  "1. first",
-                 "[PLAN_REFINE] round=1 findings=1",
-                 "=== critique 2 of at most 3 ===",
-                 "## trace",
+                 "",
+                 "=== loop 終了 (2026-01-02 00:10:00): 詳細設計を書き、クリティックが読んだ")
+        self.log("game-20260102-001500.log",
+                 "=== loop redraft-modules 開始 (2026-01-02 00:15:00) プロジェクト=game",
+                 "--- loop.py modules draft (2026-01-02 00:15:00)",
+                 "=== critique of the module design ===",
+                 "## modules",
                  "1. second",
                  "   NO GATE WOULD CATCH THIS",
-                 "[REFINE_CAP] round=2 findings=1",
-                 "=== loop 終了 (2026-01-02 00:30:00): クリティックの指摘が残った")
+                 "",
+                 "=== loop 終了 (2026-01-02 00:30:00): 詳細設計を書き、クリティックが読んだ")
         critique = self.loop()["critique"]
-        self.assertTrue(critique["at"].startswith("2026-01-02T00:05:00"))
-        self.assertEqual(critique["text"], "=== critique 2 of at most 3 ===\n## trace\n"
-                                           "1. second\n   NO GATE WOULD CATCH THIS")
+        self.assertTrue(critique["at"].startswith("2026-01-02T00:15:00"))
+        self.assertEqual(critique["text"], "=== critique of the module design ===\n"
+                                           "## modules\n1. second\n   NO GATE WOULD CATCH THIS")
 
     def test_other_projects_and_the_latest_link_are_not_read(self):
         self.log("game-latest.log", "=== loop go 開始 (2026-01-03 00:00:00) プロジェクト=game")
@@ -89,7 +93,8 @@ class CurrentLoop(unittest.TestCase):
 
     def test_the_outcome_follows_the_run_and_the_last_result(self):
         self.assertEqual(loop_now.outcome(True, None), "running")
-        self.assertEqual(loop_now.outcome(False, "loop 終了 (x): 全ステップが緑になった"), "green")
+        self.assertEqual(loop_now.outcome(False, "loop 終了 (x): 全モジュールが緑になった"),
+                         "green")
         self.assertEqual(loop_now.outcome(False, "loop 終了 (x): 利用枠が尽きた"), "stopped")
 
 

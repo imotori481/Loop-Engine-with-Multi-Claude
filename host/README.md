@@ -14,8 +14,8 @@ WSL2 では起動と生存管理がホスト側の責務になった（`RUNNER_S
 | `loop-unity-refs.cmd` / `.ps1` | このリポジトリのまま（`host` を PATH に足す） | Unity のプロジェクトがコンパイルに使う参照アセンブリを箱へ送る |
 | `wsl-keepalive.vbs` | このリポジトリのまま（タスクが絶対パスで参照する） | VM を**窓を出さずに**生かし続ける。下の keepalive タスクの実体 |
 | `loop-pull.cmd` | このリポジトリのまま | **すべての** `repo*.git` と `projects/*/repo.git` をホストのミラーに引く。**VHDX を失っても残る唯一の複製** |
-| `loop-pr.cmd` | このリポジトリのまま（`host` を PATH に足す） | 全ステップが緑になる前の成果を、下書きの PR として出す |
-| `loop-dashboard.cmd` | このリポジトリのまま | 進捗、エスカレーション、予定レビューを扱うGUIを起動（`127.0.0.1:8443`） |
+| `loop-pr.cmd` | このリポジトリのまま（`host` を PATH に足す） | 全モジュールが緑になる前の成果を、下書きの PR として出す |
+| `loop-dashboard.cmd` | このリポジトリのまま | 進捗、設計のせき、最終確認を扱うGUIを起動（`127.0.0.1:8443`） |
 
 **ASCII のみで書くこと。** PowerShell 5.1 と cmd.exe は BOM 無し UTF-8 を ANSI として
 読むため、日本語コメントを入れると行継続として誤解釈され、変数が黙って null になる
@@ -30,13 +30,13 @@ WSL2 では起動と生存管理がホスト側の責務になった（`RUNNER_S
 （手順は `docs/COMMANDS.md`）。コピーして置くと、pull しても更新が届かない。
 
 ```cmd
-loop go C:\path\to\requirements.md
+loop go <spec-file>
 loop status
 loop log
 ```
 
-`go` に渡した要件がこの機械のファイルなら、先に保守ユーザーのホームへ
-`loop-requirements.md` として送る。走行は箱の中で続くので、窓を閉じてもよい。
+`go` に渡した仕様書がこの機械のファイルなら、先に保守ユーザーのホームへ
+`loop-spec.md` として送る。走行は箱の中で続くので、窓を閉じてもよい。
 続きは `loop log` で追う。
 
 ## 既存リポジトリを取り込む
@@ -83,8 +83,8 @@ Unity の版やパッケージを変えたら、もう一度送る。
 
 ## オペレーターGUI
 
-`dashboard/` は、ホストへ取得したプロジェクトの台帳を読み、進捗、エスカレーション、
-全 Green 後の予定レビューをブラウザで扱うローカルGUI。次の順で同期して起動する。
+`dashboard/` は、ホストへ取得したプロジェクトの台帳と箱の設計を読み、進捗、設計のせき、
+全モジュールが緑になった後の最終確認をブラウザで扱うローカルGUI。次の順で同期して起動する。
 
 ```cmd
 host\loop-pull.cmd
@@ -101,16 +101,17 @@ tailscale serve --bg --https=8443 http://127.0.0.1:8443
 ```
 
 公開すると端末によってできることが変わる。**リモートは「駄目だ」と言えるが「良い」とは
-言えない** ── 予定レビューの承認と成果物の起動はこの機械の前だけ。画面を見られない端末が
+言えない** ── 最終確認の承認と成果物の起動はこの機械の前だけ。画面を見られない端末が
 「遊べた」と記録できるなら、*機械には画面が確認できないから人間に訊く* という関門が
-意味を失う。差し戻し・エスカレーションへの回答・停止はどこからでもできる。
+意味を失う。最終確認の差し戻し、設計のせきの承認と差し戻し、中段に戻すモジュールの選択、
+停止と続行はどこからでもできる。
 
-予定されたプレイテストは失敗ではないため、`ALL_GREEN` から「予定レビュー」を生成し、
-`ESCALATION.md` から生じる異常時のエスカレーションとは画面上・記録上ともに区別する。
+最終確認は、段が `review` のあいだ、写しの最後の `ALL_GREEN` から生成する。
+下流で止まったモジュールは要求にせず、設計の欄に `plan/FAILURE.md` を出す。
 回答は `dashboard/.state/decisions.jsonl` に対象ID付きで保存され、古い画面から別の要求へ
 回答することはできない。
 
-成果物の起動は `dashboard/config.json` に人間が書いたIDの許可リストだけを使う。計画、
+成果物の起動は `dashboard/config.json` に人間が書いたIDの許可リストだけを使う。設計、
 ソルバー出力、HTTP入力をコマンドとして実行する経路はない。詳しい設定とテスト方法は
 `dashboard/README.md`。
 
@@ -216,7 +217,7 @@ git clone loop-runner:/srv/loop/repo.git <置き場所>
 | 2 | `repo.git` → `<MIRRORROOT>\project`、過去run → `runs\run-NNN`、プロジェクト → `projects\<名前>` | **VHDX の消失**。ここで初めて別のディスクに乗る |
 | 3 | ミラー → GitHub など | ホストの故障。やるなら**鍵はホストだけが持つ** |
 
-段1 はランナーが自動でやる（`loop.py` の `publish()`、GREEN と `plan apply` の直後）。
+段1 はランナーが自動でやる（`loop.py` の `publish()`、GREEN と段のコマンドのコミットの直後）。
 段2 が `loop-pull.cmd`。**引数も事前のクローンも要らない** ── サンドボックスにある
 `repo*.git` と `projects/*/repo.git` を全部列挙し、無ければクローン、有れば fetch する。
 1件でも clone / fetch / reset / clean / fast-forward に失敗すれば、その場で非ゼロ終了する。
@@ -235,8 +236,8 @@ git clone loop-runner:/srv/loop/repo.git <置き場所>
 箱のコミットは remote `loop` として入る。
 
 - 箱が作業するブランチは bare の HEAD から読む。手元のそのブランチは、早送りできるときだけ進める。早送りできないときと、手元の変更が邪魔をするときは `NOTE` を出して動かさない。写しは `loop/<ブランチ>` に入っているので、失敗とは数えない
-- ランナーのタグ（`step-S1` など）は `refs/loop-tags/` に入れる。`refs/tags/` に入れると、`git push --tags` で GitHub に届く
-- GitHub への push は、ダッシュボードで予定レビューを承認したときに PR として行う（`dashboard/README.md`）。全ステップが緑になる前は `loop-pr` で下書きの PR として出す。手で出す手順は `docs/COMMANDS.md`
+- ランナーのタグ（`module-<id>`）は `refs/loop-tags/` に入れる。`refs/tags/` に入れると、`git push --tags` で GitHub に届く
+- GitHub への push は、ダッシュボードで最終確認を承認したときに PR として行う（`dashboard/README.md`）。全モジュールが緑になる前は `loop-pr` かダッシュボードの「ホストの写し」タブで下書きの PR として出す。手で出す手順は `docs/COMMANDS.md`
 
 `/srv/loop/repo.git` が今のプロジェクトへのリンクのときも、`project` は今のプロジェクトの写しになる。
 作り直す先は、bare の HEAD が指すブランチだ。
@@ -244,7 +245,7 @@ git clone loop-runner:/srv/loop/repo.git <置き場所>
 `<MIRRORROOT>` は `loop-pull.cmd` 冒頭の `set "MIRRORROOT=..."` で決まる。使う前に自分の置き場所に書き換える。
 
 **run ごとにディレクトリを分けるのは整頓ではなく保存のため。** どの run も
-`step-S1`…`step-S11` という同じタグ名を作るので、1つのクローンに引くと `--force` で
+`module-<id>` という同じ形のタグ名を作るので、1つのクローンに引くと `--force` で
 前の run のタグを上書きするしかなく、`main` も動かせば**古い run のコミットを指す ref が
 1つも残らない**。到達不能なオブジェクトは `git gc` が消し、gc は普通のコマンドの中で
 勝手に走る。**誰も見ていない時点でバックアップが消える。**
@@ -269,6 +270,8 @@ git clone loop-runner:/srv/loop/repo.git <置き場所>
 
 ## 更新履歴
 
+- 2026/10/14: 下書きの PR を出す操作をオペレーターGUIの「ホストの写し」タブに追加
+- 2026/10/14: オペレーターGUIの扱うものをエスカレーションと予定レビューから設計のせきと最終確認に変更
 - 2026/10/07: 途中の成果を下書きの PR として出す `loop-pr.cmd` を追加
 - 2026/09/27: `loop-import.cmd` が親ブランチを `branch.<branch>.loopBase` に記録するように変更
 - 2026/09/27: Unity の参照アセンブリを箱へ送る `loop-unity-refs` を追加

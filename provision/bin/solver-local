@@ -24,9 +24,9 @@
 
 何が何を費やすか（ここでの要の設計判断）
 ----------------------------------------
-このスクリプトの非ゼロ終了はランナーで `Halt` になり、Halt はエスカレーションに
-なり、エスカレーションはプランナーの呼び出しを1回使う。だから終了コードは出来の
-報告ではなく、誰が払うかの選択だ:
+このスクリプトの非ゼロ終了はランナーで `Halt` になり、Halt はモジュールを中段に
+差し戻し、人の手を1回使う。だから終了コードは出来の報告ではなく、誰が払うかの
+選択だ:
 
     モデルが役に立たないことをした -> exit 0。試行を1回使い、VERIFY が落ち、
                                      ループがもう一度引く。安い。
@@ -215,7 +215,7 @@ def files_from_brief(brief: str) -> list[str]:
     if not paths:
         die(EXIT_BRIEF_SHAPE,
             f"the {FILES_HEADING!r} section listed no paths.\n"
-            "  Fix: check the step's files_write / files_test in plan/tasks.json.")
+            "  Fix: check the module's files_write / files_test in .runner/tasks.json.")
     return paths
 
 
@@ -279,7 +279,7 @@ def main() -> int:
         die(EXIT_TIMEOUT,
             f"no answer within {seconds}s.\n"
             "  A local 9B on CPU does not finish a step in this budget. Fix:\n"
-            "  raise timeouts.solver in plan/tasks.json, or give the server a GPU.")
+            "  raise timeouts.solver in /srv/loop/settings.json, or give the server a GPU.")
     signal.signal(signal.SIGALRM, out_of_time)
     signal.alarm(seconds)
 
@@ -338,8 +338,7 @@ def main() -> int:
 
     # -- ここから下は、非ゼロで終わらない ------------------------------------
     # ここから下はすべて、モデルが仕事を下手にこなした場合で、それは試行を1回
-    # 使うべきもので、エスカレーションにしてはならない。エスカレーションに
-    # 答えるのはプランナーで、プランナーは高くつくアカウントだ。
+    # 使うべきもので、中段への差し戻しにしてはならない。差し戻しは人の手を使う。
     print(f"[solver-local] {MODEL} temp={TEMPERATURE} prompt~{estimated}tok "
           f"used={used} out={len(text)}ch")
 

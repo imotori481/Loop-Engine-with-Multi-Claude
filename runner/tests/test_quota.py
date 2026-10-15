@@ -1,8 +1,8 @@
 """利用上限と一時的な混雑を、失敗と区別すること。
 
-3役は同じサブスクリプションの枠を使う。上限に当たったのを Halt にすると
-エスカレーションになり、エスカレーションはプランナーを呼んで、同じ枠をさらに
-使う。だから見分けて、待ってからやり直す。
+3役は同じサブスクリプションの枠を使う。上限に当たったのを Halt にすると、
+落ち度の無いモジュールが中段に差し戻され、人が設計を直そうとする。だから
+見分けて、待ってからやり直す。
 
     python3 -m unittest discover -s runner/tests
 """
@@ -63,7 +63,7 @@ class WaitingForQuota(unittest.TestCase):
         self.assertEqual(self.events, ["QUOTA_WAIT"])
 
     def test_waiting_runs_out_without_becoming_a_halt(self):
-        # Halt ではないこと自体が要点。Halt はエスカレーションになる。
+        # Halt ではないこと自体が要点。Halt はモジュールを中段に差し戻す。
         invoke = mock.Mock(return_value=proc(1, "Request rejected (429)"))
         with self.assertRaises(loop.QuotaExhausted) as raised:
             loop.run_agent("planner", "PLAN_PROPOSE", invoke)

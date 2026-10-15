@@ -2,7 +2,7 @@
 # 箱に複数のプロジェクトを置き、1つずつ切り替えて使う。root で流す。
 # 普段は `loop project <コマンド>` で呼ぶ。`loop` がまだ無い箱では直接流す:
 #
-#   cd /tmp && sudo ADMIN_USER=<保守ユーザー> bash /opt/loop-engine/provision/loop-project.sh <コマンド>
+#   cd /tmp && sudo ADMIN_USER=<保守ユーザー> bash /opt/swa/provision/loop-project.sh <コマンド>
 #
 # コマンドは usage() を参照。
 #
@@ -26,7 +26,8 @@ CURRENT=$PROJECTS/CURRENT
 HERE="$(cd "$(dirname "$0")" && pwd)"
 
 # プロジェクトごとに持つ作業場所。どれも走行の途中の状態を持つ。planner/out には
-# plan apply を待つ提案が、human/in には要件が、brief/ には最後のブリーフがある。
+# 書きかけの設計が、human/in には仕様書とコメントと批評の写しが、brief/ には最後の
+# ブリーフがある。
 # 退避先では / を - に替えた名前で parked/ の下に置く。
 SLOTS=(project human/in planner/out planner/brief critic/out critic/brief brief)
 

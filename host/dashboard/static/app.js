@@ -15,8 +15,8 @@ function button(label, decision, item, note) {
   element.onclick = async () => {
     element.disabled = true;
     try {
-      const result = await api("/api/decision", {method: "POST", body: JSON.stringify({kind: item.kind, request_id: item.id, decision, note: note.value})});
-      if (result.sent && result.sent.error) alert("回答は記録したが、箱に送れなかった: " + result.sent.error);
+      await api("/api/decision", {method: "POST", body: JSON.stringify({kind: item.kind, request_id: item.id, decision, note: note.value})});
+      if (decision === "revise") alert("記録した。直すモジュールは「設計」の欄で選び、中段に戻す。");
       await refresh();
     } catch (error) { alert(error.message); element.disabled = false; }
   };
@@ -39,18 +39,13 @@ async function refresh() {
   if (!state.pending.length) pending.textContent = "現在、人間の対応を待っている項目はありません。";
   for (const item of state.pending) {
     const card = document.querySelector("#request-template").content.cloneNode(true);
-    card.querySelector(".badge").textContent =
-      {review: "予定レビュー", planner: "プランナーからの差し戻し"}[item.kind] || "エスカレーション";
+    card.querySelector(".badge").textContent = "最終確認";
     card.querySelector("h3").textContent = item.title;
     card.querySelector("pre").textContent = item.detail;
     const note = card.querySelector("textarea"), actions = card.querySelector(".request-actions");
-    if (item.kind === "review") {
-      if (session.scope === "local") actions.append(button("承認", "approve", item, note));
-      else actions.append(note_only("承認はこの機械の前でだけ ── 画面を見られない端末から「遊べる」とは記録できません"));
-      actions.append(button("修正を依頼", "revise", item, note));
-    } else {
-      actions.append(button("回答を記録", "respond", item, note), button("停止", "stop", item, note));
-    }
+    if (session.scope === "local") actions.append(button("承認", "approve", item, note));
+    else actions.append(note_only("承認はこの機械の前でだけ ── 画面を見られない端末から「遊べる」とは記録できません"));
+    actions.append(button("修正を依頼", "revise", item, note));
     pending.append(card);
   }
   renderPullRequest(state.pull_request);
@@ -74,7 +69,7 @@ function renderPullRequest(value) {
     const link = document.createElement("a");
     link.href = result.url; link.textContent = result.url; link.target = "_blank"; link.rel = "noopener";
     box.append(text("strong", `${result.head} → ${result.base}`), link,
-               text("p", `${result.created ? "作成" : "更新"}: ${result.ts}`, "why"));
+               text("p", `${result.created ? "作成" : result.promoted ? "下書きを正式にした" : "更新"}: ${result.ts}`, "why"));
   } else {
     box.classList.add("error");
     box.append(text("strong", result ? "PR を出せませんでした" : "PR はまだ出していません"));
@@ -135,7 +130,7 @@ let mirrorRuns = [], liveLoop = null, drawnTokens = "";
 
 // 箱の回を写しの履歴に重ねる。写しに届くのはコミットのときだけなので、同じ回なら
 // 箱の数を使う。同じ回かどうかは、同じプロジェクトで開始が5分以内かで決める。
-// 箱はログの先頭の時刻、写しは台帳の PLAN_BOOTSTRAP の時刻を持つ。
+// 箱はログの先頭の時刻、写しは台帳の SPEC_IMPORT の時刻を持つ。
 function mergeRuns(mirror, live) {
   const runs = mirror.map(run => ({...run}));
   if (live?.loop?.calls) {
@@ -176,18 +171,15 @@ function toggle(selector, onChange) {
   }
 }
 
-const CRITIQUE_MODE = {
-  coverage: {label: "要件を満たすか", why: "計画をやり遂げたとき、要件が満たされるか"},
-  trace: {label: "使う人の操作で届くか", why: "計画に、使う人の操作では届かない部分が無いか"},
-};
-// 5秒ごとの更新で、書きかけの入力を消さない。中身が変わったときだけ描き直す。
-let drawnCritique = "", editingFinding = false;
+// 中身が変わったときだけ描き直す。
+let drawnCritique = "";
 
 // クリティックの指摘。箱の CRITIQUE.json があれば指摘ごとに出し、無ければログの段落を出す。
+// 指摘はプランナーに戻らない。直させたいことは、設計の欄の差し戻しのコメントに書く。
 function renderCritique(value) {
   const findings = value.findings;
-  const key = JSON.stringify([findings, value.running, findings ? null : value.loop?.critique]);
-  if (editingFinding || key === drawnCritique) return;
+  const key = JSON.stringify([findings, findings ? null : value.loop?.critique]);
+  if (key === drawnCritique) return;
   drawnCritique = key;
   const box = document.querySelector("#critique"); box.replaceChildren();
   const at = document.querySelector("#critique-at");
@@ -198,70 +190,187 @@ function renderCritique(value) {
                         : text("p", "今の回にクリティックの指摘はありません。", "why"));
     return;
   }
-  at.textContent = `${findings.round}回目の批評 / ${findings.at}`;
-  const editable = findings.waiting && !value.running;
-  if (editable) {
-    box.append(text("p", "改訂の上限まで回しても残った指摘か、改訂が済まずに止まった回の指摘です。"
-      + "改訂が済まないのは、プランナーが判断を返したとき、改訂に失敗したとき、走行を止めたときです。"
-      + "的外れなものや、プランナーの問いに答えるものは書き換えてください。"
-      + "「続ける」を押すと、書き換えた指摘でプランナーが1回だけ計画を直し、適用して走らせます。"
-      + "何も書き換えずに押すと、今の計画をそのまま適用します。", "why"));
+  at.textContent = findings.at || "";
+  box.append(text("p", "詳細設計を1回読んだ指摘です。プランナーには戻りません。"
+    + "直させたいものは、設計の欄の差し戻しのコメントに書いてください。", "why"));
+  for (const items of Object.values(findings.modes)) {
+    if (!items.length) box.append(text("p", "指摘なし", "why"));
+    items.forEach((item, index) => box.append(findingCard(index, item)));
   }
-  for (const [mode, items] of Object.entries(findings.modes)) {
-    const group = document.createElement("div"); group.className = "finding-group";
-    group.append(text("h3", CRITIQUE_MODE[mode]?.label || mode),
-                 text("p", CRITIQUE_MODE[mode]?.why || "", "why"));
-    if (!items.length) group.append(text("p", "指摘なし", "why"));
-    items.forEach((item, index) => group.append(findingCard(mode, index, item, editable)));
-    box.append(group);
-  }
-  if (editable) box.append(continueButton());
 }
 
-function findingCard(mode, index, item, editable) {
+function findingCard(index, item) {
   const card = document.createElement("article"); card.className = "finding";
   const head = document.createElement("div"); head.className = "finding-head";
   head.append(text("strong", `${index + 1}. ${item.title}`));
-  if (item.machine_would_notice === false) head.append(text("span", "どの関門も気づかない", "badge warn"));
   card.append(head, text("p", item.evidence, "evidence"));
-  if (!editable) return card;
-  const edit = document.createElement("button"); edit.textContent = "書き換える";
-  edit.onclick = () => { editingFinding = true; card.replaceWith(findingEditor(mode, index, item)); };
-  card.append(edit);
   return card;
 }
 
-function findingEditor(mode, index, item) {
-  const card = document.createElement("article"); card.className = "finding editing";
-  const title = document.createElement("input"); title.value = item.title; title.maxLength = 4000;
-  const evidence = document.createElement("textarea"); evidence.value = item.evidence; evidence.maxLength = 4000;
-  const save = document.createElement("button"); save.textContent = "保存";
-  const cancel = document.createElement("button"); cancel.textContent = "取り消す"; cancel.className = "quiet";
-  const done = () => { editingFinding = false; drawnCritique = ""; refreshLive(); };
-  save.onclick = async () => {
-    save.disabled = true;
-    try {
-      await api("/api/findings", {method: "POST", body: JSON.stringify(
-        {mode, index, title: title.value, evidence: evidence.value})});
-      done();
-    } catch (error) { alert(error.message); save.disabled = false; }
-  };
-  cancel.onclick = done;
-  const actions = document.createElement("div"); actions.className = "request-actions";
-  actions.append(cancel, save);
-  card.append(text("span", "題"), title, text("span", "根拠"), evidence, actions);
-  return card;
-}
+// ---- 設計（せき） --------------------------------------------------------------
 
-function continueButton() {
-  const element = document.createElement("button"); element.textContent = "続ける（loop continue）";
-  element.onclick = async () => {
-    if (!confirm("書き換えた指摘で計画を直し、適用して走らせます。よいですか？")) return;
-    element.disabled = true;
-    try { await api("/api/continue", {method: "POST", body: "{}"}); drawnCritique = ""; await refreshLive(); }
-    catch (error) { alert(error.message); element.disabled = false; }
-  };
+const STAGE_LABEL = {upstream: "上流（基本設計）", midstream: "中段（詳細設計）",
+                     downstream: "下流（実装）", review: "最終確認"};
+// 5秒ごとの更新で、書きかけのコメントや選んだモジュールを消さない。
+let drawnDesign = "";
+
+function details(summary, ...children) {
+  const element = document.createElement("details");
+  element.append(text("summary", summary), ...children);
   return element;
+}
+
+function criteriaTable(value) {
+  if (!Array.isArray(value?.criteria)) return text("pre", typeof value === "string" ? value : JSON.stringify(value, null, 2));
+  const table = document.createElement("table"), head = document.createElement("tr");
+  for (const name of ["case", "kind", "given", "then"]) head.append(text("th", name));
+  table.append(head);
+  for (const item of value.criteria) {
+    const row = document.createElement("tr");
+    for (const name of ["case", "kind", "given", "then"]) row.append(text("td", item?.[name] ?? ""));
+    table.append(row);
+  }
+  const wrap = document.createElement("div"); wrap.className = "table-wrap flat"; wrap.append(table);
+  return wrap;
+}
+
+// 承認と、コメントを付けた差し戻し。上流と中段で同じ形。
+function gateActions(label) {
+  const box = document.createElement("div"); box.className = "stack";
+  const comment = document.createElement("textarea"); comment.maxLength = 4000;
+  comment.placeholder = "差し戻すときのコメント。プランナーが次の書き直しで読む";
+  const approve = document.createElement("button"); approve.textContent = `${label}を承認（loop approve）`;
+  approve.onclick = () => act(approve, "/api/approve", {}, `${label}を承認して次の段へ流します。よいですか？`);
+  const reject = document.createElement("button"); reject.textContent = "差し戻す（loop reject）"; reject.className = "quiet";
+  reject.onclick = () => {
+    if (!comment.value.trim()) { alert("差し戻すにはコメントを書いてください。"); return; }
+    act(reject, "/api/reject", {comment: comment.value}, `コメントを付けて${label}を書き直させます。よいですか？`);
+  };
+  const actions = document.createElement("div"); actions.className = "actions"; actions.append(reject, approve);
+  box.append(comment, actions);
+  return box;
+}
+
+// 直すモジュールを選んで中段に戻す。下流で止まった後と、最終確認で使う。
+function reopenActions(modules) {
+  const box = document.createElement("div"); box.className = "stack";
+  const boxes = modules.map(id => {
+    const label = document.createElement("label"), check = document.createElement("input");
+    check.type = "checkbox"; check.value = id; label.append(check, ` ${id}`);
+    return {label, check};
+  });
+  const button = document.createElement("button"); button.textContent = "選んだモジュールを中段に戻す（loop reopen）";
+  button.onclick = () => {
+    const chosen = boxes.filter(item => item.check.checked).map(item => item.check.value);
+    if (!chosen.length) { alert("直すモジュールを1つ以上選んでください。"); return; }
+    act(button, "/api/reopen", {modules: chosen}, `${chosen.join(", ")} を中段に戻します。よいですか？`);
+  };
+  box.append(...boxes.map(item => item.label), button);
+  return box;
+}
+
+// 依存関係の図。使われる側ほど左の列に置き、矢印は使う側から使われる側へ向ける。
+// 縁の明るい箱は "entry": true を持つモジュール。
+function dependencyGraph(iface) {
+  const deps = iface.depends_on || {};
+  const ids = [...new Set([...(iface.order || []), ...Object.keys(deps), ...Object.values(deps).flat()])];
+  if (!ids.length) return text("p", "—", "why");
+  const level = {};
+  const depth = (id, seen) => {
+    if (id in level) return level[id];
+    if (seen.has(id)) return 0;  // 循環はインターフェースチェックが問題として出す
+    seen.add(id);
+    const below = (deps[id] || []).map(dep => depth(dep, seen));
+    return level[id] = below.length ? Math.max(...below) + 1 : 0;
+  };
+  ids.forEach(id => depth(id, new Set()));
+  const columns = [];
+  ids.forEach(id => (columns[level[id]] ||= []).push(id));
+
+  const node = {width: 176, height: 28}, gap = {x: 64, y: 14}, pad = 4;
+  const at = {};
+  columns.forEach((column, x) => column.forEach((id, y) => {
+    at[id] = {x: pad + x * (node.width + gap.x), y: pad + y * (node.height + gap.y)};
+  }));
+  const width = pad * 2 + columns.length * node.width + (columns.length - 1) * gap.x;
+  const height = pad * 2 + Math.max(...columns.map(c => c.length)) * (node.height + gap.y) - gap.y;
+  const root = svg("svg", {viewBox: `0 0 ${width} ${height}`, width, height,
+                           role: "img", "aria-label": "モジュールの依存関係"});
+  const marker = svg("marker", {id: "dep-arrow", viewBox: "0 0 8 8", refX: 8, refY: 4,
+                                markerWidth: 8, markerHeight: 8, orient: "auto"});
+  marker.append(svg("path", {d: "M0,0 L8,4 L0,8 z"}));
+  const defs = svg("defs", {}); defs.append(marker); root.append(defs);
+  for (const [id, used] of Object.entries(deps)) {
+    for (const dep of used) {
+      if (!at[id] || !at[dep]) continue;
+      root.append(svg("line", {x1: at[id].x, y1: at[id].y + node.height / 2,
+                               x2: at[dep].x + node.width, y2: at[dep].y + node.height / 2,
+                               class: "edge", "marker-end": "url(#dep-arrow)"}));
+    }
+  }
+  const entries = new Set(Object.keys(iface.entries || {}));
+  for (const id of ids) {
+    const group = svg("g", {class: entries.has(id) ? "node entry" : "node"});
+    const title = svg("title", {}); title.textContent = id;
+    const label = svg("text", {x: at[id].x + 8, y: at[id].y + node.height / 2 + 4});
+    label.textContent = id.length > 24 ? `${id.slice(0, 23)}…` : id;
+    group.append(title, svg("rect", {x: at[id].x, y: at[id].y, width: node.width, height: node.height, rx: 4}), label);
+    root.append(group);
+  }
+  const plot = document.createElement("div"); plot.className = "plot graph"; plot.append(root);
+  return plot;
+}
+
+function renderDesign(value) {
+  const key = JSON.stringify([value, liveState.running]);
+  if (key === drawnDesign) return;
+  drawnDesign = key;
+  const box = document.querySelector("#design"); box.replaceChildren();
+  if (value.error) { box.append(text("p", `読めません: ${value.error}`, "why")); return; }
+  const stage = value.stage?.stage;
+  document.querySelector("#design-stage").textContent = STAGE_LABEL[stage] || "始まっていません";
+  if (!stage) { box.append(text("p", "仕様書から始めると、ここに設計が出ます。", "why")); return; }
+  const modules = Object.keys(value.modules || {});
+
+  if (value.failure) box.append(text("h3", "止まった理由（FAILURE.md）"), text("pre", value.failure));
+  if (Object.keys(value.basic || {}).length) {
+    box.append(details("基本設計仕様書", ...Object.entries(value.basic).map(
+      ([name, doc]) => details(`basic/${name}.md`, text("pre", doc)))));
+  }
+  if (modules.length) {
+    const iface = value.interface || {};
+    const parts = modules.map(id => details(id, text("pre", value.modules[id]),
+      text("h4", "受け入れ条件"), criteriaTable(value.ac?.[id])));
+    box.append(details(`詳細設計仕様書と受け入れ条件（${modules.length}モジュール）`, ...parts));
+    const order = (iface.order || []).map(id => {
+      const deps = iface.depends_on?.[id] || [];
+      return deps.length ? `${id} ← ${deps.join(", ")}` : id;
+    });
+    const entries = Object.entries(iface.entries || {}).flatMap(([id, sigs]) => sigs.map(sig => `${id}: ${sig}`));
+    box.append(details("インターフェースチェック",
+      text("p", iface.problems?.length ? iface.problems.join("\n") : "問題なし（最後に承認した設計）", "why"),
+      text("h4", "依存関係（矢印は使う側から使われる側へ。縁の明るいものは入口）"), dependencyGraph(iface),
+      details("依存の順を文字で見る（左が右を使う）", text("pre", order.join("\n") || "—")),
+      text("h4", "入口（\"entry\": true）"), text("pre", entries.join("\n") || "—")));
+  }
+
+  if (liveState.running) { box.append(text("p", "走っている間は操作できません。", "why")); return; }
+  if (stage === "upstream") box.append(gateActions("基本設計"));
+  else if (stage === "midstream" && Array.isArray(value.stage.open) && !value.stage.open.length) {
+    box.append(text("p", "下流でモジュールが止まりました。詳細設計を直すモジュールを選んでください。", "why"),
+               reopenActions(modules));
+  } else if (stage === "midstream") {
+    if (value.stage.open) box.append(text("p", `書き直してよいモジュール: ${value.stage.open.join(", ")}`, "why"));
+    box.append(gateActions("詳細設計"));
+  } else if (stage === "review") {
+    box.append(text("p", "直すなら、モジュールを選んで中段に戻します。", "why"), reopenActions(modules));
+  }
+}
+
+async function refreshDesign() {
+  let value;
+  try { value = await api("/api/design"); } catch (error) { value = {error: error.message}; }
+  renderDesign(value);
 }
 
 const CHART = {width: 800, height: 280, top: 12, bottom: 30, left: 56};
@@ -503,10 +612,13 @@ function renderLive(value) {
     const state = step.state === "active" && !value.running ? "中断" : STEP_STATE[step.state] || step.state;
     const row = document.createElement("tr");
     if (step.state === "active" && value.running) row.className = "active";
-    row.append(text("td", step.id), text("td", state), text("td", step.goal, "goal"));
+    row.append(text("td", step.id), text("td", state));
     steps.append(row);
   }
 }
+
+// 設計は箱から読む。読むのは走行の状態が変わったときだけにし、5秒ごとには引かない。
+let designSeen = null;
 
 async function refreshLive() {
   let value;
@@ -514,6 +626,8 @@ async function refreshLive() {
   catch (error) { value = {error: error.message}; }
   renderLive(value);
   renderControl(value);
+  const seen = JSON.stringify([value.error, value.running, value.last, value.now?.stage]);
+  if (seen !== designSeen) { designSeen = seen; await refreshDesign(); }
 }
 
 // ---- 操作 -------------------------------------------------------------------
@@ -532,7 +646,7 @@ async function act(element, path, body, question) {
   try {
     const result = await api(path, {method: "POST", body: JSON.stringify(body || {})});
     if (result.message) alert(result.message);
-    drawnCritique = ""; drawnProjects = "";
+    drawnCritique = ""; drawnProjects = ""; drawnDesign = ""; designSeen = null;
     await refreshLive();
   } catch (error) { alert(error.message); }
   finally { updateRunButtons(); }
@@ -549,16 +663,15 @@ function updateRunButtons() {
   document.querySelector("#import").disabled = importing || !reachable || running || switching;
 }
 
-// やり直せるのは緑でないステップ。選んだものは5秒ごとの更新で変えない。
-// まだ選んでいなければ、作業中のステップを選ぶ。
+// やり直せるのは緑でないモジュール。選んだものは5秒ごとの更新で変えない。
+// まだ選んでいなければ、作業中のモジュールを選ぶ。
 function renderResetSteps(steps) {
   const select = document.querySelector("#reset-step"), chosen = select.value;
   const open = steps.filter(step => step.state !== "green");
   const key = JSON.stringify(open.map(step => step.id));
   if (select.dataset.key === key) return;
   select.dataset.key = key;
-  const short = goal => (goal || "").length > 40 ? `${goal.slice(0, 40)}…` : goal || "";
-  select.replaceChildren(...open.map(step => new Option(`${step.id}: ${short(step.goal)}`, step.id)));
+  select.replaceChildren(...open.map(step => new Option(step.id, step.id)));
   const active = open.find(step => step.state === "active");
   if (open.some(step => step.id === chosen)) select.value = chosen;
   else if (active) select.value = active.id;
@@ -611,7 +724,7 @@ function renderProjects(projects, error) {
       remove.className = "danger";
       remove.disabled = liveState.running || liveState.switching;
       remove.onclick = () => {
-        const typed = prompt(`'${project.name}' を箱からディレクトリごと消します。退避中の作業ツリー、計画、走行ログも消え、戻せません。` +
+        const typed = prompt(`'${project.name}' を箱からディレクトリごと消します。退避中の作業ツリー、設計、走行ログも消え、戻せません。` +
                              "ホストのクローンは残ります。\n消すなら名前を打ってください。");
         if (typed === null) return;
         if (typed.trim() !== project.name) { alert("名前が違うので、消しませんでした"); return; }
@@ -674,12 +787,12 @@ function modelRow(role, current, efforts) {
 }
 
 async function startRun(element) {
-  const file = document.querySelector("#requirements").files[0];
-  if (!file) { alert("要件のファイルを選んでください。"); return; }
+  const file = document.querySelector("#spec").files[0];
+  if (!file) { alert("仕様書のファイルを選んでください。"); return; }
   const language = document.querySelector("#language").value;
   const framework = document.querySelector("#framework").value;
-  await act(element, "/api/start", {requirements: await file.text(), language, framework},
-    `${file.name} を要件にして、${language}${framework ? `（${framework}）` : ""} で計画づくりから走らせます。よいですか？`);
+  await act(element, "/api/start", {spec: await file.text(), language, framework},
+    `${file.name} を仕様書にして、${language}${framework ? `（${framework}）` : ""} で基本設計から始めます。よいですか？`);
 }
 
 let pullTimer = null;
@@ -688,6 +801,8 @@ function renderPull(value) {
   const state = document.querySelector("#pull-state"), log = document.querySelector("#pull-log");
   const button = document.querySelector("#pull");
   button.disabled = Boolean(value.running);
+  // 写しが動いている間に下書きを出すと、どの版を出したかが定まらない。
+  document.querySelector("#draft-pr").disabled = Boolean(value.running);
   log.hidden = !value.output?.length;
   log.textContent = (value.output || []).join("\n");
   state.textContent = value.error || (value.running ? "更新中"
@@ -701,6 +816,33 @@ async function watchPull() {
   renderPull(value);
   if (value.running) pullTimer = setTimeout(watchPull, 2000);
   else if (value.finished) await refresh();
+}
+
+// 下書きの PR を出した結果。記録には残らないので、この画面にだけ出す。
+function renderDraft(value) {
+  const box = document.querySelector("#draft-result"); box.replaceChildren(); box.className = "live";
+  box.hidden = false;
+  document.querySelector("#draft-state").textContent = "";
+  if (value.error) {
+    box.classList.add("error");
+    box.append(text("strong", "下書きの PR を出せませんでした"), text("p", value.error, "why"));
+    return;
+  }
+  const link = document.createElement("a");
+  link.href = value.url; link.textContent = value.url; link.target = "_blank"; link.rel = "noopener";
+  box.append(text("strong", `${value.head} → ${value.base}（${value.created ? "作成" : "更新"}）`), link,
+             text("p", `緑: ${value.green.join(", ")} / 残り: ${value.remaining.join(", ")}`, "why"));
+  if (value.behind) box.append(text("p", "箱が写しより先に進んでいます。写しを更新してから出し直してください。", "why"));
+  else if (value.behind === null) box.append(text("p", "箱に届かず、写しが箱の先かを確かめられませんでした。", "why"));
+}
+
+async function sendDraft(element) {
+  if (!confirm("写しで最後に緑になったモジュールまでを、下書きの PR として GitHub に出します。よいですか？")) return;
+  element.disabled = true;
+  document.querySelector("#draft-state").textContent = "出しています";
+  try { renderDraft(await api("/api/draft-pull-request", {method: "POST", body: "{}"})); }
+  catch (error) { renderDraft({error: error.message}); }
+  finally { element.disabled = false; }
 }
 
 let importTimer = null, importing = false;
@@ -767,7 +909,7 @@ function setupControl() {
     for (const element of document.querySelectorAll(".local-only")) element.hidden = true;
     const note = document.querySelector("#control-note");
     note.hidden = false;
-    note.textContent = "リモートからは停止、続行、ステップのやり直しだけができます。開始、プロジェクトの切り替え、モデルの変更、写しの更新、取り込みはこの機械の前で。";
+    note.textContent = "リモートからは停止、続行、モジュールのやり直し、設計の承認と差し戻しができます。開始、最終確認の承認、プロジェクトの切り替え、モデルの変更、写しの更新、下書きの PR、取り込みはこの機械の前で。";
   }
   // リモートで隠した「ホストの写し」と「取り込み」のタブを選ばないよう、隠したあとで開く。
   setupTabs();
@@ -777,12 +919,12 @@ function setupControl() {
   const resume = document.querySelector("#continue-run");
   resume.onclick = () => act(resume, "/api/continue", {}, "止まったところから続けます。よいですか？");
   const stop = document.querySelector("#stop-run");
-  stop.onclick = () => act(stop, "/api/stop", {}, "走行を止めます。途中のステップはそのまま残ります。よいですか？");
+  stop.onclick = () => act(stop, "/api/stop", {}, "走行を止めます。途中のモジュールはそのまま残ります。よいですか？");
   const reset = document.querySelector("#reset-run");
   reset.onclick = () => {
-    const step = document.querySelector("#reset-step").value;
-    act(reset, "/api/reset", {step},
-      `${step} を最後の緑まで戻します。${step} のコミットしていない作業は消えます。よいですか？`);
+    const module = document.querySelector("#reset-step").value;
+    act(reset, "/api/reset", {module},
+      `${module} を最後のコミットまで戻します。${module} のコミットしていない作業は消えます。よいですか？`);
   };
   const pull = document.querySelector("#pull");
   pull.onclick = async () => {
@@ -790,6 +932,8 @@ function setupControl() {
     try { renderPull(await api("/api/pull", {method: "POST", body: "{}"})); watchPull(); }
     catch (error) { alert(error.message); pull.disabled = false; }
   };
+  const draft = document.querySelector("#draft-pr");
+  draft.onclick = () => sendDraft(draft);
   const doImport = document.querySelector("#import");
   doImport.onclick = () => startImport(doImport);
   updateRunButtons();

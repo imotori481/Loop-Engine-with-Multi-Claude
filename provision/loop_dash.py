@@ -8,9 +8,13 @@
 同じファイルにある資格情報は読み出さず、書き換えもしない。起動スクリプトはこのファイルを
 シェルで読み込むので、書く値は使える文字を絞ってから書く。
 
+設計（段、基本設計、詳細設計、受け入れ条件、インターフェースチェック、批評、止まった
+理由）は読むだけで返す。plan/、docs/、ac/ は runner だけが読めるので、root のここで読む。
+
     python3 loop_dash.py request <作業ディレクトリ>   # 標準入力に要求の JSON
     python3 loop_dash.py settings <ディレクトリ>
     python3 loop_dash.py set-model <ディレクトリ> <役> <モデル> <effort>
+    python3 loop_dash.py design <作業ツリー>
 """
 
 from __future__ import annotations
@@ -35,11 +39,10 @@ PROJECT = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}")
 # 取り込むブランチ。行にもオプションにもならない文字だけを通す。git の規則
 # （check-ref-format）は loop-project.sh の init が確かめる。
 BRANCH = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,199}")
-# やり直すステップの ID。ランナーは凍結のマニフェストのファイル名に使うので、/ は通さない。
-STEP = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
-MAX_REQUIREMENTS = 200_000
-# エスカレーションへの答え。ダッシュボードの欄は 4000 字までだが、箱の側でも絞る。
-MAX_ANSWER = 20_000
+# 仕様書の本文。
+MAX_SPEC = 200_000
+# 差し戻しのコメント。ダッシュボードの欄は 4000 字までだが、箱の側でも絞る。
+MAX_COMMENT = 20_000
 KEYS = {"model": "LOOP_MODEL", "effort": "LOOP_EFFORT"}
 
 
@@ -77,9 +80,10 @@ def check_branch(value: object) -> str:
     return value
 
 
-def check_step(value: object) -> str:
-    if not isinstance(value, str) or not STEP.fullmatch(value):
-        raise Refused(f"ステップの ID に使えない: {value!r}")
+def check_module(value: object) -> str:
+    """モジュールの id。src/ の下のパスから拡張子を落としたもの（loop.MODULE_ID）。"""
+    if not isinstance(value, str) or len(value) > 200 or not loop.MODULE_ID.fullmatch(value):
+        raise Refused(f"モジュールの id に使えない: {value!r}")
     return value
 
 
@@ -95,11 +99,11 @@ def check_fence(src: object, tests: object) -> tuple[str, str]:
 
 
 def parse(request: object, work: str) -> list[str]:
-    """要求を確かめ、`loop` に返す行を作る。要件の本文だけは作業ディレクトリに書く。"""
+    """要求を確かめ、`loop` に返す行を作る。仕様書とコメントの本文は作業ディレクトリに書く。"""
     if not isinstance(request, dict):
         raise Refused("JSON のオブジェクトを渡す")
     action = request.get("action")
-    if action in ("settings", "continue", "stop"):
+    if action in ("settings", "design", "continue", "stop", "approve"):
         return [action]
     if action == "model":
         return ["model", check_role(request.get("role")), check_model(request.get("model")),
@@ -107,14 +111,19 @@ def parse(request: object, work: str) -> list[str]:
     if action in ("use", "remove"):
         return [action, check_project(request.get("project"))]
     if action == "reset":
-        return ["reset", check_step(request.get("step"))]
+        return ["reset", check_module(request.get("module"))]
+    if action == "reopen":
+        modules = request.get("modules")
+        if not isinstance(modules, list) or not modules:
+            raise Refused("中段に戻すモジュールを1つ以上選ぶ")
+        return ["reopen", *(check_module(m) for m in modules)]
     if action == "init":
         # ホストの取り込みの3つ目の手順。空の bare を用意し、push を待つ。
         src, tests = check_fence(request.get("src", ""), request.get("tests", ""))
         return ["init", check_project(request.get("project")),
                 check_branch(request.get("branch")), src, tests]
     if action == "go":
-        language, text = request.get("language"), request.get("requirements")
+        language, text = request.get("language"), request.get("spec")
         framework = request.get("framework", "")
         if language not in loop.LANGUAGES:
             raise Refused(f"知らない言語: {language!r}")
@@ -124,22 +133,22 @@ def parse(request: object, work: str) -> list[str]:
         if framework not in loop.FRAMEWORKS[language]:
             raise Refused(f"{language} の持ち込む先に無い: {framework!r}")
         if not isinstance(text, str) or not text.strip():
-            raise Refused("要件が空")
-        if len(text) > MAX_REQUIREMENTS:
-            raise Refused(f"要件が長すぎる。{MAX_REQUIREMENTS} 字まで")
-        with open(os.path.join(work, "requirements.md"), "w", encoding="utf-8") as handle:
+            raise Refused("仕様書が空")
+        if len(text) > MAX_SPEC:
+            raise Refused(f"仕様書が長すぎる。{MAX_SPEC} 字まで")
+        with open(os.path.join(work, "spec.md"), "w", encoding="utf-8") as handle:
             handle.write(text)
         return ["go", language, framework]
-    if action == "answer":
-        # 答えの本文も要件と同じく作業ディレクトリに書き、行には載せない。
+    if action == "reject":
+        # コメントの本文も仕様書と同じく作業ディレクトリに書き、行には載せない。
         text = request.get("text")
         if not isinstance(text, str) or not text.strip():
-            raise Refused("答えが空")
-        if len(text) > MAX_ANSWER:
-            raise Refused(f"答えが長すぎる。{MAX_ANSWER} 字まで")
-        with open(os.path.join(work, "answer.md"), "w", encoding="utf-8") as handle:
+            raise Refused("コメントが空")
+        if len(text) > MAX_COMMENT:
+            raise Refused(f"コメントが長すぎる。{MAX_COMMENT} 字まで")
+        with open(os.path.join(work, "comment.md"), "w", encoding="utf-8") as handle:
             handle.write(text.strip() + "\n")
-        return ["answer"]
+        return ["reject"]
     raise Refused(f"知らない操作: {action!r}")
 
 
@@ -174,6 +183,51 @@ def settings(directory: str) -> dict:
                   for language in loop.LANGUAGES}
     return {"roles": roles, "efforts": list(EFFORTS), "languages": sorted(loop.LANGUAGES),
             "frameworks": frameworks}
+
+
+def read_tree(root: str, suffix: str) -> dict[str, str]:
+    """root の下の suffix のファイルを、root からのパスから suffix を落とした名前で読む。"""
+    found = {}
+    for directory, _, names in os.walk(root):
+        for name in sorted(names):
+            if not name.endswith(suffix):
+                continue
+            path = os.path.join(directory, name)
+            key = os.path.relpath(path, root)[:-len(suffix)].replace(os.sep, "/")
+            with open(path, encoding="utf-8", errors="replace") as handle:
+                found[key] = handle.read()
+    return dict(sorted(found.items()))
+
+
+def read_json_file(path: str) -> object:
+    try:
+        with open(path, encoding="utf-8") as handle:
+            return json.load(handle)
+    except (OSError, ValueError):
+        return None
+
+
+def design(project: str) -> dict:
+    """人がせきで読むもの。受け入れ条件は読めない JSON なら本文のまま返す。"""
+    plan = os.path.join(project, "plan")
+    acs = {}
+    for key, text in read_tree(os.path.join(project, "ac"), ".json").items():
+        try:
+            acs[key] = json.loads(text)
+        except ValueError:
+            acs[key] = text
+    try:
+        with open(os.path.join(plan, "FAILURE.md"), encoding="utf-8", errors="replace") as handle:
+            failure = handle.read()
+    except OSError:
+        failure = None
+    return {"stage": read_json_file(os.path.join(plan, "stage.json")) or {},
+            "basic": read_tree(os.path.join(project, "docs", "basic"), ".md"),
+            "modules": read_tree(os.path.join(project, "docs", "modules"), ".md"),
+            "ac": acs,
+            "interface": read_json_file(os.path.join(plan, "INTERFACE.json")),
+            "critique": read_json_file(os.path.join(plan, "CRITIQUE.json")),
+            "failure": failure}
 
 
 def set_model(directory: str, role: str, model: str, effort: str) -> None:
@@ -222,6 +276,9 @@ def main(argv: list[str]) -> int:
         if len(argv) == 3 and argv[1] == "settings":
             print(json.dumps(settings(argv[2]), ensure_ascii=False))
             return 0
+        if len(argv) == 3 and argv[1] == "design":
+            print(json.dumps(design(argv[2]), ensure_ascii=False))
+            return 0
         if len(argv) == 6 and argv[1] == "set-model":
             set_model(*argv[2:6])
             print(f"{argv[3]} の設定を書き換えた。次の呼び出しから効く")
@@ -232,7 +289,8 @@ def main(argv: list[str]) -> int:
     except OSError as error:
         print(f"loop dash: {error}", file=sys.stderr)
         return 1
-    print("使い方: loop_dash.py request <dir> | settings <dir> | set-model <dir> <役> <モデル> <effort>",
+    print("使い方: loop_dash.py request <dir> | settings <dir> | design <dir>"
+          " | set-model <dir> <役> <モデル> <effort>",
           file=sys.stderr)
     return 2
 

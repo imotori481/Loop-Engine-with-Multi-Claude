@@ -1,7 +1,7 @@
 """書き込みの柵の場所をプロジェクトごとに決める。
 
 Unity のプロジェクトはコードを Assets/ の下に置く。柵が src/ と tests/ 固定だと、
-L12 で計画がすべて拒まれる。場所は /srv/loop/layout.json（root 所有）から読み、
+どのモジュールも Unity の外に書かれる。場所は /srv/loop/layout.json（root 所有）から読み、
 規則は layout_problems にしか書かない。loop-project.sh とプロビジョニングも、
 これを import して同じ規則で確かめる。
 
@@ -34,7 +34,7 @@ class WhatALayoutMayBe(unittest.TestCase):
                 self.assertNotEqual(loop.layout_problems({"src": bad, "tests": "tests"}), [])
 
     def test_a_place_the_runner_owns_is_refused(self):
-        for bad in ("plan", ".git/x", ".runner", ".venv/lib", "node_modules/x"):
+        for bad in ("plan", ".git/x", ".runner", ".venv/lib", "node_modules/x", "docs/src", "ac"):
             with self.subTest(src=bad):
                 self.assertNotEqual(loop.layout_problems({"src": bad, "tests": "tests"}), [])
 
@@ -95,38 +95,25 @@ class TheRulesFollowTheLayout(unittest.TestCase):
         self.assertFalse(loop.in_layout("Assets/Source/../Plugins/x.cs", "src"))
         self.assertFalse(loop.in_layout("src/a.py", "src"))
 
-    def test_l12_uses_the_layout(self):
-        steps = [{
-            "id": "S1", "kind": "skeleton", "goal": "g", "depends_on": [],
-            "contracts": {"requires": [], "provides": ["def f() -> int -- defined in game.board"],
-                          "invariants": []},
-            "acceptance": [{"case": c, "given": "g", "then": "1"}
-                           for c in ("normal", "boundary", "error")],
-            "files_write": ["src/game/board.py"], "files_test": ["tests/test_board.py"],
-            "expected_tests": 3, "max_attempts": 3, "review_gate": False,
-        }]
+    def test_a_module_s_files_are_inside_the_layout(self):
         with mock.patch.dict(loop.LANGUAGE, loop.LANGUAGES["python"], clear=True):
-            problems = loop.validate_plan({"steps": steps})
-            self.assertIn("L12: step S1 writes src/game/board.py, which is outside "
-                          "Assets/Source/", problems)
-            self.assertIn("L12: step S1 tests tests/test_board.py, which is outside "
-                          "Assets/Tests/Editor/Loop/", problems)
-            steps[0]["files_write"] = ["Assets/Source/game/board.py"]
-            steps[0]["files_test"] = ["Assets/Tests/Editor/Loop/test_board.py"]
-            self.assertEqual([p for p in loop.validate_plan({"steps": steps})
-                              if p.startswith("L12")], [])
+            self.assertEqual(loop.module_files("game/board"), ["Assets/Source/game/board.py"])
+            self.assertEqual(loop.module_test_files("game/board", True), [
+                "Assets/Tests/Editor/Loop/test_game_board.py",
+                "Assets/Tests/Editor/Loop/test_game_board_integration.py"])
 
     def test_modules_are_named_from_inside_the_source_directory(self):
         with mock.patch.dict(loop.LANGUAGE, loop.LANGUAGES["python"], clear=True):
             self.assertEqual(loop.modules_of(["Assets/Source/game/board.py"]), ["game.board"])
 
-    def test_the_planner_is_told_where_the_code_goes(self):
+    def brief(self) -> str:
         with mock.patch.dict(loop.LANGUAGE, loop.LANGUAGES["typescript"], clear=True), \
              mock.patch.object(loop, "environment_facts", return_value=""):
-            brief = loop.brief_plan_bootstrap("requirements")
-        self.assertIn("Every path in `files_write` starts with `Assets/Source/`", brief)
-        self.assertIn("L12  files_write is under Assets/Source/, files_test is under "
-                      "Assets/Tests/Editor/Loop/", brief)
+            return loop.brief_modules("仕様", "基本", None, "")
+
+    def test_the_planner_is_told_where_the_code_goes(self):
+        brief = self.brief()
+        self.assertIn("`Assets/Source/logic/board.ts`\n  is `modules/logic/board.md`", brief)
         # テストから見たコードへの相対パスも、柵の場所から出す。
         self.assertIn('from "../../../Source/idlegame/models.ts"', brief)
         self.assertIn('import { start } from "/Assets/Source/main.ts"', brief)
@@ -134,12 +121,10 @@ class TheRulesFollowTheLayout(unittest.TestCase):
         self.assertNotIn("{TESTS}", brief)
 
     def test_the_default_brief_reads_as_it_did(self):
-        with mock.patch.dict(loop.LAYOUT, loop.LAYOUT_DEFAULT), \
-             mock.patch.dict(loop.LANGUAGE, loop.LANGUAGES["typescript"], clear=True), \
-             mock.patch.object(loop, "environment_facts", return_value=""):
-            brief = loop.brief_plan_bootstrap("requirements")
+        with mock.patch.dict(loop.LAYOUT, loop.LAYOUT_DEFAULT):
+            brief = self.brief()
         self.assertIn('from "../src/idlegame/models.ts"', brief)
-        self.assertIn("files_write is under src/, files_test is under tests/", brief)
+        self.assertIn("`src/logic/board.ts`", brief)
 
 
 if __name__ == "__main__":

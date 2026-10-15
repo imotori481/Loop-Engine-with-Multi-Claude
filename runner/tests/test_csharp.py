@@ -9,6 +9,7 @@
     python3 -m unittest discover -s runner/tests
 """
 
+import json
 import os
 import sys
 import tempfile
@@ -24,6 +25,17 @@ import loop  # noqa: E402
 
 FEED_VERSIONS = ("NUnit=3.14.0 NUnit3TestAdapter=4.6.0 Microsoft.NET.Test.Sdk=17.11.1 "
                  "JunitXml.TestLogger=4.1.0")
+
+
+AC = json.dumps({"criteria": [{"case": c, "kind": "unit", "given": "g", "then": "1"}
+                                for c in ("normal", "boundary", "error")]})
+
+
+def module_doc(*lines: dict) -> str:
+    """契約の行を持つ、詳細設計仕様書の最小の形。"""
+    contract = "\n".join(json.dumps(line, ensure_ascii=False) for line in lines)
+    return (f"# モジュール\n\n## 振る舞い\n盤面を数える。\n\n"
+            f"## 契約\n```ndjson contract\n{contract}\n```\n")
 
 
 class CSharp(unittest.TestCase):
@@ -224,39 +236,28 @@ class TheContracts(CSharp):
     def test_modules_are_paths_under_the_source_directory(self):
         self.assertEqual(loop.modules_of(["src/Logic/Board.cs"]), ["Logic/Board"])
 
-    def plan(self, provides):
-        step = {
-            "id": "S1", "kind": "skeleton", "goal": "g", "depends_on": [],
-            "contracts": {"requires": [], "provides": provides, "invariants": []},
-            "acceptance": [{"case": c, "given": "g", "then": "1"}
-                           for c in ("normal", "boundary", "error")],
-            "files_write": ["src/Logic/Board.cs"], "files_test": ["tests/BoardTests.cs"],
-            "expected_tests": 3, "max_attempts": 3, "review_gate": False,
-        }
+    def design(self, sig: str, mid: str = "Logic/Board") -> list[str]:
         with mock.patch.dict(loop.LAYOUT, loop.LAYOUT_DEFAULT):
-            return loop.validate_plan({"language": "csharp", "steps": [step]})
+            _, problems = loop.design_problems(
+                {mid: module_doc({"provides": sig, "entry": True})}, {mid: AC})
+        return problems
 
     def test_a_bare_collection_is_refused_and_a_shaped_one_is_not(self):
-        bare = self.plan(["src/Logic/Board.cs: static List Board.Cells(Board board)"])
-        self.assertTrue(any(p.startswith("L14") and "List" in p for p in bare), bare)
-        shaped = self.plan(["src/Logic/Board.cs: static List<int> Board.Cells(Board board)"])
-        self.assertFalse(any(p.startswith("L14") for p in shaped), shaped)
+        bare = self.design("static List Board.Cells(Board board)")
+        self.assertTrue(any(p.startswith("形") and "List" in p for p in bare), bare)
+        shaped = self.design("static List<int> Board.Cells(Board board)")
+        self.assertFalse(any(p.startswith("形") for p in shaped), shaped)
 
     def test_a_folder_in_the_path_is_not_read_as_a_type(self):
-        with mock.patch.dict(loop.LAYOUT, loop.LAYOUT_DEFAULT):
-            problems = loop.validate_plan({"language": "csharp", "steps": [{
-                "id": "S1", "kind": "skeleton", "goal": "g", "depends_on": [],
-                "contracts": {"requires": [], "invariants": [],
-                              "provides": ["src/List/Board.cs: static int Board.Score(Board b)"]},
-                "acceptance": [{"case": c, "given": "g", "then": "1"}
-                               for c in ("normal", "boundary", "error")],
-                "files_write": ["src/List/Board.cs"], "files_test": ["tests/BoardTests.cs"],
-                "expected_tests": 3, "max_attempts": 3, "review_gate": False}]})
-        self.assertFalse(any(p.startswith("L14") for p in problems), problems)
+        problems = self.design("static int Board.Score(Board b)", mid="List/Board")
+        self.assertFalse(any(p.startswith("形") for p in problems), problems)
 
-    def test_the_path_at_the_front_says_where_it_lives(self):
-        problems = self.plan(["src/Logic/Board.cs: static int Board.Score(Board board)"])
-        self.assertFalse(any(p.startswith("L15") for p in problems), problems)
+    def test_the_solver_is_told_which_file_the_line_lives_in(self):
+        with mock.patch.dict(loop.LAYOUT, loop.LAYOUT_DEFAULT):
+            self.assertEqual(
+                loop.legacy_line("static int Board.Score(Board board)",
+                                 loop.module_files("Logic/Board")),
+                "src/Logic/Board.cs: static int Board.Score(Board board)")
 
 
 class TheRunnerWritesTheStub(CSharp):
@@ -342,6 +343,58 @@ namespace Logic
                 unity = loop.generate_stub(step, [], {})["src/Logic/Mover.cs"]
         self.assertNotIn("UnityEngine", plain)
         self.assertIn("using UnityEngine;\n", unity)
+
+    def library(self, step, requires=(), originals=None):
+        """Promete の参照を置いて、スタブを書く。"""
+        with tempfile.TemporaryDirectory() as t:
+            (Path(t) / "promete").mkdir()
+            (Path(t) / "promete" / "MEMBERS.txt").write_text("", encoding="utf-8")
+            (Path(t) / "promete" / "TYPES.txt").write_text(
+                "Promete.Scene  シーン\nPromete.Input.Mouse  マウス\n"
+                "Promete.Nodes.Container`1  入れ物\nPromete.Input.Mouse.Button  入れ子\n"
+                "Promete.Board  同じ名前\n", encoding="utf-8")
+            with mock.patch.object(loop, "REFS", Path(t)), \
+                    mock.patch.dict(loop.LANGUAGE, {"refs": "promete"}):
+                return loop.generate_stub(step, list(requires), originals or {})
+
+    def test_a_library_type_a_signature_names_is_brought_in_by_its_namespace(self):
+        # Promete の Scene と Mouse を口にする MenuScene が、using 無しで書かれ、
+        # ビルドが CS0246 で落ちていた。
+        step = {"files_write": ["src/Scenes/MenuScene.cs"], "contracts": {"provides": [
+            "src/Scenes/MenuScene.cs: class MenuScene : Scene",
+            "src/Scenes/MenuScene.cs: MenuScene.MenuScene(Mouse mouse)",
+            "src/Scenes/MenuScene.cs: override void MenuScene.OnStart()"]}}
+        text = self.library(step)["src/Scenes/MenuScene.cs"]
+        self.assertIn("using Promete;\nusing Promete.Input;\n", text)
+        self.assertNotIn("Promete.Nodes", text)
+
+    def test_a_primary_constructor_is_kept_in_the_type_head(self):
+        # Promete のシーンの書き方（layout_note）。読めずにソルバーに回していた。
+        step = {"files_write": ["src/Scenes/MenuScene.cs"], "contracts": {"provides": [
+            "src/Scenes/MenuScene.cs: class MenuScene(Mouse mouse) : Scene",
+            "src/Scenes/MenuScene.cs: override void MenuScene.OnUpdate()"]}}
+        text = self.library(step)["src/Scenes/MenuScene.cs"]
+        self.assertIn("    public class MenuScene(Mouse mouse) : Scene\n", text)
+        self.assertIn("using Promete;\nusing Promete.Input;\n", text)
+
+    def test_a_library_name_the_project_also_declares_is_the_projects(self):
+        step = {"files_write": ["src/Rules/Scorer.cs"],
+                "contracts": {"provides": ["src/Rules/Scorer.cs: static int Scorer.Total(Board board)"]}}
+        text = self.library(step, ["src/Logic/Board.cs: class Board { }"])["src/Rules/Scorer.cs"]
+        self.assertIn("using Logic;\n", text)
+        self.assertNotIn("using Promete;", text)
+
+    def test_a_nested_or_generic_library_type_is_not_a_namespace(self):
+        with tempfile.TemporaryDirectory() as t:
+            (Path(t) / "promete").mkdir()
+            (Path(t) / "promete" / "MEMBERS.txt").write_text("", encoding="utf-8")
+            (Path(t) / "promete" / "TYPES.txt").write_text(
+                "Promete.Input.Mouse  マウス\nPromete.Input.Mouse.Button  入れ子\n"
+                "Promete.Nodes.Container`1  入れ物\n", encoding="utf-8")
+            with mock.patch.object(loop, "REFS", Path(t)), \
+                    mock.patch.dict(loop.LANGUAGE, {"refs": "promete"}):
+                self.assertEqual(loop.library_namespaces(),
+                                 {"Mouse": "Promete.Input", "Container": "Promete.Nodes"})
 
     def test_what_it_cannot_read_goes_back_to_the_solver(self):
         for provides in (["src/Logic/Board.cs: something in prose"],
@@ -510,9 +563,9 @@ class WhatTheCodeAlreadyDeclares(CSharp):
 
 
 class ThePlannerIsGivenShortLines(CSharp):
-    """bootstrap のブリーフでは、メンバーの行から引数と戻り値の型を外す。
+    """プランナーのブリーフでは、メンバーの行から引数と戻り値の型を外す。
 
-    取り込んだ Unity のプロジェクトでは、bootstrap の呼び出しが1回約11万の
+    取り込んだ Unity のプロジェクトでは、計画を書く呼び出しが1回約11万の
     キャッシュ書き込みを抱えて7〜12ターン回った。requires の行は名前で比べ、
     ソルバーには HEAD の署名を渡すので、プランナーに型は要らない。
     """
@@ -563,28 +616,31 @@ class ThePlannerIsGivenShortLines(CSharp):
                 self.assertEqual(loop.declared_name(loop.csharp_short_declaration(line)),
                                  loop.declared_name(line))
 
-    def plan(self, requires):
-        step = {
-            "id": "S1", "kind": "skeleton", "goal": "g", "depends_on": [],
-            "contracts": {"requires": requires, "invariants": [],
-                          "provides": ["src/Logic/Deck.cs: static int Deck.Total(Board board)"]},
-            "acceptance": [{"case": c, "given": "g", "then": "1"}
-                           for c in ("normal", "boundary", "error")],
-            "files_write": ["src/Logic/Deck.cs"], "files_test": ["tests/DeckTests.cs"],
-            "expected_tests": 3, "max_attempts": 3, "review_gate": False,
-        }
+    def design(self, requires: list[str]) -> tuple[dict, list[str]]:
+        """既存の Board を使う Deck の設計。(下流のステップ, 問題) を返す。"""
+        doc = module_doc({"provides": "static int Deck.Total(Board board)", "entry": True},
+                         *({"requires": r, "from": "Logic/Board"} for r in requires))
         with mock.patch.dict(loop.LAYOUT, loop.LAYOUT_DEFAULT), \
-             mock.patch.object(loop, "existing_contracts", return_value=self.full):
-            return step, loop.validate_plan({"language": "csharp", "steps": [step]})
+             mock.patch.object(loop, "head_files", return_value={self.PATH}), \
+             mock.patch.object(loop, "existing_declarations",
+                               return_value={self.PATH: self.full}), \
+             mock.patch.object(loop, "basic_overview", return_value=""):
+            modules, problems = loop.design_problems({"Logic/Deck": doc}, {"Logic/Deck": AC})
+            problems += loop.interface_problems(modules)
+            tasks = loop.build_tasks(modules, {"language": "csharp"})
+        return tasks["steps"][0], problems
 
-    def test_a_short_line_copied_into_requires_passes_l3(self):
-        short = [loop.csharp_short_declaration(line) for line in self.full
-                 if loop.declared_name(line) in ("Board", "Board.Score")]
-        _, problems = self.plan(short)
-        self.assertFalse(any(p.startswith("L3") for p in problems), problems)
+    def test_a_short_line_copied_into_requires_is_found(self):
+        _, problems = self.design(["class Board", "static Board.Score(board)"])
+        self.assertEqual(problems, [])
+
+    def test_a_name_the_code_does_not_declare_is_refused(self):
+        _, problems = self.design(["static Board.Missing(board)"])
+        self.assertTrue(any(p.startswith("存在") and "Board.Missing" in p for p in problems),
+                        problems)
 
     def test_the_solver_still_gets_the_signature_from_head(self):
-        step, _ = self.plan([f"{self.PATH}: static Board.Score(board) -- namespace Game.Logic"])
+        step, _ = self.design(["static Board.Score(board)"])
         with mock.patch.object(loop, "existing_contracts", return_value=self.full):
             self.assertEqual(loop.existing_requirements(step, set()),
                              [f"{self.PATH}: static int Board.Score(Board board) -- namespace Game.Logic"])
@@ -598,16 +654,18 @@ class ThePlannerIsGivenShortLines(CSharp):
                  returncode=0, stdout="8.0.131", stderr="")):
             return loop.environment_facts(**kwargs)
 
-    def test_only_the_bootstrap_brief_is_short(self):
+    def test_only_the_planner_s_briefs_are_short(self):
         short = self.facts(short=True)
         self.assertIn("static Board.Score(board)", short)
         self.assertIn("without their parameter and return types", short)
         full = self.facts()
         self.assertIn("static int Board.Score(Board board)", full)
         self.assertNotIn("without their parameter and return types", full)
-        with mock.patch.object(loop, "environment_facts", return_value="") as facts:
-            loop.brief_plan_bootstrap("要件")
-        facts.assert_called_once_with(short=True)
+        for brief in (lambda: loop.brief_basic("仕様", ""),
+                      lambda: loop.brief_modules("仕様", "基本", None, "")):
+            with mock.patch.object(loop, "environment_facts", return_value="") as facts:
+                brief()
+            facts.assert_called_once_with(short=True)
 
 
 class TheStubKeepsTheExistingCSharp(CSharp):
@@ -799,12 +857,13 @@ class WhatThePlannerIsTold(CSharp):
         self.assertNotIn("SecurityException", facts)
         self.assertIn("User interface: none", facts)
 
-    def test_only_the_root_and_the_fence_are_listed(self):
-        # Unity の Assets/ を全部並べると、ブリーフが数万トークンになる。
+    def test_only_the_root_and_the_code_are_listed(self):
+        # Unity の Assets/ を全部並べると、ブリーフが数万トークンになる。テストは
+        # プランナーに見せない。
         with tempfile.TemporaryDirectory() as t:
             facts = self.facts(True, self.unity_project(Path(t)))
         self.assertIn("  Assets/Source/Logic/Board.cs\n", facts)
-        self.assertIn("  Assets/Tests/BoardTests.cs\n", facts)
+        self.assertNotIn("BoardTests.cs", facts)
         self.assertIn("  ProjectSettings/\n", facts)
         self.assertNotIn("cell.png", facts)
         self.assertNotIn(".meta", facts)
@@ -813,9 +872,10 @@ class WhatThePlannerIsTold(CSharp):
     def test_the_layout_note_is_c_sharp_s(self):
         with mock.patch.dict(loop.LAYOUT, {"src": "Assets/Source", "tests": "Assets/Tests"}), \
              mock.patch.object(loop, "environment_facts", return_value=""):
-            brief = loop.brief_plan_bootstrap("requirements")
+            brief = loop.brief_modules("仕様", "基本", None, "")
         self.assertIn("C# 9 is the ceiling", brief)
-        self.assertIn("Assets/Source/Logic/Board.cs: static int Board.Score(Board board)", brief)
+        self.assertIn("`Assets/Source/Logic/Board.cs`", brief)
+        self.assertIn('{"provides": "static int Board.Score(Board board)"}', brief)
         self.assertIn("class Board { public int Width; public int Height; }", brief)
         self.assertNotIn("{SRC}", brief)
 

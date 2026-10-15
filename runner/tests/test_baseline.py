@@ -1,8 +1,8 @@
 """最初のステップの前に、リポジトリにすでにあるテストが緑か。
 
 VERIFY はスイート全体の緑を求める。取り込んだ時点で落ちているテストがあると、
-どのステップも緑にならず、それは実装の失敗に見える。ソルバーは試行を使い切り、
-エスカレーションはプランナーに届く。どちらも直せない。
+どのモジュールも緑にならず、それは実装の失敗に見える。ソルバーは試行を使い切り、
+モジュールは中段に差し戻される。ソルバーにも設計にも直せない。
 
     python3 -m unittest discover -s runner/tests
 """
@@ -73,7 +73,7 @@ class TheSuiteBeforeTheFirstStep(unittest.TestCase):
         with self.assertRaises(loop.Halt) as caught:
             self.check(FAILED)
         self.assertEqual(caught.exception.phase, "PLAN_LOAD")
-        self.assertIn("not green before the first step", caught.exception.reason)
+        self.assertIn("not green before the first module", caught.exception.reason)
         self.assertIn("1 failed", caught.exception.reason)
         self.assertIn("test_score", caught.exception.detail)
 
@@ -87,26 +87,25 @@ class TheSuiteBeforeTheFirstStep(unittest.TestCase):
 
 
 class WhereRunStepAsks(unittest.TestCase):
-    """run_step が確かめるのは緑のステップが無いときだけで、止めてもエスカレーションしない。"""
+    """run_step が確かめるのは緑のモジュールが無いときだけで、止めても中段に戻さない。"""
 
     STEP = {"id": "S1", "files_write": ["src/a.py"], "files_test": ["tests/test_a.py"]}
 
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        plan = Path(self.temp.name) / "plan"
-        plan.mkdir()
-        (plan / "tasks.json").write_text('{"steps": []}', encoding="utf-8")
-        self.escalate = mock.Mock()
+        tasks = Path(self.temp.name) / "tasks.json"
+        tasks.write_text('{"steps": []}', encoding="utf-8")
+        self.fail_module = mock.Mock()
         self.baseline = mock.Mock(side_effect=loop.Halt("PLAN_LOAD", "not green"))
         for name, value in {
-            "PLAN": plan,
-            "validate_plan": lambda tasks: [],
+            "TASKS": tasks,
             "load_plan": lambda sid: (self.STEP, "context"),
             "ledger": lambda event, **f: None,
             "touched_paths": lambda: set(),
+            "tests_snapshot": lambda: {},
             "check_baseline": self.baseline,
-            "escalate": self.escalate,
+            "fail_module": self.fail_module,
             # ここから先に進んだら、それと分かるように止める。
             "set_writable": mock.Mock(side_effect=RuntimeError("went on to TEST_WRITE")),
         }.items():
@@ -114,12 +113,12 @@ class WhereRunStepAsks(unittest.TestCase):
             p.start()
             self.addCleanup(p.stop)
 
-    def test_the_first_step_is_stopped_without_an_escalation(self):
+    def test_the_first_module_is_stopped_without_going_back_to_the_midstream(self):
         with mock.patch.object(loop, "green_steps", return_value=set()):
             with self.assertRaises(loop.Halt):
                 loop.run_step("S1")
         self.baseline.assert_called_once_with()
-        self.escalate.assert_not_called()
+        self.fail_module.assert_not_called()
 
     def test_once_a_step_is_green_the_suite_is_not_checked_again(self):
         # 緑のステップの後で落ちているテストは、そのステップが壊したものだ。

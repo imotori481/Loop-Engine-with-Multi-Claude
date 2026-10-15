@@ -1,4 +1,4 @@
-"""Loop Engine の運用者向けダッシュボードの HTTP サーバ。
+"""Sleep Walking Alternator の運用者向けダッシュボードの HTTP サーバ。
 
 listen するのは常にループバックだけ。スマホから届かせるには、前に
 `tailscale serve` を置く。これが tailnet から 127.0.0.1 へ中継する。だから
@@ -34,7 +34,7 @@ except ImportError:  # 直接実行したとき: python host/dashboard/server.py
 
 
 STATIC = Path(__file__).with_name("static")
-# 要求の本文の上限。要件の本文を運ぶ /api/start がいちばん大きい。
+# 要求の本文の上限。仕様書の本文を運ぶ /api/start がいちばん大きい。
 MAX_BODY = 1 << 20
 
 
@@ -56,17 +56,16 @@ def send_pull_request(state: DashboardState, pulls: PullRequests | None) -> dict
     return state.record_pull_request(approval["request_id"], outcome)
 
 
-def send_answer(live: Live | None, decision: dict) -> dict:
-    """エスカレーションへの回答を箱に送る。送れたかを返す。
+def send_draft_pull_request(pulls: PullRequests | None) -> dict:
+    """最後に緑になったモジュールまでを下書きの PR にする（loop-pr と同じ）。
 
-    送れなくても記録は取り消さない。人が決めたことは decisions.jsonl に残り、
-    箱に届いたかは別の事実として画面に返す。
+    断られたら理由を返す。下書きは承認ではないので、判断の記録には残さない。
     """
-    if live is None:
-        return {"error": "live view is not configured"}
+    if pulls is None:
+        return {"error": "pull requests are not configured"}
     try:
-        return {"message": live.answer(decision["note"])}
-    except ValueError as error:
+        return pulls.open_draft()
+    except PullRequestError as error:
         return {"error": str(error)}
 
 
@@ -131,11 +130,12 @@ def handler_for(state: DashboardState, launchers: Launchers, reach: Reach, token
                 self._json(live.fetch() if live is not None
                            else {"error": "live view is not configured"})
                 return
-            if path == "/api/settings":
+            if path in ("/api/settings", "/api/design"):
+                # 設計はせきで読むもの。読むだけなので、どこからでもよい。
                 try:
                     if live is None:
                         raise ValueError("live view is not configured")
-                    self._json(live.settings())
+                    self._json(live.settings() if path == "/api/settings" else live.design())
                 except ValueError as error:
                     self._json({"error": str(error)})
                 return
@@ -182,10 +182,6 @@ def handler_for(state: DashboardState, launchers: Launchers, reach: Reach, token
                     # 来た承認はローカルのものだけだ。
                     if result["kind"] == "review" and result["decision"] == "approve":
                         result = {**result, "pull_request": send_pull_request(state, pulls)}
-                    # エスカレーションへの回答は、次の plan propose のブリーフに載る。
-                    if result["kind"] in ("escalation", "planner") \
-                            and result["decision"] == "respond":
-                        result = {**result, "sent": send_answer(live, result)}
                     self._json(result, HTTPStatus.CREATED)
                     return
                 if path == "/api/pull-request":
@@ -195,33 +191,47 @@ def handler_for(state: DashboardState, launchers: Launchers, reach: Reach, token
                             "a pull request can only be sent from the machine itself")
                     self._json(send_pull_request(state, pulls), HTTPStatus.CREATED)
                     return
-                if path == "/api/findings":
-                    # クリティックの指摘の書き換え。人がプランナーに渡す言葉を決める
-                    # ことで、エスカレーションへの回答と同じく、どこからでもよい。
-                    if live is None:
-                        raise ValueError("live view is not configured")
-                    index = body.get("index")
-                    if not isinstance(index, int) or isinstance(index, bool):
-                        raise ValueError("index must be an integer")
-                    message = live.rewrite_finding(
-                        str(body.get("mode", "")), index,
-                        str(body.get("title", "")), str(body.get("evidence", "")))
-                    self._json({"message": message}, HTTPStatus.OK)
+                if path == "/api/draft-pull-request":
+                    # 下書きでも GitHub に書き込む。承認の PR と同じく、この機械の前でだけ。
+                    if scope != LOCAL:
+                        raise ValueError(
+                            "a pull request can only be sent from the machine itself")
+                    self._json(send_draft_pull_request(pulls), HTTPStatus.CREATED)
                     return
-                if path in ("/api/continue", "/api/stop"):
-                    # 続行と停止はどこからでもよい。止まった走行を人が読んだ指摘で続けるのも、
-                    # 走行を止めるのも、スマホから届いてほしい操作だ。
+                if path in ("/api/continue", "/api/stop", "/api/approve"):
+                    # 続行、停止、上流と中段のせきの承認はどこからでもよい。設計は文書で、
+                    # 読むのに画面の前は要らない。最終確認の承認は /api/decision が断る。
                     if live is None:
                         raise ValueError("live view is not configured")
-                    act = live.continue_loop if path == "/api/continue" else live.stop_loop
+                    act = {"/api/continue": live.continue_loop, "/api/stop": live.stop_loop,
+                           "/api/approve": live.approve}[path]
                     self._json({"message": act()}, HTTPStatus.ACCEPTED)
                     return
-                if path == "/api/reset":
-                    # 止まったステップのやり直しも、どこからでもよい。続行の前の一手で、捨てるのは
-                    # そのステップのコミットしていない作業だけだ。
+                if path == "/api/reject":
+                    # コメント付きの差し戻し。どこからでもよい。
                     if live is None:
                         raise ValueError("live view is not configured")
-                    self._json({"message": live.reset_step(str(body.get("step", "")))},
+                    comment = str(body.get("comment", ""))
+                    if not comment.strip():
+                        raise ValueError("a rejection needs a comment")
+                    self._json({"message": live.reject(comment)}, HTTPStatus.ACCEPTED)
+                    return
+                if path == "/api/reopen":
+                    # 直すモジュールを選んで中段に戻す。差し戻しと同じく、どこからでもよい。
+                    if live is None:
+                        raise ValueError("live view is not configured")
+                    modules = body.get("modules")
+                    if not isinstance(modules, list) or not modules \
+                            or not all(isinstance(m, str) for m in modules):
+                        raise ValueError("choose one or more modules")
+                    self._json({"message": live.reopen(modules)}, HTTPStatus.OK)
+                    return
+                if path == "/api/reset":
+                    # 止まったモジュールのやり直しも、どこからでもよい。続行の前の一手で、
+                    # 捨てるのはそのモジュールのコミットしていない作業だけだ。
+                    if live is None:
+                        raise ValueError("live view is not configured")
+                    self._json({"message": live.reset_module(str(body.get("module", "")))},
                                HTTPStatus.OK)
                     return
                 if path in ("/api/start", "/api/project", "/api/project/remove", "/api/model"):
@@ -232,7 +242,7 @@ def handler_for(state: DashboardState, launchers: Launchers, reach: Reach, token
                     if live is None:
                         raise ValueError("live view is not configured")
                     if path == "/api/start":
-                        message = live.start_loop(str(body.get("requirements", "")),
+                        message = live.start_loop(str(body.get("spec", "")),
                                                   str(body.get("language", "")),
                                                   str(body.get("framework", "")))
                     elif path == "/api/project":
@@ -279,7 +289,7 @@ def handler_for(state: DashboardState, launchers: Launchers, reach: Reach, token
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Loop Engine operator dashboard")
+    parser = argparse.ArgumentParser(description="Sleep Walking Alternator operator dashboard")
     parser.add_argument("--project", type=Path, required=True,
                         help="host-side project mirror containing plan/ledger.jsonl")
     parser.add_argument("--mirrors", type=Path, default=None,

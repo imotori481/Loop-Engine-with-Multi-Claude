@@ -49,7 +49,6 @@ class Repository(unittest.TestCase):
         for name, value in {
             "PROJECT": self.root, "TESTS": self.tests, "SRC": self.code.parent,
             "PLAN": plan, "LEDGER": plan / "ledger.jsonl", "STATE": self.root / ".runner",
-            "ESCALATION": plan / "ESCALATION.md",
             "run": lambda cmd, **kw: real_run(cmd, **{**kw, "cwd": self.root}),
             "set_writable": self.writable,
             "ledger": lambda *a, **k: None,

@@ -28,13 +28,16 @@ button:hover { background: #22865d; } button:disabled { opacity: .5; }
 table { width: 100%; border-collapse: collapse; } th, td { text-align: left; padding: 9px; border-bottom: 1px solid #263c34; } td { font-family: Consolas, monospace; font-size: .86rem; }
 .live { display: grid; gap: 8px; } .live strong { font-size: 1.3rem; } .live .badge { justify-self: start; }
 .live.idle strong { color: #9bb7a8; } .live.error strong { color: #f0b37e; }
-#pull-request a { color: #86c9a7; word-break: break-all; } #pull-request button { justify-self: start; }
+#pull-request a, #draft-result a { color: #86c9a7; word-break: break-all; } #pull-request button { justify-self: start; }
 tr.active td { background: #173d30; } td.goal { font-family: inherit; }
 .chart { position: relative; } .plot svg { display: block; width: 100%; height: auto; overflow: visible; }
 .plot .grid { stroke: #263c34; } .plot .axis { fill: #9bb7a8; font-size: 12px; }
 .plot .series { fill: none; stroke-width: 2; stroke-linejoin: round; } .plot .dot { stroke: #101b18; stroke-width: 2; }
 .plot .label { font-size: 12px; font-weight: 700; fill: #edf5ef; } .plot .cross { stroke: #9bb7a8; stroke-dasharray: 3 3; }
 .plot .bar { transition: opacity .15s; } .plot .bar.dim { opacity: .35; }
+.plot.graph svg { width: auto; max-width: 100%; } .graph .edge { stroke: #9bb7a8; } .graph marker path { fill: #9bb7a8; }
+.graph .node rect { fill: #101b18; stroke: #3d5d51; } .graph .node.entry rect { stroke: #86c9a7; stroke-width: 2; }
+.graph .node text { fill: #edf5ef; font-size: 12px; }
 .controls { display: flex; gap: 16px; align-items: center; flex-wrap: wrap; justify-content: flex-end; }
 .toggle { display: inline-flex; border: 1px solid #3d5d51; border-radius: 8px; overflow: hidden; }
 .toggle button { border: 0; border-radius: 0; background: transparent; color: #9bb7a8; padding: 5px 10px; font-weight: 600; font-size: .82rem; }

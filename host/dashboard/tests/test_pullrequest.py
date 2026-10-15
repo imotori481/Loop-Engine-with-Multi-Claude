@@ -53,12 +53,15 @@ class Repositories(unittest.TestCase):
         git(self.clone, "switch", "-q", "--no-track", "-c", "feat", "origin/develop")
         git(self.clone, "config", "branch.feat.loopBase", "develop")
 
-        # 箱の bare。計画と環境のファイルと、作業の成果が載る。
+        # 箱の bare。設計と環境のファイルと、作業の成果が載る。
         box = root / "box"
         git(root, "clone", "-q", "-b", "develop", str(self.origin), str(box))
         git(box, "switch", "-q", "-c", "feat")
         commit_files(box, {".gitignore": "*.tmp\n.venv/\n", "conftest.py": "x\n",
-                           "plan/tasks.json": "{}\n", "src/game.cs": "class Game {}\n"}, "S1")
+                           "plan/stage.json": "{}\n", "docs/spec/spec.md": "# 仕様書\n",
+                           "docs/basic/design.md": "## 概要\n",
+                           "docs/modules/S1.md": "## 振る舞い\n",
+                           "src/game.cs": "class Game {}\n"}, "S1")
         self.bare = root / "box.git"
         git(root, "clone", "-q", "--bare", str(box), str(self.bare))
         git(self.clone, "remote", "add", "loop", str(self.bare))
@@ -72,13 +75,21 @@ class Repositories(unittest.TestCase):
         # Unity が書き換えた未コミットのアセット。
         (self.clone / "a.txt").write_text("edited in Unity\n", encoding="utf-8")
 
+        self.box = box
         self.gh_calls = []
-        self.gh_list = ""
+        # 開いている PR。head のブランチから URL へ。
+        self.gh_open = {}
+        self.gh_draft = "true"
 
     def fake_run(self, argv, **kwargs):
         if argv[0] == "gh":
             self.gh_calls.append(argv)
-            out = self.gh_list if argv[2] == "list" else "https://github.com/o/r/pull/1\n"
+            if argv[2] == "list":
+                out = self.gh_open.get(argv[argv.index("--head") + 1], "")
+            elif argv[2] == "view":
+                out = self.gh_draft
+            else:
+                out = "https://github.com/o/r/pull/1\n"
             return subprocess.CompletedProcess(argv, 0, out, "")
         if argv[:3] == ["git", "-C", str(self.clone)] and argv[3:5] == ["remote", "get-url"]:
             return subprocess.CompletedProcess(argv, 0, "https://github.com/o/r.git\n", "")
@@ -89,7 +100,7 @@ class Repositories(unittest.TestCase):
 
 
 class Opening(Repositories):
-    def test_the_pr_branch_drops_the_plan_and_the_environment(self):
+    def test_the_pr_branch_drops_the_design_and_the_environment(self):
         result = self.pulls().open(["S1"], "played it")
         self.assertEqual((result["head"], result["base"], result["created"]),
                          ("feat-pr", "develop", True))
@@ -112,11 +123,30 @@ class Opening(Repositories):
         self.assertIn("clear works", create[create.index("--body") + 1])
 
     def test_an_open_pr_is_updated_instead_of_opened_twice(self):
-        self.gh_list = "https://github.com/o/r/pull/7\n"
+        self.gh_open = {"feat-pr": "https://github.com/o/r/pull/7"}
         result = self.pulls().open(["S1"], "")
         self.assertEqual((result["url"], result["created"]),
                          ("https://github.com/o/r/pull/7", False))
         self.assertEqual([call[2] for call in self.gh_calls], ["list"])
+
+    def test_an_open_draft_becomes_the_approved_pr(self):
+        self.gh_open = {"feat-draft": "https://github.com/o/r/pull/3"}
+        result = self.pulls().open(["S1"], "played it")
+        self.assertEqual((result["url"], result["head"], result["created"], result["promoted"]),
+                         ("https://github.com/o/r/pull/3", "feat-draft", False, True))
+        self.assertEqual([call[2] for call in self.gh_calls],
+                         ["list", "list", "edit", "view", "ready"])
+        edit = self.gh_calls[2]
+        self.assertIn("played it", edit[edit.index("--body") + 1])
+        self.assertEqual(git(self.origin, "rev-parse", "feat-draft^"), self.approved)
+        files = git(self.origin, "ls-tree", "-r", "--name-only", "feat-draft").splitlines()
+        self.assertEqual(sorted(files), [".gitignore", "a.txt", "src/game.cs"])
+
+    def test_a_draft_already_made_ready_is_not_readied_again(self):
+        self.gh_open = {"feat-draft": "https://github.com/o/r/pull/3"}
+        self.gh_draft = "false"
+        self.pulls().open(["S1"], "")
+        self.assertEqual([call[2] for call in self.gh_calls], ["list", "list", "edit", "view"])
 
     def test_a_branch_without_a_recorded_parent_is_refused(self):
         git(self.clone, "config", "--unset", "branch.feat.loopBase")
@@ -132,15 +162,15 @@ class Opening(Repositories):
 
 
 class Drafting(Repositories):
-    def plan(self, *green):
-        plan = self.mirror / "plan"
-        (plan / "tasks.json").write_text(
-            '{"steps": [{"id": "S1"}, {"id": "S2"}, {"id": "S3"}]}', encoding="utf-8")
-        (plan / "ledger.jsonl").write_text("".join(
-            f'{{"event": "GREEN", "step": "{step}"}}\n' for step in green), encoding="utf-8")
+    def design(self, *green):
+        for module in ("S2", "S3"):
+            (self.mirror / "docs" / "modules" / f"{module}.md").write_text(
+                "## 振る舞い\n", encoding="utf-8")
+        (self.mirror / "plan" / "ledger.jsonl").write_text("".join(
+            f'{{"event": "GREEN", "step": "{module}"}}\n' for module in green), encoding="utf-8")
 
     def test_the_draft_goes_from_its_own_branch(self):
-        self.plan("S1")
+        self.design("S1")
         result = self.pulls().open_draft()
         self.assertEqual((result["head"], result["green"], result["remaining"]),
                          ("feat-draft", ["S1"], ["S2", "S3"]))
@@ -155,26 +185,66 @@ class Drafting(Repositories):
         self.pulls().open(["S1"], "")
         self.assertNotIn("--draft", self.gh_calls[-1])
 
-    def test_an_open_draft_gets_the_new_list_of_steps(self):
-        self.plan("S1", "S2")
-        self.gh_list = "https://github.com/o/r/pull/7\n"
+    def test_an_open_draft_gets_the_new_list_of_modules(self):
+        self.design("S1", "S2")
+        self.gh_open = {"feat-draft": "https://github.com/o/r/pull/7"}
         result = self.pulls().open_draft()
         self.assertFalse(result["created"])
         edit = self.gh_calls[-1]
         self.assertEqual(edit[:4], ["gh", "pr", "edit", "https://github.com/o/r/pull/7"])
         self.assertIn("S3", edit[edit.index("--body") + 1])
 
+    def body(self):
+        call = self.gh_calls[-1]
+        return call[call.index("--body") + 1]
+
+    def test_a_mirror_level_with_the_box_carries_no_mark(self):
+        self.design("S1")
+        self.assertFalse(self.pulls().open_draft()["behind"])
+        self.assertNotIn("箱", self.body().split("版")[-1])
+
+    def test_a_box_ahead_of_the_mirror_is_marked(self):
+        # loop-pull の後に、箱が次のモジュールを緑にした。
+        self.design("S1")
+        commit_files(self.box, {"src/board.cs": "class Board {}\n"}, "S2")
+        git(self.box, "push", "-q", str(self.bare), "feat")
+        self.assertTrue(self.pulls().open_draft()["behind"])
+        self.assertIn("写しが箱に追いついていない", self.body())
+
+    def test_a_box_out_of_reach_is_marked_as_unknown(self):
+        self.design("S1")
+        git(self.clone, "remote", "set-url", "loop", str(self.clones / "missing.git"))
+        self.assertIsNone(self.pulls().open_draft()["behind"])
+        self.assertIn("確かめられなかった", self.body())
+
     def test_nothing_is_sent_before_the_first_green(self):
-        self.plan()
-        with self.assertRaisesRegex(PullRequestError, "no step is green"):
+        self.design()
+        with self.assertRaisesRegex(PullRequestError, "no module is green"):
             self.pulls().open_draft()
         self.assertEqual(self.gh_calls, [])
 
-    def test_a_finished_plan_is_left_to_the_review(self):
-        self.plan("S1", "S2", "S3")
+    def test_a_finished_design_is_left_to_the_review(self):
+        self.design("S1", "S2", "S3")
         with self.assertRaisesRegex(PullRequestError, "Approve the review"):
             self.pulls().open_draft()
         self.assertEqual(self.gh_calls, [])
+
+
+class FromTheDashboard(Repositories):
+    design = Drafting.design
+
+    def test_the_button_sends_the_same_draft_as_loop_pr(self):
+        from host.dashboard.server import send_draft_pull_request
+        self.design("S1")
+        result = send_draft_pull_request(self.pulls())
+        self.assertEqual((result["head"], result["remaining"]), ("feat-draft", ["S2", "S3"]))
+
+    def test_a_refusal_comes_back_as_a_reason(self):
+        from host.dashboard.server import send_draft_pull_request
+        self.design()
+        self.assertIn("no module is green", send_draft_pull_request(self.pulls())["error"])
+        self.assertEqual(send_draft_pull_request(None),
+                         {"error": "pull requests are not configured"})
 
 
 class Names(unittest.TestCase):

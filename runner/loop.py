@@ -1,19 +1,23 @@
 #!/usr/bin/env python3
 """ループのランナー。v1 で、捨てる前提で書いてある。
 
-    sudo -u runner python3 /srv/loop/runner/loop.py run <step-id>
+    sudo -u runner python3 /srv/loop/runner/loop.py run --all
 
 RUNNER_SPEC が述べる、関門を強制する層。エージェントではなく普通の
 プログラムで、そこが要点だ。関門に価値があるのは、判断をしないからだ。
 失敗が「惜しい」かどうかを決めるものは、ここには何も無い。
 
-位相（RUNNER_SPEC 3 章）:
+流れは3段で、各段の出口で人がせき止める（RUNNER_SPEC 3 章）:
+
+    上流   仕様書 -> 基本設計仕様書                プランナー <-> 人間
+    中段   基本設計 -> モジュールごとの詳細設計    プランナー -> クリティック -> 人間
+    下流   モジュールごとの実装                    ソルバー <-> VERIFY
+
+下流はモジュールを1つずつ、次の位相で回す:
 
     PLAN_LOAD -> TEST_WRITE -> STUB -> RED_GATE -> FREEZE -> IMPL <-> VERIFY -> GREEN
 
-REVIEW_GATE は v1 では実装していない。人間の手順で、最初の通し実行を止めて
-しまうからだ。その不在は暗黙にせず、毎ステップ台帳に書く。レビューなしで出た
-緑を、レビューを通った緑と取り違えないためだ。
+内部では、モジュールを1つの「ステップ」の辞書に直して回す（module_step）。
 
 標準ライブラリだけを使う。`runner` として動き、runner はリポジトリを所有し、
 エージェントを起動するための sudo の例外を持つ。
@@ -48,7 +52,7 @@ PLAN = PROJECT / "plan"
 LAYOUT_FILE = LOOP / "layout.json"
 LAYOUT_DEFAULT = {"src": "src", "tests": "tests"}
 # 柵にしてはならない場所。ランナーの持ち物か、凍結したツールチェーンだ。
-LAYOUT_RESERVED = {".git", "plan", ".runner", ".venv", "node_modules"}
+LAYOUT_RESERVED = {".git", "plan", ".runner", ".venv", "node_modules", "docs", "ac"}
 
 
 def layout_problems(layout: object) -> list[str]:
@@ -131,59 +135,39 @@ CRITIC_OUT = LOOP / "critic" / "out"
 # 与えられていない名前は、ランナーが読むのを拒む名前だ。
 FINDINGS_NAME = "FINDINGS.json"
 
-# 人間の経路で、プランナーには書けない。プロジェクトを始める要件がここに届き、
-# 後にはエスカレーションへの答えも届く。どちらも人だけが言ってよいことだ。
-# /srv/loop/planner/out と対になっていて、形は同じ、向きは逆、グループは別。
+# 人間の経路で、プランナーには書けない。仕様書と、せきで人が書いた意見がここに
+# 届く。どちらも人だけが言ってよいことだ。/srv/loop/planner/out と対になって
+# いて、形は同じ、向きは逆、グループは別。
 HUMAN_IN = LOOP / "human" / "in"
-REQUIREMENTS = HUMAN_IN / "REQUIREMENTS.md"
-# クリティックの指摘の、人が読んで書き換える写し。plan refine が批評のたびに
-# 書いて止まり、再開したときに読み戻してプランナーへ渡す。human/in は humanw の
-# 保守ユーザーが書け、プランナーとクリティックは読めない。
+# 人が書いた仕様書。`loop go` が置き、spec import が docs/spec/ に取り込む。
+HUMAN_SPEC = HUMAN_IN / "spec"
+# せきで人が書いた意見。次のプランナーの呼び出しに渡し、受け入れたら消す。
+HUMAN_COMMENT = HUMAN_IN / "COMMENT.md"
+# クリティックの指摘の、人が読む写し。ダッシュボードと `loop findings` が読む。
 CRITIQUE_FOR_HUMAN = HUMAN_IN / "CRITIQUE.json"
-# エスカレーションへの人の答え。ダッシュボードが「回答を記録」で送る。次の
-# plan propose がプランナーに渡し、計画が適用されたら消す。
-HUMAN_ANSWER = HUMAN_IN / "ANSWER.md"
-# 人が書き換えた計画。`loop plan amend` が置き、plan amend が取り込んで消す。
-# 受け入れ条件の書き換え (b) は人の権限で、プランナーの経路では拒まれる。
-AMENDED_PLAN = HUMAN_IN / "tasks.json"
 
-# プランナーが書いてよい3つのファイル（BOOTSTRAP「書いてよいのは次の3つだけ」）。
-# out/ に書く名前から、プロジェクトの中の置き場への対応表にしてある。この表が
-# 許可リストだ。4つ目の項目が無いので、提案が4つ目のファイルを名指しすることは
-# できない。
-#
-# SYSTEM_SPEC.md はリポジトリの根ではなく plan/ の下に置く。BOOTSTRAP の
-# ファイル表からの逸脱で、意図したものだ。根は solver から読める（そこで作業
-# するので読めなければならない）。仕様が根にあれば、ブリーフの横に2つ目の入力
-# 経路ができ、契約を1つ渡されたステップの中からシステム全体の設計が読めてしまう。
-# plan/ は 0700 runner なので、そこに置けば何も失わずにその経路を閉じられる。
-SYSTEM_SPEC = PLAN / "SYSTEM_SPEC.md"
-PROPOSAL_FILES = {
-    "SYSTEM_SPEC.md": SYSTEM_SPEC,
-    "CONTEXT.md": PLAN / "CONTEXT.md",
-    "tasks.json": PLAN / "tasks.json",
-}
-# ……そして、プランナーが書いてよいが、どこにも適用されない唯一のもの。
-# 「これは (b) か (c) なので、自分が決めることではない」と言うための手段だ。
-ESCALATE_NAME = "ESCALATE.md"
+# 設計仕様書。編集対象のリポジトリの docs/ に段ごとに置き、コミットする。
+# 0700 runner で、ソルバーは読めない。ソルバーに要る部分はランナーがブリーフに入れる。
+DOCS = PROJECT / "docs"
+DOCS_SPEC = DOCS / "spec"        # 人が書いた仕様書
+DOCS_BASIC = DOCS / "basic"      # 基本設計仕様書。上流の成果物
+DOCS_MODULES = DOCS / "modules"  # 詳細設計仕様書。中段の成果物。src/ と同じ形
+# 受け入れ条件。モジュールごとの JSON で、ランナーだけが読む。.gitignore で
+# コミットから外す。TEST_WRITE のブリーフにだけ入れる。
+AC = PROJECT / "ac"
 
 LEDGER = PLAN / "ledger.jsonl"
-ESCALATION = PLAN / "ESCALATION.md"
-# プランナーの「自分が決めることではない」が、プロジェクトに届いた後の置き場。
-# `planner/out/` はリポジトリの外にあるので、そこに書かれたものはどこにも
-# コミットされず、どこにも写されず、たまたま `plan apply` を走らせた端末にしか
-# 見えない。2つのファイルを分けるのは、意味も答え方も違うからだ。ESCALATION.md
-# は `plan propose` が答える問いで、片方が黙ってもう片方になってはならない。
-PLANNER_ESCALATION = PLAN / "PLANNER_ESCALATION.md"
-# plan refine の途中でプランナーがエスカレーションしたときの控え。提案は
-# 改訂前に戻すので、エスカレーションの本文はここにしか残らない。
-REFINE_ESCALATION = STATE / "refine-escalation.md"
-# plan refine が人を待っているあいだの控え。何回目の批評か、批評した提案の
-# ハッシュ、クリティックが書いたままの指摘。人が直したものは、これと比べて確かめる。
-REFINE_STATE = STATE / "refine.json"
-# 終えた計画の置き場。bootstrap が次の計画を起こす前に、計画と台帳をここの
-# 番号のディレクトリへ移す（archive_plan）。
-PLAN_ARCHIVE = PLAN / "archive"
+# いまの段と、関門が確かめた設計のハッシュ。コミットする。
+STAGE_FILE = PLAN / "stage.json"
+# 中段の出口の、インターフェースチェックの結果とクリティックの指摘。コミットする。
+INTERFACE = PLAN / "INTERFACE.json"
+CRITIQUE = PLAN / "CRITIQUE.json"
+# 下流で止まったモジュールと、その理由。人が直すモジュールを選ぶために読む。
+FAILURE = PLAN / "FAILURE.md"
+# 設計仕様書と受け入れ条件から、ランナーが作る下流の計画。受け入れ条件を含む
+# ので、コミットしない .runner/ に置く。
+TASKS = STATE / "tasks.json"
+STAGES = ("upstream", "midstream", "downstream", "review")
 
 # tests/ はプロジェクトの venv の pytest でだけ走らせる。素の
 # `python3 -m pytest` にすると、solver 自身の ~/.local のパッケージが sys.path に
@@ -191,8 +175,14 @@ PLAN_ARCHIVE = PLAN / "archive"
 # （RUNNER_SPEC 1-3）。
 PYTEST_ARGS = ["-q", "-p", "no:cacheprovider", "--strict-markers"]
 
-# RUNNER_SPEC 11 章が未決にしている値。出発点としての固定値で、どれも
-# tasks.json の最上位の "timeouts" で計画ごとに上書きできる。
+# 走行の設定。下流の計画（TASKS）はランナーが設計から作るので、人が上限や
+# ソルバーの段を書く場所はこちらにする。root の持ち物で、ランナーは読むだけだ。
+# 無ければ下の既定で走る。
+SETTINGS_FILE = LOOP / "settings.json"
+SETTINGS_KEYS = {"timeouts", "limits", "policy", "solver_tiers"}
+
+# RUNNER_SPEC 10 章が未決にしている値。出発点としての固定値で、どれも
+# SETTINGS_FILE の "timeouts" で上書きできる。
 #
 # 返ってこないテストの実行は、ここでは予想される失敗だ。無限ループする実装は
 # ソルバーが普通に書くもので、上限が無ければランナーは永遠に待つ。
@@ -217,8 +207,8 @@ TIMEOUTS = {"test": 120, "solver": 960, "planner": 1800, "critic": 900}
 BACKSTOP_MARGIN = 120
 
 # 利用上限と一時的な混雑。3役は同じサブスクリプションの枠を使うので、上限に
-# 当たるのは計画の失敗でもソルバーの失敗でもない。それを Halt にすると
-# エスカレーションになり、エスカレーションはプランナーを呼んで、同じ枠を
+# 当たるのは設計の失敗でもソルバーの失敗でもない。それを Halt にすると
+# モジュールが止まって中段に戻り、設計の書き直しがプランナーを呼んで、同じ枠を
 # さらに使う。だから見分けて、待ってから同じ呼び出しをやり直す。
 #
 # 文面は Claude Code のエラーのドキュメントにあるもの。-p では、実行中の
@@ -236,7 +226,7 @@ QUOTA = {"wait_seconds": 900, "waits": 24}
 
 
 class QuotaExhausted(Exception):
-    """待ち切っても枠が戻らなかった。Halt ではないので、エスカレーションしない。"""
+    """待ち切っても枠が戻らなかった。Halt ではないので、中段に戻さない。"""
 
     def __init__(self, who: str, phase: str, kind: str):
         super().__init__(f"{who} is still out of quota ({kind}) in {phase}")
@@ -245,9 +235,9 @@ class QuotaExhausted(Exception):
         self.kind = kind
 
 
-# 箱が書き込みを拒んだ跡。ソルバーにもプランナーにも直せないので、エスカレーション
-# にせずに止める。柵の下のディレクトリが 2755 で作られ、ソルバーの Write がすべて
-# EACCES で落ちたとき、試行もエスカレーションの上限もそれで使い切った。
+# 箱が書き込みを拒んだ跡。ソルバーにもプランナーにも直せないので、中段に
+# 戻さずに止める。柵の下のディレクトリが 2755 で作られ、ソルバーの Write がすべて
+# EACCES で落ちたとき、試行をすべてそれで使い切った。
 # 誤りと取り違えないよう、箱のパス（/srv/loop の下）と同じ行に出たものだけを見る。
 # Node は `EACCES: permission denied, open '<path>'`、Python は
 # `[Errno 13] Permission denied: '<path>'` の形で出す。
@@ -256,7 +246,7 @@ INFRA_ERROR = re.compile(r"\b(?:EACCES|EPERM|EROFS|ENOSPC)\b|\[Errno (?:1|13|28|
 
 
 class InfraBroken(Exception):
-    """箱が書き込みを拒んだ。Halt ではないので、エスカレーションしない。"""
+    """箱が書き込みを拒んだ。Halt ではないので、中段に戻さない。"""
 
     def __init__(self, phase: str, evidence: str):
         super().__init__(f"the sandbox refused the {phase} phase: {evidence}")
@@ -264,28 +254,12 @@ class InfraBroken(Exception):
         self.evidence = evidence
 
 
-# RUNNER_SPEC 6-2。BOOTSTRAP 1-4 はステップの中の「試行」に上限を掛けるが、
-# その外のループについては何も言わない。だからプランナーが (a) を繰り返し答える
-# ことに上限が無い。そして (a) は、プランナーが許された唯一の答えなので、
-# 何度でも手を伸ばす答えだ。
-#
-# 仕様の規則: ステップの2回目のエスカレーションからは (a) は選べず、(b) か (c)
-# だけが残り、どちらも人間のものだ。だからプランナーが答えるエスカレーションは
-# ステップごとにちょうど1回。上限と同じ理由で、最上位の "limits" で計画ごとに
-# 上書きできる。
-#
-# "revisions" は、別の失敗に対する別の上限だ。プランナーはリンタの判定を渡されて
-# 直すよう頼まれる。ある違反を別の違反と取り替えるエージェントは、上限が無ければ
-# それを永遠に続ける。3 は、配置を誤解しただけの計画が収束するには十分で、
-# 規則を満たせない計画がお金を使い続けないだけ少ない。
-# "attempts" は全ステップの max_attempts を計画全体で上書きする値で、0 は
-# 「各ステップのままにする」を意味する。適切な回数は「誰が試行の代金を払うか」で
-# 決まり、プランナーは計画を書く時点でそれを知りえないので、この口がある。
-# サブスクリプションのソルバーなら 3 が正しく、ローカルのソルバーなら試行の
-# 原価は実時間だけなので、10回でも、エスカレーションが買うプランナー呼び出し
-# 1回より安い。
-LIMITS = {"escalations": 1, "revisions": 3, "attempts": 0, "critiques": 2,
-          "test_writes": 3}
+# "revisions" は、プランナーが機械の検査に落ちた設計を直す回数の上限だ。
+# プランナーは検査の判定を渡されて直すよう頼まれる。ある違反を別の違反と
+# 取り替えるエージェントは、上限が無ければそれを永遠に続ける。
+# "attempts" は全モジュールの試行の回数で、0 は既定の 3 を意味する。
+# "test_writes" は、コンパイルできないテストを書き直させる回数の上限だ。
+LIMITS = {"revisions": 3, "attempts": 0, "test_writes": 3}
 
 # ステップの中の次の試行を、どう始めるか。
 #
@@ -298,7 +272,7 @@ LIMITS = {"escalations": 1, "revisions": 3, "attempts": 0, "critiques": 2,
 # 見えないソルバーは、損傷を元に戻さず積み重ね、後の試行ほど悪い木から始まる。
 # 一方でランナーは「厳密な」検証器だ。言いくるめられない関門に対する N 回の
 # 独立した抽選は、同じ予算の別の使い方で、弱いソルバーにはより良い使い方になる。
-# 計画ごと（"policy"）とステップごと（"retry"）に上書きできる。
+# SETTINGS_FILE の "policy" で上書きできる。
 POLICY = {"retry": "repair"}
 RETRY_MODES = ("repair", "resample")
 
@@ -308,16 +282,10 @@ RETRY_MODES = ("repair", "resample")
 # 走らせるかを選ぶ手段ではない。
 #
 # 普通は1つ。2つにすると、安いかローカルのバックエンドが仕事をし、枠の限られた
-# ほうはそれが終えられなかったステップにだけ使う。順番は見た目以上に大事だ。
-# 使い切った先にあるのはエスカレーションで、それはプランナーの呼び出しを1回
-# 使う。だから2段目のソルバーは余計な出費ではなく、次に起こりうる2つのうち
-# 安いほうだ。
+# ほうはそれが終えられなかったモジュールにだけ使う。使い切った先にあるのは
+# 中段への差し戻しで、それは人の手を1回使う。
 #
-# 既定値は計画ではなく箱の性質なので、tasks.json ではなくここに置く。
-# BOOTSTRAP はプランナーに「誰が実装するかは関知しない」と伝えている。
-# だからブートストラップした計画は solver_tiers を持たず、この既定値で回る。
-# 既定は Claude Code だけ。local と codex は、計画が solver_tiers で名前を
-# 挙げたときだけ使う。
+# 既定値は設計ではなく箱の性質なので、ここに置く。既定は Claude Code だけ。
 SOLVER_TIERS = ["claude"]
 
 # コマンドを実行できるバックエンド。codex はサンドボックスの中でテストを
@@ -346,8 +314,8 @@ class SolverTimeout(Halt):
 
     Halt の一種なので、受け止めない場所では今までどおりステップを止める。受け止める
     のは IMPL のループだけだ。実装の試行の時間切れは、試行1回分の失敗であって、
-    計画の問題ではない。run 8 の S10 では、残り1回の試行を使わずにエスカレーション
-    になり、上限を使い切って人間で止まった。
+    設計の問題ではない。run 8 の S10 では、残り1回の試行を使わずに止まり、
+    人間の手を待った。
     """
 
 
@@ -406,7 +374,7 @@ def ledger(event: str, *, echo: str | None = None, **fields) -> None:
 # いまの作業
 # --------------------------------------------------------------------------
 #
-# 台帳は起きたことの記録で、ホストに届くのは GREEN と plan apply のときだけだ。
+# 台帳は起きたことの記録で、ホストに届くのはコミットのときだけだ。
 # 人が知りたい「いま誰がどのステップの何をしているか」は、そこからは読めない。
 # だから、変わるたびに1つのファイルを丸ごと書き直す。箱の `loop now` がこれを
 # 読み、ホストのダッシュボードが SSH で引く。
@@ -421,25 +389,15 @@ NOW: dict = {"command": None, "step": None, "attempt": None, "key": None, "since
 ROLE_JA = {"planner": "プランナー", "critic": "クリティック",
            "solver": "ソルバー", "runner": "ランナー"}
 
-CRITIQUE_JA = {
-    "coverage": "計画をやり遂げたとき、要件が満たされるかを批評している",
-    "trace": "計画に、使う人の操作では届かない部分が無いかを批評している",
-}
-
-
 def describe_now(who: str, phase: str, detail: str = "") -> str:
     """いまの作業を日本語の1文にする。"""
     step = NOW["step"]
     if who == "planner":
-        if NOW["command"] == "plan bootstrap":
-            return "要件から計画を書いている"
-        if NOW["command"] == "plan refine":
-            return "クリティックの指摘を受けて計画を直している"
-        if step:
-            return f"{step} のエスカレーションに答えて計画を直している"
-        return "計画の改訂案を書いている"
+        if NOW["command"] == "basic draft":
+            return "仕様書から基本設計仕様書を書いている"
+        return "基本設計仕様書からモジュールの詳細設計仕様書を書いている"
     if who == "critic":
-        return CRITIQUE_JA.get(detail, "計画を批評している")
+        return "詳細設計仕様書を批評している"
     if who == "solver":
         text = {"TEST_WRITE": f"{step} の受け入れ条件からテストを書いている",
                 "STUB": f"{step} のスタブを書いている",
@@ -454,9 +412,9 @@ def describe_now(who: str, phase: str, detail: str = "") -> str:
 
 
 def steps_now() -> list[dict]:
-    """各ステップの goal と状態。計画がまだ無ければ空。"""
+    """各モジュールの状態。下流の計画がまだ無ければ空。"""
     try:
-        tasks = json.loads((PLAN / "tasks.json").read_text(encoding="utf-8"))
+        tasks = json.loads(TASKS.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return []
     done = green_steps()
@@ -486,7 +444,8 @@ def report_now(who: str | None, phase: str = "", detail: str = "") -> None:
                     "step": NOW["step"], "attempt": NOW["attempt"],
                     "text_ja": describe_now(who, phase, detail), "since": NOW["since"]}
     record = {"updated": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "pid": os.getpid(),
-              "command": NOW["command"], "activity": activity, "steps": steps_now()}
+              "command": NOW["command"], "stage": read_stage().get("stage"),
+              "activity": activity, "steps": steps_now()}
     try:
         temporary = NOW_FILE.with_name(NOW_FILE.name + ".tmp")
         temporary.write_text(json.dumps(record, ensure_ascii=False), encoding="utf-8")
@@ -615,10 +574,27 @@ def freeze_tests() -> dict[str, str]:
 # --------------------------------------------------------------------------
 
 
-# plan/ と .runner/ は 0700 runner。solver はそこに書けないので、その下の変更は
-# 定義上ランナー自身のものだ。いま追記した台帳、いま作った junit のレポート。
+# plan/、.runner/、docs/ は 0700 runner。solver はそこに書けないので、その下の
+# 変更は定義上ランナー自身のものだ。いま追記した台帳、いま作った junit のレポート。
 # それを solver の書き込みに数えると、どのステップも自分の帳簿付けで落ちる。
-RUNNER_OWNED = ("plan/", ".runner/")
+RUNNER_OWNED = ("plan/", ".runner/", "docs/")
+
+# テストのコードは .gitignore で外してあるので、git status には出ない。ソルバーを
+# 呼ぶ前にテストの柵の中を写し取り、呼んだ後の違いを書き込みに数える（tests_changed）。
+TESTS_BEFORE: dict[str, str] = {}
+
+
+def tests_snapshot() -> dict[str, str]:
+    """テストの柵の中のすべてのファイルと、そのハッシュ。"""
+    if not TESTS.is_dir():
+        return {}
+    return {str(f.relative_to(PROJECT).as_posix()): sha256(f) for f in source_files(TESTS)}
+
+
+def tests_changed(before: dict[str, str]) -> set[str]:
+    """`before` を取った後に、作られたか変わったか消えたテストの柵の中のファイル。"""
+    after = tests_snapshot()
+    return {rel for rel in before.keys() | after.keys() if before.get(rel) != after.get(rel)}
 
 
 def touched_paths() -> set[str]:
@@ -664,7 +640,7 @@ def assert_touched(phase: str, allowed: list[str]) -> None:
     git が答え、solver は git に届かない（.git は 0700 runner）。
     """
     allowed_set = set(allowed)
-    actual = touched_paths()
+    actual = touched_paths() | tests_changed(TESTS_BEFORE)
     stray = sorted(actual - allowed_set)
     if stray:
         raise Halt(
@@ -732,7 +708,7 @@ ANNOTATION = re.compile(r"(?:->|:)\s*([A-Za-z_][\w.]*)\s*([\[<]?)")
 # ファイルのパスが import できる名前になる規則、形を持たない型名。
 #
 # 違わなかったものにも同じだけ価値がある。junit のレポート、全関門の算術、
-# 書き込みの柵、台帳、エスカレーションの規則、L14 の語彙以外の全リンタ規則。
+# 書き込みの柵、台帳、止まったときの規則、型の語彙以外の設計の検査。
 # 規則はもともと言語に依存していなかった。Python の形をしていたのは表現だけだ。
 #
 # 素の JavaScript ではなく TypeScript にした理由は L14 にある。契約は次の
@@ -777,10 +753,16 @@ LANGUAGE_BASES = {
         # 文字。ドットを含めるのは Python の区切り文字だからだ。
         # `incgame.engine.sub` の中に現れる `incgame.engine` は、別のモジュールを指す。
         "name_boundary": r"[\w.]",
+        # 1つのモジュールを作るファイルの拡張子。C++ だけが2つで、ヘッダとソースの対だ。
+        "module_suffixes": (".py",),
         "layout_note": """Put the package inside {SRC}/, e.g. `{SRC}/yourpkg/models.py`, and import it as
 `from yourpkg.models import Thing` -- `{SRC}` is on sys.path, so it does not
-appear in imports. Say this in CONTEXT.md; the solver has no other way to
-learn it.""",
+appear in imports.
+""",
+        "contract_note": """A provides line is the declaration as Python writes it, without its body:
+    {"provides": "def parse(text: str) -> Config"}
+    {"provides": "class Board: width: int; height: int; def score(self) -> int"}
+The names are `parse` and `Board`; requires and provides match on those names.""",
     },
     "typescript": {
         "name": "typescript",
@@ -822,15 +804,23 @@ compiling and not one of your tests runs.
         # bootstrap の1回目で見つかった。B3 の欠陥と同じ形で、誤っていたのは
         # 計画ではなく規則で、そのために試行を1回使った。
         "name_boundary": r"[\w]",
+        "module_suffixes": (".ts",),
         "layout_note": """Every source file is `.ts` under {SRC}/, e.g. `{SRC}/idlegame/models.ts`, and
 every test file is `.ts` under {TESTS}/. Import with a RELATIVE path and no
 extension in the specifier is wrong here -- write the extension:
 `import { Thing } from "{SRC_FROM_TESTS}/idlegame/models.ts"` from a test file
 directly in {TESTS}/. vitest resolves it and esbuild strips the types; there is
-no build step and no tsc, so a type is something the next step READS, not
+no build step and no tsc, so a type is something the next module READS, not
 something a compiler checks.
 
 """,
+        "contract_note": """A provides line is the export as TypeScript writes it, without its body:
+    {"provides": "export function canPlace(board: Board, x: number, y: number): boolean"}
+    {"provides": "export interface Board { cells: Stone[]; size: number }"}
+    {"provides": "export type Stone = 'black' | 'white'"}
+    {"provides": "export const START: Board"}
+The names are `canPlace`, `Board`, `Stone` and `START`; requires and provides
+match on those names.""",
     },
     # テストは net8.0 の NUnit 3 で、36-dotnet.sh が凍結したフィードだけから restore
     # する。csproj はランナーが /srv/loop/dotnet/build に書く（dotnet_projects）。
@@ -904,6 +894,13 @@ and before an index, assert that the length is large enough.
         "shape_bracket": "<",
         "shape_example": "List<Cell>, Dictionary<string, int>, (Board board, int score)",
         "name_boundary": r"[\w]",
+        "module_suffixes": (".cs",),
+        "contract_note": """A provides line is a type, or a member written with its type in front of its
+name:
+    {"provides": "class Board { public int Width; public int Height; }"}
+    {"provides": "static int Board.Score(Board board)"}
+The name of the first is `Board` and of the second `Board.Score`; requires and
+provides match on those names.""",
     },
     # C++ は、箱では標準の C++17 のロジックだけを g++ と GoogleTest で確かめる。
     # DXライブラリや Windows の API は Linux に無い。それを include するファイルは
@@ -971,6 +968,15 @@ assertions -- write `ASSERT_GE(v.size(), n)`, and index with `.at()`.
         "shape_bracket": "<",
         "shape_example": "std::vector<Cell>, std::map<std::string, int>, std::pair<Board, int>",
         "name_boundary": r"[\w]",
+        # ヘッダとソースの対で1つのモジュールにする。設計仕様書は拡張子を落とした名前で1つ。
+        "module_suffixes": (".h", ".cpp"),
+        "contract_note": """A provides line is a type, a member function written with its class, or a free
+function:
+    {"provides": "struct Board { int width; int height; }"}
+    {"provides": "int Board::score() const"}
+    {"provides": "int countLines(const Board& board)"}
+The names are `Board`, `Board::score` and `countLines`; requires and provides
+match on those names.""",
     },
 }
 
@@ -997,10 +1003,9 @@ CSHARP_LIBRARY_NOTE = """The code is built as a class library named LoopCode, wi
 There is no `Main` here and `Assembly.EntryPoint` is always null. A file of
 top-level statements (the usual `Program.cs`) is left out of the build, so
 nothing in it compiles or runs here. So no criterion can check how the program
-starts -- what `Main` or `Program.cs` does, or what it calls first. A step may
-write the entry file by listing it in `files_write`; the person checks it by
-hand after the run. Keep it thin, and put the behaviour it starts in classes
-the tests can call.
+starts -- what `Main` or `Program.cs` does, or what it calls first. The entry
+file may be a module of its own; the person checks it by hand after the run.
+Keep it thin, and put the behaviour it starts in classes the tests can call.
 
 """
 
@@ -1023,15 +1028,14 @@ thing:
     import { start } from "/{SRC}/main.ts";
     start(document.getElementById("app"));
 
-So the plan MUST end with a step whose files_write includes `{SRC}/main.ts`, and
-that module MUST export `start(root: HTMLElement): void`. Nothing else about
-the page is yours to decide. Everything `start` does is ordinary code under
+So the design MUST have a module `{SRC}/main.ts`, and it MUST export
+`start(root: HTMLElement): void` with `"entry": true`. Nothing else about the
+page is yours to decide. Everything `start` does is ordinary code under
 {SRC}/: it is under the fence, the tests can reach it, and its criteria are
 written against what it puts in the document -- what the element contains,
 which buttons exist, which of them are disabled, and what changes when one is
 clicked.
-
-Say all of this in CONTEXT.md; the solver has no other way to learn it.""",
+""",
             "facts": lambda: dom_facts(),
             "page": lambda: dom_page_text(),
         },
@@ -1070,15 +1074,7 @@ selects a step's tests by that class name.
 
 C# 9 is the ceiling: no `record struct`, no file-scoped `namespace X;`, no
 `global using`, no `required` members. They do not compile here or in Unity.
-
-A contract line names the file and then the declaration. A type:
-    {SRC}/Logic/Board.cs: class Board { public int Width; public int Height; }
-A member, written with its type in front of its name:
-    {SRC}/Logic/Board.cs: static int Board.Score(Board board)
-The name of the first is `Board` and of the second `Board.Score`; requires and
-provides match on those names.
-
-Say all of this in CONTEXT.md; the solver has no other way to learn it.""",
+""",
             "facts": lambda: ("Runtime: .NET 8 for the tests; the code is built as netstandard2.1",
                               *unity_facts()),
         },
@@ -1117,9 +1113,14 @@ selects a step's tests by that class name.
 Promete here is version 2, and older examples show version 1. A scene takes the
 plugins it uses through its constructor (`public class MainScene(Keyboard
 keyboard) : Scene`) and reads the screen through `View` and the clock through
-`Time`. A scene reaches the app through `App`. The window is `App.Window`: its
-size is `App.Window.Size = (640, 480)` and its title `App.Window.Title`, set
-in the first scene's `OnStart`, or the window keeps Promete's default size.
+`Time`. A scene reaches the app through `App`. The window is
+`Promete.Backends.IGameView`, taken through the constructor like a plugin: its
+size is `view.Size = (640, 480)` and its title `view.Title`, set in the first
+scene's `OnStart`, or the window keeps Promete's default size. `App.Window`
+and `IWindow` are obsolete in version 2 and removed in 3; do not use them.
+`Shape.CreateRect(left, top, right, bottom, color)` takes two corners, not a
+position and a size: a 200x56 rectangle at (540, 300) is
+`Shape.CreateRect(540, 300, 740, 356, color)`.
 Input is a plugin taken through the constructor. `mouse[MouseButtonType.Left]`
 is the left button: `IsButtonDown` is true on the frame it goes down,
 `IsPressed` while it is held, `IsButtonUp` on the frame it is released, and
@@ -1127,14 +1128,14 @@ is the left button: `IsButtonDown` is true on the frame it goes down,
 `IsKeyUp` in the same sense. No test can see the window or press a button; the
 person checks both after the run.
 
-A contract line names the file and then the declaration. A type:
-    {SRC}/Logic/Board.cs: class Board { public int Width; public int Height; }
-A member, written with its type in front of its name:
-    {SRC}/Logic/Board.cs: static int Board.Score(Board board)
-The name of the first is `Board` and of the second `Board.Score`; requires and
-provides match on those names.
-
-Say all of this in CONTEXT.md; the solver has no other way to learn it.""",
+The entry `Program.cs` starts as Promete's template: it runs a `MainScene`
+declared in the same file. A scene declared elsewhere never starts until the
+entry changes, and a plugin a scene takes must be registered there with
+`.Use<T>()` (`.Use<Mouse>()`), or the scene cannot be built. So when the run
+adds the first scene or a plugin a scene takes, the entry is a module of its
+own: it deletes the template's scene, adds `using <the scene's namespace>;`,
+runs the run's first scene, and registers every plugin the scenes take.
+""",
             "facts": lambda: ("Runtime: .NET 10 for the code and the tests; Promete 2.1.0",
                               *promete_facts()),
         },
@@ -1164,18 +1165,8 @@ Tests use GoogleTest: `#include <gtest/gtest.h>`, `TEST(Suite, Name)`,
 `EXPECT_EQ(expected, actual)`, `EXPECT_TRUE`, `EXPECT_THROW(call, type)`. A test
 file has no `main`; the runner links one. Each test file uses exactly one
 suite, named after the file (`{TESTS}/BoardTest.cpp` holds `TEST(BoardTest,
-...)` only): the runner selects a step's tests by that name.
-
-A contract line names the header and then the declaration. A type:
-    {SRC}/logic/Board.h: struct Board { int width; int height; }
-A member function, written with its class:
-    {SRC}/logic/Board.h: int Board::score() const
-A free function:
-    {SRC}/logic/rules.h: int countLines(const Board& board)
-The names are `Board`, `Board::score` and `countLines`; requires and provides
-match on those names.
-
-Say all of this in CONTEXT.md; the solver has no other way to learn it.""",
+...)` only): the runner selects a module's tests by that name.
+""",
             "facts": lambda: ("Standard: C++17, built with CMake; tests: GoogleTest",
                               *cpp_facts()),
         },
@@ -1198,8 +1189,8 @@ def compose_language(language: str, framework: str | None = None) -> dict:
 # 言語ごとの既定の組み合わせ。計画が "framework" を言わなければ、これで走る。
 LANGUAGES = {name: compose_language(name) for name in LANGUAGE_BASES}
 
-# tasks.json の最上位の "language" と "framework" で選ぶ。既定は Python。これが
-# できる前に書かれた計画は、すべて Python を前提にしているからだ。
+# 段（plan/stage.json）の "language" と "framework" で選ぶ。basic draft --language が
+# 決める。言語を持たない段では Python で読む。
 LANGUAGE = dict(LANGUAGES["python"])
 
 
@@ -1211,7 +1202,7 @@ def use_language(language: str, framework: str | None = None) -> None:
 # pytest は失敗の本文を必ず "<file>:<line>: <ExceptionName>" で終える。例外の
 # クラスが実際に読めるのはその最後の行だ。failure_kind を参照。
 # vitest は変換エラーに色を付け、そのエスケープコードのせいで、引用した先
-# （ブリーフ、エスカレーション、台帳）のどこでも文が読めなくなる。
+# （ブリーフ、FAILURE.md、台帳）のどこでも文が読めなくなる。
 #
 # ESC の無い形も取り除く。JUnit の XML に ESC は書けないので、vitest は
 # ESC だけを落として `[38;5;249m` の部分を残す。構文エラーの位置を示す図は
@@ -1320,6 +1311,31 @@ def library_types() -> str:
         space, _, short = name.rpartition(".")
         spaces.setdefault(space, []).append(short)
     return "\n".join(f"    {space}: {', '.join(names)}" for space, names in sorted(spaces.items()))
+
+
+def library_namespaces() -> dict[str, str]:
+    """参照にある型の短い名前から名前空間への対応。スタブの using に使う。
+
+    総称型の印（`Container`1`）は外す。入れ子の型（外側が型の名前）と、2つの
+    名前空間にある名前は入れない。どちらも using で正しく指せない。
+    """
+    path = library_refs()
+    if path is None or not (path / "TYPES.txt").is_file():
+        return {}
+    names = [line.split(None, 1)[0].split("`")[0]
+             for line in (path / "TYPES.txt").read_text(encoding="utf-8").splitlines()
+             if line.strip()]
+    full = set(names)
+    found: dict[str, str] = {}
+    twice: set[str] = set()
+    for name in names:
+        space, _, short = name.rpartition(".")
+        if not space or space in full:
+            continue
+        if short in found and found[short] != space:
+            twice.add(short)
+        found[short] = space
+    return {short: space for short, space in found.items() if short not in twice}
 
 
 def library_refs_section() -> str:
@@ -1970,7 +1986,7 @@ def parse_junit(xml_path: Path, output: str = "") -> TestRun:
         kinds.extend(f"<did not compile: {name}>" for name in uncompiled)
         # 理由は標準出力ではなくレポートの中にある。`output` だけを渡された
         # 呼び出し側には "JUNIT report written to ..." しか見えない。これについての
-        # 最初のエスカレーションは、まさにそういう見た目だった。
+        # 最初の停止は、まさにそういう見た目だった。
         detail = chr(10).join(
             ANSI.sub("", f.get("message") or "")
             for case in root.iter("testcase")
@@ -2142,8 +2158,8 @@ def call_solver(phase: str, brief: str, backend: str | None = None) -> str:
 
     ブリーフは /srv/loop/brief（runner:solverw 0750）に書く。ソルバーは読めるが
     書けず、存在する経路はそれだけだ。ここから 0700 runner の plan/ への道は
-    無い。だから「ソルバーは tasks.json を読んではならない」は、誰かが守る必要の
-    ある規則ではない。
+    無い。docs/ と ac/ も同じだ。だから「ソルバーは設計の全体を読んではならない」は、
+    誰かが守る必要のある規則ではない。
     """
     BRIEF_DIR.mkdir(parents=True, exist_ok=True)
     brief_path = BRIEF_DIR / f"{phase.lower()}.md"
@@ -2159,6 +2175,8 @@ def call_solver(phase: str, brief: str, backend: str | None = None) -> str:
     # 出したかは、後で台帳から答えられなければならない。sudo の境界の向こうで
     # 決まった既定は、答えにならない。
     backend = backend or SOLVER_TIERS[0]
+    TESTS_BEFORE.clear()
+    TESTS_BEFORE.update(tests_snapshot())
     try:
         proc = run_agent("solver", phase, lambda: run(
             agent_command("solver", SOLVER_RUN, brief_path, limit, backend),
@@ -2212,7 +2230,7 @@ def dep_contract_lines(step: dict, *, existing: bool = True) -> list[str]:
     """
     lines: list[str] = []
     for dep in step.get("depends_on", []):
-        path = STATE / "contracts" / f"{dep}.json"
+        path = STATE / "contracts" / f"{safe_id(dep)}.json"
         if not path.exists():
             continue
         try:
@@ -2230,22 +2248,38 @@ def dep_contract_lines(step: dict, *, existing: bool = True) -> list[str]:
 def dep_contracts(step: dict) -> str:
     parts = []
     for dep in step.get("depends_on", []):
-        path = STATE / "contracts" / f"{dep}.json"
+        path = STATE / "contracts" / f"{safe_id(dep)}.json"
         if not path.exists():
-            raise Halt("PLAN_LOAD", f"step {step['id']} depends on {dep}, which has no contract yet")
+            raise Halt("PLAN_LOAD", f"module {step['id']} depends on {dep}, which has no contract yet")
         parts.append(f"From {dep}:\n{path.read_text(encoding='utf-8')}")
     found = existing_requirements(step, {declared_name(line) for line
                                          in dep_contract_lines(step, existing=False)})
     if found:
         parts.append("From the code already in the repository:\n" + "\n".join(found))
-    return "\n\n".join(parts) if parts else "(none -- this step depends on nothing)"
+    return "\n\n".join(parts) if parts else "(none -- this module depends on nothing)"
 
 
 def render_acceptance(step: dict) -> str:
     return "\n".join(
-        f"{i}. [{a['case']}] given {a['given']} then {a['then']}"
+        f"{i}. [{a['case']}{', ' + a['kind'] if a.get('kind') else ''}] "
+        f"given {a['given']} then {a['then']}"
         for i, a in enumerate(step["acceptance"], 1)
     )
+
+
+def test_files_section(step: dict) -> str:
+    """単体テストと統合テストの置き場。統合テストの条件が無ければ空。"""
+    kinds = {a.get("kind") or "unit" for a in step["acceptance"]}
+    if "integration" not in kinds:
+        return ""
+    where = (f"Write the unit criteria in {step['files_test'][0]} and the integration "
+             f"criteria in\n{step['files_test'][1]}." if len(step["files_test"]) > 1 else
+             f"Every criterion is an integration criterion: write them all in\n"
+             f"{step['files_test'][0]}.")
+    return f"""
+{where} An integration test runs this module together with the
+real modules it requires -- no stand-ins, no mocks of them.
+"""
 
 
 def render_provides(step: dict) -> str:
@@ -2260,12 +2294,11 @@ def render_invariants(step: dict) -> str:
 def solver_material(step: dict, context: str) -> str:
     """TEST_WRITE と IMPL のブリーフを、この同じ本文で始める。
 
-    CONTEXT.md はステップをまたいで同じで、契約、不変条件、署名は同じステップの
-    位相をまたいで同じだ。先頭がそろっていれば、後の呼び出しはこの部分を
-    プロンプトキャッシュから読む。位相ごとの指示は、この後に置く。goal は
-    TEST_WRITE に渡さないので、ここには入れない。
+    背景、契約、署名は同じモジュールの位相をまたいで同じだ。先頭がそろっていれば、
+    後の呼び出しはこの部分をプロンプトキャッシュから読む。位相ごとの指示は、
+    この後に置く。受け入れ条件は TEST_WRITE にだけ渡すので、ここには入れない。
     """
-    return f"""Below is the context for one step of a build. Your task follows
+    return f"""Below is the context for one module of a build. Your task follows
 after it.
 
 # Project context
@@ -2312,12 +2345,12 @@ def brief_test_write(step: dict, context: str, broken: str = "",
 
 Write tests for the signatures above. Do not write an implementation.
 
-# Acceptance criteria -- write exactly {step["expected_tests"]} tests, at least one per criterion
+# Acceptance criteria -- write exactly {step["expected_tests"]} tests, one per criterion
 {acceptance}
 
 # Files you may create or modify
 {chr(10).join(step["files_test"])}
-
+{test_files_section(step)}
 Write nothing outside those paths. The implementation does not exist yet, so
 every test you write must fail when run against {LANGUAGE["stub_shape"]}.
 Do not weaken a test to make it pass, and do not create the module under test.
@@ -2618,8 +2651,11 @@ CSHARP_ACCESS = re.compile(r"^(?:public|internal|protected|private)\b")
 CSHARP_MODIFIERS = r"(?:(?:public|internal|protected|private|static|abstract|sealed|partial|readonly|virtual|override|new)\s+)*"
 # 型の名前はドットで区切れる。`Board.Cell` は Board の中の入れ子の型。
 CSHARP_TYPE_NAME = r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*"
+# `(...)` はプライマリコンストラクタ（C# 12）。Promete のシーンはこの形で書く
+# （`class MainScene(Keyboard keyboard) : Scene`）。
 CSHARP_TYPE_LINE = re.compile(
     rf"^(?P<mods>{CSHARP_MODIFIERS})(?P<kind>class|struct|interface|enum)\s+(?P<name>{CSHARP_TYPE_NAME})"
+    r"(?P<params>\s*\([^()]*\))?"
     r"(?P<bases>\s*:\s*[^{]+?)?\s*(?:\{(?P<body>.*)\})?\s*;?\s*$")
 CSHARP_CTOR_LINE = re.compile(
     rf"^(?P<mods>{CSHARP_MODIFIERS})(?P<type>(?:[A-Za-z_]\w*\.)*(?P<last>[A-Za-z_]\w*))\.(?P=last)"
@@ -2725,7 +2761,8 @@ def generate_csharp_stub(step: dict, requires: list[str],
             if entry["path"] != path or "head" in entry:
                 return None
             short = name.rpartition(".")[2]
-            entry["head"] = f"{mods} {kind} {short}{declared.group('bases') or ''}".rstrip()
+            entry["head"] = (f"{mods} {kind} {short}{(declared.group('params') or '').strip()}"
+                             f"{declared.group('bases') or ''}").rstrip()
             entry["kind"] = kind
             entry["bases"] = declared.group("bases") or ""
             body = entry["body"] = declared.group("body") or ""
@@ -2821,6 +2858,10 @@ def generate_csharp_stub(step: dict, requires: list[str],
             ns = csharp_file_namespace(m.group(1))
         namespaces.setdefault(m.group(1), ns)
         known.setdefault(declared_name(line).split(".")[0], ns)
+    # 持ち込む先のライブラリの型（Promete の Scene や Mouse）。契約が口にすれば using を
+    # 足す。プロジェクトの型と同じ名前なら、プロジェクトの型を取る。
+    library = {name: ns for name, ns in library_namespaces().items() if name not in known}
+    known.update(library)
 
     unity = unity_refs() and any(
         CSHARP_UNITY_TYPES.search(line) for line in step["contracts"]["provides"] + requires)
@@ -2835,11 +2876,13 @@ def generate_csharp_stub(step: dict, requires: list[str],
             files[path] = merged
             continue
         own = namespaces.get(path, "")
-        usings = ["System", "System.Collections.Generic", "System.Linq"] \
-            + (["UnityEngine"] if unity else []) \
-            + sorted({ns for ns in namespaces.values() if ns and ns != own})
         text = "\n\n".join(csharp_type_block(types[name]) for name in order
                            if types[name]["path"] == path)
+        used = {ns for name, ns in library.items()
+                if re.search(rf"(?<![\w.]){re.escape(name)}(?!\w)", text)}
+        usings = ["System", "System.Collections.Generic", "System.Linq"] \
+            + (["UnityEngine"] if unity else []) \
+            + sorted({ns for ns in namespaces.values() if ns and ns != own} | used)
         if own:
             text = f"namespace {own}\n{{\n" + "\n".join(
                 f"    {line}" if line else "" for line in text.splitlines()) + "\n}"
@@ -3231,8 +3274,8 @@ the project with Grep and Glob before writing something that may already exist.
 Do not guess at a library's API. Code that looks members up by name at run
 time (reflection, `getattr`) and quietly falls back when they are missing
 compiles and passes the tests, then does nothing in the real program. If you
-do not know a library member, look for how the project or CONTEXT.md uses it;
-if neither says, write that in your final message instead of guessing.
+do not know a library member, look for how the project or the context above
+uses it; if neither says, write that in your final message instead of guessing.
 """
 
 
@@ -3274,154 +3317,25 @@ def absorb_timeout(step: dict, attempt: int, backend: str,
 
 
 # --------------------------------------------------------------------------
-# エスカレーション
+# 契約の名前と、条件の規則
 # --------------------------------------------------------------------------
-
-
-def escalation_count(step_id: str) -> int:
-    """このステップがすでに何回エスカレーションしたか。台帳から読む。
-
-    メモリの中の数ではなく台帳から数える。上限の要点は、プロセスを終わらせる
-    出来事（VM の停止、reset、明日再開する走行）を越えて残ることだからだ。
-    `reset` が台帳を巻き戻さないのもこのためだ。reset が消す記録から数える上限は、
-    上限にならない。
-
-    人が `plan amend` でこのステップを直したら、そこから数え直す。上限が止めるのは
-    プランナーが同じ条件に (a) を繰り返すことで、人が書き換えた条件は別のものだ。
-    """
-    if not LEDGER.exists():
-        return 0
-    n = 0
-    for line in LEDGER.read_text(encoding="utf-8").splitlines():
-        if not line.strip():
-            continue
-        try:
-            rec = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if rec.get("step") != step_id:
-            continue
-        if rec.get("event") == "ESCALATED":
-            n += 1
-        elif rec.get("event") == "PLAN_AMEND":
-            n = 0
-    return n
-
-
-def escalated_step() -> str | None:
-    """答えを待つ ESCALATION.md のステップ。無ければ None。見出しから読む。"""
-    try:
-        first = ESCALATION.read_text(encoding="utf-8").splitlines()[:1]
-    except OSError:
-        return None
-    match = re.fullmatch(r"# ESCALATION: step (\S+)", first[0].strip()) if first else None
-    return match.group(1) if match else None
-
-
-def escalate(step: dict, halt: Halt, attempt: int, run_: TestRun | None) -> None:
-    failed = "\n".join(f"- {k}" for k in (run_.failure_kinds if run_ else [])) or "(none recorded)"
-    n = escalation_count(step["id"]) + 1          # 今回の分を含む
-    cap = LIMITS["escalations"]
-
-    # R4 で止まったなら、スタブに対して通ったテストの数を残す。プランナーが消して
-    # よい条件の数は、この数から決まる（check_proposal を参照）。
-    r4_passing = len(run_.passed_names) \
-        if run_ is not None and halt.phase == "RED_GATE" and halt.reason.startswith("R4") \
-        else 0
-
-    # RUNNER_SPEC 6-2 は、この制約をファイルそのものに書くことを求めている。読む者が
-    # 規則を忘れていても成り立つようにだ。cmd_run_all でも強制しており、そちらは
-    # 訊かない。
-    if n > cap:
-        constraint = f"""- This is escalation {n} of at most {cap} for this step, so **(a) is no
-  longer available**. Only (b) rewriting the acceptance criteria, or (c)
-  rebuilding from further upstream -- and both of those are the human's
-  decision, not the planner's (RUNNER_SPEC 6-2). The human makes it with
-  `loop plan amend {step["id"]} <tasks.json>`.
-- If (c) is chosen, name every green step that has to be discarded."""
-    else:
-        constraint = f"""- The acceptance criteria for this step must NOT be weakened.
-- This is escalation {n} of at most {cap} for this step. Permitted responses are
-  (a) tighten the goal, or escalate. Rewriting the acceptance criteria is case
-  (b) and is a decision for the human, not the planner (RUNNER_SPEC 6-2)."""
-        if r4_passing:
-            constraint += f"""
-- One exception, because this stopped at R4: you may DELETE up to {r4_passing}
-  acceptance entr{"y" if r4_passing == 1 else "ies"} of this step whose tests
-  cannot fail against any stub, and lower expected_tests by at most the same
-  number. Entries you keep must stay word for word."""
-
-    ESCALATION.write_text(
-        f"""# ESCALATION: step {step["id"]}
-
-## Facts
-- phase: {halt.phase}
-- reason: {halt.reason}
-- attempt: {attempt} of {len(attempt_schedule(step))}
-- solver backends: {", ".join(SOLVER_TIERS)}
-- escalation: {n} of {cap}
-
-## Failing tests
-{failed}
-
-## Detail
-```
-{halt.detail[-4000:]}
-```
-
-## Constraints on the planner
-{constraint}
-""",
-        encoding="utf-8",
-    )
-    extra = {"r4_passing": r4_passing} if r4_passing else {}
-    ledger("ESCALATED", step=step["id"], phase=halt.phase, reason=halt.reason,
-           escalation_no=n, **extra)
-    print(f"\nESCALATION written to {ESCALATION}", file=sys.stderr)
-
-
-# --------------------------------------------------------------------------
-# ステップ
-# --------------------------------------------------------------------------
-
-
-# --------------------------------------------------------------------------
-# 計画のリンタ（RUNNER_SPEC 8 章）
-# --------------------------------------------------------------------------
-
-# 契約の行が宣言するものの名前。言語ごとの形（LANGUAGES の `provides_pattern`）を
-# 持ち、そうでなければならない理由は、L3 が名前を比べるからだ。「このステップが
-# 依存するものの中に、求めるものを提供するものはあるか」。
-#
-# Python では def と class の両方を見る。データモデルを導入するステップは
-# `class GameState(...)` を提供し、`def` だけを照合すると、後のステップの
-# `requires` がすべて、リンタに見えない名前について L3 で落ちる。実際の計画が
-# 初めてデータモデルのステップを持ったときに見つかった。
-#
-# Python だけの版は、TypeScript で L3 を「満たせない」ものにし、両側が違う
-# 落ち方をしたので気づけなかった。provides の側はパターンに合わない行を「捨て」、
-# 空の集合を作った。requires の側は行全体に戻り、それをその空の集合から探した。
-# requires の項目はすべて、常に違反で、どの計画も答えようがなかった。run 8 の
-# bootstrap は、このパターンが見えるまでに試行2回と56分を使った。1回目の
-# フィードバックはよくある食い違いに見え、プランナーはそれを同じ失敗へと「直した」。
-#
-# Python の文法で書いた規則が、有料の試行を使わせたのは、L14 の語彙、L15 の
-# 名前の境界に続いて3度目だ。規則は一度も誤っていなかった。誤っていたのは表現だ。
-
 
 def declared_name(line: str) -> str:
-    """契約の行が宣言する名前。何も宣言していなければ行全体。
+    """契約の行が宣言する名前。言語ごとの形（`provides_pattern`）で読む。
+    何も宣言していなければ行全体。
 
-    L3 の両側で、名前が取れないときの扱いを同じにしてある。その対称性が修正の
-    中身だ。合わない行を `provides` から捨てて `requires` には残すと、規則が
-    厳しくなるのではなく、答えようのないものになる。
+    requires と provides は、この名前で突き合わせる。両側で、名前が取れないときの
+    扱いを同じにしてある。合わない行を片側だけで捨てると、規則が厳しくなるのでは
+    なく、答えようのないものになる。
     """
     match = LANGUAGE["provides_pattern"].search(line)
     if not match:
         return line.strip()
     # C# の型とメンバーのように、組が2つある言語もある。当たった方を取る。
     return next(group for group in match.groups() if group)
-# L8 の「具体的」: 数、引用符で囲んだリテラル、例外の型。形容詞だけでできた
+
+
+# 受け入れ条件の「具体的」: 数、引用符で囲んだリテラル、例外の型。形容詞だけでできた
 # 受け入れ条件は、2人が同じように書けるテストにならない。
 #
 # 数字ではなく数を見る。`\d` だけだと、`s2` という変数名の "2" で満たされ、
@@ -3436,11 +3350,11 @@ def declared_name(line: str) -> str:
 CONCRETE = re.compile(r"(?<![\w.])\d+(?:\.\d+)?(?!\w)|'[^']*'|\"[^\"]*\"|\b[A-Z]\w*(?:Error|Exception)\b"
                       r"|\[\]|\{\}|\(\)|\b(?:True|False|None)\b")
 
-# L16: 反射でコードの形だけを確かめる条件。スタブは契約どおりの型とメンバーを持つ
+# 反射でコードの形だけを確かめる条件。スタブは契約どおりの型とメンバーを持つ
 # ので、型の名前、基底型、メソッドの有無はスタブの時点で通り、R4 が必ず止める。
 # 取り込んだ Promete のプロジェクトで、`given: typeof(Program), typeof(MainScene)` と
 # `then: has a static method named 'Main'; base type whose Name is 'Scene'` の条件が
-# R4 で止まり、人が2回計画から消した。前提が反射で、かつ結果が形を主張するときだけ
+# R4 で止まり、人が2回消した。前提が反射で、かつ結果が形を主張するときだけ
 # 落とす。片方だけなら、振る舞いを確かめる条件かもしれない。
 REFLECTION = re.compile(
     r"\btypeof\s*\(|\breflect(?:ion|ing|ed)?\b|\bGetType\s*\(|\bAssembly\b"
@@ -3455,15 +3369,10 @@ SHAPE = re.compile(
     re.IGNORECASE)
 
 CASES = {"normal", "boundary", "error"}
-REQUIRED_KEYS = {
-    "id": str, "kind": str, "goal": str, "depends_on": list, "acceptance": list,
-    "contracts": dict, "files_write": list, "files_test": list,
-    "expected_tests": int, "max_attempts": int, "review_gate": bool,
-}
 
 
 def modules_of(files_write: list[str]) -> list[str]:
-    """ステップ自身のファイルが作る、import できるモジュール名。
+    """ファイルが作る、import できるモジュール名。
 
     src/incgame/engine.py     -> incgame.engine       (Python)
     src/incgame/__init__.py   -> incgame
@@ -3471,7 +3380,7 @@ def modules_of(files_write: list[str]) -> list[str]:
     src/idlegame/index.ts     -> idlegame
 
     2つの言語は同じ考えを違う綴りで書く。区切り文字と、「ディレクトリそのもの」を
-    意味する名前だ。L15 のほかの部分は何も変わらない。
+    意味する名前だ。
     """
     suffix = LANGUAGE["source_suffix"]
     separator = LANGUAGE["module_separator"]
@@ -3489,338 +3398,522 @@ def modules_of(files_write: list[str]) -> list[str]:
     return names
 
 
-def adopt_language(tasks: dict) -> None:
-    """判定する計画から言語を取る。
+# --------------------------------------------------------------------------
+# 設計仕様書を読む（RUNNER_SPEC 6 章）
+# --------------------------------------------------------------------------
+#
+# docs/modules/ の詳細設計仕様書は、人が読む日本語の文と、ランナーが読む契約の
+# ブロックを持つ。ランナーが読むのは契約のブロックと節の区切りだけで、文の中身は
+# 判断しない。受け入れ条件は ac/ にモジュールごとの JSON で置く。
 
-    いくつかの規則は1つの言語の文法で表されているので、計画を判定するとは、その
-    計画の言語で判定することだ。それを呼び出し側に任せたら、3回忘れられた。
-    `plan apply` は既定の言語で走り、`modules_of` が `.py` を見つけられないせいで
-    TypeScript の計画の契約22件をすべて拒んだ。直後に `validate` も同じことをした。
-    どちらも正しい計画で、文法が違っていた。
+CONTRACT_BLOCK = re.compile(r"^```ndjson contract[ \t]*\r?\n(.*?)^```[ \t]*$", re.M | re.S)
+CONTRACT_OPEN = re.compile(r"^```ndjson contract\b", re.M)
+OVERVIEW_HEADING = "## 概要"
+BEHAVIOUR_HEADING = "## 振る舞い"
+CONTRACT_HEADING = "## 契約"
+JAPANESE = re.compile(r"[぀-ヿ一-鿿]")
+# モジュールの id は src/ の下のパスから拡張子を落としたもの（`game/board`）。
+MODULE_ID = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_-]*(?:/[A-Za-z0-9_][A-Za-z0-9_-]*)*")
+KINDS = {"unit", "integration"}
+CRITERION_KEYS = {"case", "kind", "given", "then"}
 
-    呼び出し側が毎回設定を覚えておかなければならないグローバル変数は、誰かが
-    設定し忘れるグローバル変数だ。答えは計画が持っているので、計画を読む関数が
-    それを読む。
+
+def section(text: str, heading: str) -> str | None:
+    """`heading` の行から、次の1段か2段の見出しの前まで。無ければ None。
+
+    コードブロックの中の `#` の行は見出しに数えない。
     """
-    language = tasks.get("language") if isinstance(tasks, dict) else None
-    if language in LANGUAGES:
-        framework = tasks.get("framework")
-        use_language(language, framework if framework in FRAMEWORKS[language] else None)
-
-
-def validate_plan(tasks: dict) -> list[str]:
-    """違反をすべて返す。プランナーの出力は、従う前に確かめる。計画の側で唯一の
-    客観的な関門で、どのモデルも呼ばずに走る。"""
-    adopt_language(tasks)
-    problems: list[str] = []
-    steps = tasks.get("steps")
-    if not isinstance(steps, list) or not steps:
-        return ["L1: tasks.json has no non-empty `steps` array"]
-
-    # L1 -- 形
-    for i, s in enumerate(steps):
-        where = f"step[{i}]" if not isinstance(s.get("id"), str) else f"step {s['id']}"
-        for key, typ in REQUIRED_KEYS.items():
-            if key not in s:
-                problems.append(f"L1: {where} is missing `{key}`")
-            elif not isinstance(s[key], typ) or (typ is int and isinstance(s[key], bool)):
-                problems.append(f"L1: {where}.{key} must be {typ.__name__}")
-        if s.get("kind") not in ("skeleton", "unit", "integration"):
-            problems.append(f"L1: {where}.kind must be 'skeleton', 'unit' or 'integration'")
-        if "retry" in s and s["retry"] not in RETRY_MODES:
-            problems.append(f"L1: {where}.retry must be one of {list(RETRY_MODES)}")
-        for a in s.get("acceptance", []):
-            if not isinstance(a, dict) or {"case", "given", "then"} - a.keys():
-                problems.append(f"L1: {where} has an acceptance entry without case/given/then")
-            elif a["case"] not in CASES:
-                problems.append(f"L1: {where} acceptance case '{a['case']}' is not one of {sorted(CASES)}")
-        if not isinstance(s.get("contracts", {}).get("provides"), list):
-            problems.append(f"L1: {where}.contracts.provides must be a list of signature strings")
-
-    if problems:
-        return problems  # 後の規則は、形が成り立っていることを前提にする
-
-    ids = [s["id"] for s in steps]
-    seen: set[str] = set()
-    provides_by_step = {
-        s["id"]: {declared_name(p) for p in s["contracts"]["provides"]}
-        for s in steps
-    }
-
-    # L3 で認める既存の宣言。計画のどれかのステップが同じ名前を提供するなら、それは
-    # 書き換えなので、既存のものとしては数えない。求める側はそのステップに依存する。
-    # 走らせる途中では HEAD に前のステップのコードも入るので、それも同じ理由で
-    # 外れる。依存していないステップの提供物が、途中から認められることは無い。
-    # git を呼ぶので、依存先で足りないときだけ読む。
-    planned = set().union(*provides_by_step.values())
-    existing: set[str] | None = None
-
-    for s in steps:
-        sid = s["id"]
-
-        # L2 -- 依存は前だけを指す。だから循環は起こりえない
-        for dep in s["depends_on"]:
-            if dep not in seen:
-                problems.append(f"L2: step {sid} depends on {dep}, which is not an earlier step")
-        seen.add(sid)
-
-        # L3 -- 求めるものはすべて、依存先のどれかが提供しているか、既存のコードが
-        # 宣言している
-        available = set().union(*(provides_by_step[d] for d in s["depends_on"] if d in provides_by_step)) \
-            if s["depends_on"] else set()
-        for req in s["contracts"].get("requires", []):
-            name = declared_name(req)
-            if name in available:
-                continue
-            if existing is None:
-                existing = {declared_name(line) for line in existing_contracts()} - planned
-            if name not in existing:
-                problems.append(f"L3: step {sid} requires `{name}`, which no dependency "
-                                f"provides and the code already in the repository does not declare")
-
-        # L5 -- ファイルは書くか試すかのどちらかで、両方にはならない
-        overlap = set(s["files_write"]) & set(s["files_test"])
-        if overlap:
-            problems.append(f"L5: step {sid} lists {sorted(overlap)} in both files_write and files_test")
-
-        # L12 -- 書き込みの柵が覆うのは src/ と tests/ だけ
-        #
-        # set_writable() が chmod するのはちょうどその2つのディレクトリで、adopt()
-        # がたどるのもその2つだ。ほかの場所に書くステップは、まったく柵の中に
-        # いない。ワークスペースの根はグループで書ける（ソルバーのパッチの道具が
-        # 要る）ので、ソルバーは src/ の隣にパッケージを作り、コードを書けない
-        # はずの位相でそこに書ける。assert_touched は後でそれを捕まえるが、それでは
-        # 主な仕組みがトリップワイヤになり、そこに作られたファイルは solver の
-        # 所有のまま残る。ランナーはそれを chmod も片付けもできない。
-        #
-        # 最初の計画はふつうこれを誤る。「パッケージはリポジトリの根に置く」は
-        # 普通の Python の配置だからだ。だからブリーフの助言ではなく、リンタが
-        # 持つ規則にする。
-        #
-        # 2つのディレクトリの場所はプロジェクトごとに決まる（LAYOUT）。
-        for f in s["files_write"]:
-            if not in_layout(f, "src"):
-                problems.append(f"L12: step {sid} writes {f}, which is outside {LAYOUT['src']}/")
-        for f in s["files_test"]:
-            if not in_layout(f, "tests"):
-                problems.append(f"L12: step {sid} tests {f}, which is outside {LAYOUT['tests']}/")
-
-        # L14 -- 契約は、渡すものの形を述べる
-        #
-        # BOOTSTRAP 1-5: 後のステップに渡るのは契約「だけ」だ。`-> tuple` は、
-        # 契約からは果たせない契約だ。要素の数がどこにも無いので、呼び出し側は
-        # 受け取ったものを分解できず、スタブは何を返せばよいか分からない。
-        #
-        #     def buy_max_affordable(...) -> tuple      要素の数が無い
-        #     stub:  return ("__stub__",)               要素は1つ
-        #     test:  result, count = buy_max_affordable(...)
-        #            ValueError: not enough values to unpack
-        #
-        # RED_GATE はそれを正しく止める（R5: 壊れているのは値ではなく呼び出し
-        # そのもの）が、その先の何もそれを直せない。ソルバーは STUB のあいだ署名
-        # しか見ない（テストを見せると答えを決め打ちできてしまう）。プランナーは
-        # エスカレーションを2回使っても直せなかった。欠陥はすでに書いた契約に
-        # あり、P5 は緑のステップの編集を許さないからだ。
-        #
-        # だから規則を、そのどれかが起きる前のここに置く。chmod 777 を見張るの
-        # ではなく sudo を取り上げるのと同じ手で、述べようのない契約の後始末を
-        # するのではなく、それを書けなくする。
-        #
-        # これは、言語に依存しない規則「契約が形を決める」を Python の形で
-        # 表したものだ。2つ目の言語は自分の型の構文で言い直す。規則そのものは
-        # 変わらない。
-        for provided in s["contracts"]["provides"]:
-            shapeless = LANGUAGE["shapeless"]
-            opener = LANGUAGE["shape_bracket"]
-            # 行頭のファイルのパスは型ではない（`List/Board.cs:` のような
-            # フォルダ名を、裸の List と読まない）。
-            signature_part = re.sub(r"^[\w./-]+\.\w+\s*:\s*", "", provided) \
-                if "shape_pattern" in LANGUAGE else provided
-            pattern = LANGUAGE.get("shape_pattern", ANNOTATION)
-            bare = sorted({name for name, bracket in pattern.findall(signature_part)
-                           if name in shapeless and bracket != opener})
-            if bare:
-                signature = provided.split(chr(8212))[0].strip()
-                problems.append(
-                    f"L14: step {sid} provides `{signature}` with "
-                    f"{', '.join(bare)} left unparameterised; a later step is "
-                    f"handed this line and nothing else, so the contents have to "
-                    f"be in it ({LANGUAGE['shape_example']}). "
-                    f"A named type is better still where the shape has meaning")
-
-        # L15 -- 契約は、宣言するものの置き場を言う
-        #
-        # テストを書くためのブリーフには、あえて goal を入れない。テストは実装の
-        # 説明からではなく、受け入れ条件から作るものだからだ。入れるのは
-        # `provides` だ。だから `provides` が関数の置き場のモジュールを言わないと、
-        # モジュール名はブリーフのどこにも無く、ソルバーは推測する:
-        #
-        #     def new_game(now: float) -> GameState
-        #     -> from incgame.game import new_game   （game.py は S10 のもの）
-        #     -> collected 1 test, expected 4        （R1。エスカレーションを1回失う）
-        #
-        # ランナーはモジュールを知っている（files_write に並んでいる）ので、
-        # 安上がりに見える直し方はそれをブリーフに足すことだ。それは採らなかった。
-        # 4つのファイルを書くステップでは、どの名前がどこにあるかがやはり推測に
-        # なり、しかも「後の」ステップにはどれも見えない。dep_contracts は凍結した
-        # `provides` の文字列しか描かないので、モジュールを運ばない契約は、後から
-        # 一切直せない。その情報は契約の中にあるべきだ。これも 1-5 で、ステップ間の
-        # 唯一の経路は、それだけで足りなければならない。
-        for provided in s["contracts"]["provides"]:
-            boundary = LANGUAGE["name_boundary"]
-            if not any(re.search(rf"(?<!{boundary}){re.escape(m)}(?!{boundary})",
-                                 provided)
-                       for m in modules_of(s["files_write"])):
-                signature = provided.split(chr(8212))[0].strip()
-                problems.append(
-                    f"L15: step {sid} provides `{signature}` without saying which "
-                    f"module it lives in; name one of "
-                    f"{', '.join(modules_of(s['files_write'])) or '(no modules)'} "
-                    f"in the line, e.g. `... -- defined in "
-                    f"{(modules_of(s['files_write']) or ['pkg.mod'])[0]}`")
-
-        # L6 -- normal、boundary、error がすべてそろっている
-        missing = CASES - {a["case"] for a in s["acceptance"]}
-        if missing:
-            problems.append(f"L6: step {sid} has no acceptance case of type {sorted(missing)}")
-
-        # L7
-        if s["expected_tests"] < len(s["acceptance"]):
-            problems.append(
-                f"L7: step {sid} expects {s['expected_tests']} tests for "
-                f"{len(s['acceptance'])} acceptance criteria")
-
-        # L8 -- 人間のレビューを省くには、機械が確かめられる条件が要る
-        #
-        # `then` は「単独で」確かめる。`given` とつなげて確かめると、期待する
-        # 結果を別の呼び出しとの比較で述べた条件が、前提の中の数のおかげで通る:
-        #
-        #     given  state = new_game(0.0); p = buy(state, ...)
-        #     then   advance(p.state, ..., 0.0) == p.state exactly
-        #
-        # 両辺ともスタブから出てくるので同じ番兵の値になり、テストは RED_GATE で
-        # 「通る」。落ちうることを一度も示さなかったテストのために、R4 がステップを
-        # 止める。期待する結果は値でなければならず、テスト対象のコードが作った
-        # 2つのものの関係であってはならない。
-        if not s["review_gate"]:
-            for a in s["acceptance"]:
-                if not CONCRETE.search(a["then"]):
-                    problems.append(
-                        f"L8: step {sid} has review_gate false but the [{a['case']}] criterion "
-                        f"states no concrete value")
-
-        # L16 -- スタブが必ず満たす条件は、計画の段階で拒む
-        for a in s["acceptance"]:
-            if REFLECTION.search(a["given"]) and SHAPE.search(a["then"]):
-                problems.append(
-                    f"L16: step {sid}: the [{a['case']}] criterion checks the shape of the "
-                    f"code through reflection; a stub already has that shape, so its test "
-                    f"passes before anything is implemented (R4). Check what the code does")
-
-    # L4 -- 計画全体を通して、ファイルの持ち主は1つ
-    owners: dict[str, str] = {}
-    for s in steps:
-        for f in s["files_write"]:
-            if f in owners:
-                problems.append(f"L4: {f} is written by both {owners[f]} and {s['id']}")
-            owners[f] = s["id"]
-
-    # L17 -- テストのファイルを挙げるステップも1つ
-    #
-    # files_test に既存のテストファイルを挙げたステップは、それを丸ごと書き直す。
-    # 2つのステップが同じファイルを挙げると、後のステップが、前のステップが緑に
-    # なったときに凍結したテストを消す。
-    testers: dict[str, str] = {}
-    for s in steps:
-        for f in s["files_test"]:
-            if f in testers:
-                problems.append(f"L17: {f} is in files_test of both {testers[f]} and {s['id']}")
-            testers[f] = s["id"]
-
-    # L9 / L10 -- 早いうちにつながったものがあり、最後につなぐ
-    # L9 は、最初の3つのうちに integration か skeleton のステップを求めていた。
-    # L13 は「最初の」ステップを skeleton にすることを求め、それは作りの上で L9 を
-    # 満たすので、L9 はもう発火しえない。誰も落とせない規則として残さず、
-    # 2026-08-21 に廃止した。番号は使い回さない。L の番号は識別子で、過去の
-    # 走行の台帳がそれを参照している。
-    kinds = [s["kind"] for s in steps]
-    if kinds[-1] != "integration":
-        problems.append("L10: the final step is not an integration step")
-
-    # L13 -- 計画は walking skeleton から始まる
-    #
-    # L9 は早いうちに integration のステップを求め、そのコメントはそれが
-    # walking skeleton だと言っていた。そうではなかった。ここで言う
-    # "integration" はモジュールをつなぐステップというだけで、計画はそれを
-    # 満たしつつ（上の規則をすべて満たし、10ステップすべてで緑になり、スイート
-    # 全体を通しつつ）、作ったものに初期状態から届かないことがありうる。最初の
-    # 実際の計画がまさにそうだった。資源の唯一の出どころが生産で、生産には
-    # 発電機が要り、発電機は資源で買うしかないインクリメンタルゲーム。どの
-    # ステップにも誤りは無かった。始まりについてのステップが無かった。
-    #
-    # skeleton のステップは、端から端までの薄い切り口だ。システムの初期状態から、
-    # 公開 API を通って、人が製品として動いていると認めるものまで。最初に作り、
-    # 薄くする。後のステップがそれを厚くする。
-    #
-    # この規則が強制できるのは構造だ。計画は skeleton から始まり、ちょうど1つ
-    # 持つ。中の条件が誠実かは確かめられない。この規則が買うのは、計画を作る
-    # 時点で条件を「書かせる」ことだ。「新しいゲームで、……すると、プレイヤーは
-    # ……を持つ」は、最初の資源をどう得るかを決めずには書けない。その抜けは、
-    # 後で人間が気づくものから、プランナーが計画中に行き当たるものに変わる。
-    #
-    # 一度緑になった skeleton は緑のままだ。PASS_TO_PASS が後の VERIFY のたびに
-    # そのテストを走らせる。二重ループの TDD の、常設の端から端までのテストに、
-    # 反対側からたどり着いた形だ。最後まで赤ではなく最初のステップから緑で、
-    # それがこのランナーが実際に強制できる形だ。
-    skeletons = [s["id"] for s in steps if s["kind"] == "skeleton"]
-    if kinds[0] != "skeleton":
-        problems.append(
-            f"L13: the first step is kind '{kinds[0]}'; a plan starts with a "
-            f"'skeleton' step -- the thin end-to-end slice from the system's "
-            f"initial state to something a person would call the product working")
-    if len(skeletons) != 1:
-        problems.append(
-            f"L13: a plan has exactly one skeleton step, not {len(skeletons)}"
-            + (f" ({', '.join(skeletons)})" if skeletons else ""))
-
-    # L11 -- 何も使わないものは作らない。integration と skeleton のステップは
-    # 除く。そこでは部品をつなぐこと自体が成果物で、後のステップへの入力ではない。
-    used = set().union(*[
-        {declared_name(r) for r in s["contracts"].get("requires", [])}
-        for s in steps
-    ]) if steps else set()
-    for s in steps:
-        if s["kind"] in ("integration", "skeleton"):
+    lines = text.splitlines()
+    fenced = False
+    for i, line in enumerate(lines):
+        if line.startswith("```"):
+            fenced = not fenced
             continue
-        for name in provides_by_step[s["id"]] - used:
-            problems.append(f"L11: step {s['id']} provides `{name}`, which no step requires")
+        if fenced or line.strip() != heading:
+            continue
+        body, inner = [], False
+        for rest in lines[i + 1:]:
+            if rest.startswith("```"):
+                inner = not inner
+            elif not inner and re.match(r"#{1,2} ", rest):
+                break
+            body.append(rest)
+        return "\n".join(body).strip()
+    return None
 
+
+def heading_count(text: str, heading: str) -> int:
+    """コードブロックの外にある `heading` の行の数。"""
+    fenced, count = False, 0
+    for line in text.splitlines():
+        if line.startswith("```"):
+            fenced = not fenced
+        elif not fenced and line.strip() == heading:
+            count += 1
+    return count
+
+
+def without_contract(text: str) -> str:
+    """契約のブロックを除いた本文。"""
+    return CONTRACT_BLOCK.sub("", text).strip()
+
+
+def is_japanese(text: str) -> bool:
+    """契約のブロックと見出しを除いた本文が、日本語で書かれているか。
+
+    必須の見出し（`## 振る舞い` など）は日本語なので、見出しも数えると、本文が
+    英語の文書も通る。
+    """
+    prose = [line for line in without_contract(text).splitlines()
+             if not line.lstrip().startswith("#")]
+    return bool(JAPANESE.search("\n".join(prose)))
+
+
+def norm_sig(sig: str) -> str:
+    """署名の比較に使う形。空白の違いは数えない。"""
+    return " ".join(sig.split())
+
+
+def parse_contract(text: str) -> tuple[list[dict], list[dict], list[str]]:
+    """契約のブロックを読む。(provides, requires, 問題) を返す。"""
+    opened = len(CONTRACT_OPEN.findall(text))
+    blocks = CONTRACT_BLOCK.findall(text)
+    if opened != 1 or len(blocks) != 1:
+        return [], [], [f"has {opened} `ndjson contract` block(s); exactly one is required"]
+    provides: list[dict] = []
+    requires: list[dict] = []
+    problems: list[str] = []
+    for n, raw in enumerate(blocks[0].splitlines(), 1):
+        line = raw.strip()
+        if not line:
+            continue
+        try:
+            value = json.loads(line)
+        except json.JSONDecodeError as bad:
+            problems.append(f"contract line {n} is not JSON: {bad.msg}")
+            continue
+        if isinstance(value, dict) and "provides" in value:
+            sig = value["provides"]
+            if set(value) - {"provides", "entry"} or not isinstance(sig, str) \
+                    or not sig.strip() or not isinstance(value.get("entry", False), bool):
+                problems.append(f'contract line {n}: a provides line is {{"provides": '
+                                f'<signature>}}, with "entry": true when something outside '
+                                f'this design calls it')
+                continue
+            provides.append({"sig": norm_sig(sig), "entry": value.get("entry", False)})
+        elif isinstance(value, dict) and "requires" in value:
+            if set(value) != {"requires", "from"} \
+                    or not all(isinstance(value[k], str) and value[k].strip() for k in value):
+                problems.append(f'contract line {n}: a requires line is {{"requires": '
+                                f'<signature>, "from": <module>}}')
+                continue
+            requires.append({"sig": norm_sig(value["requires"]), "from": value["from"].strip()})
+        else:
+            problems.append(f"contract line {n} is neither a provides nor a requires line")
+    return provides, requires, problems
+
+
+def parse_ac(text: str | None, where: str) -> tuple[list[dict], list[str]]:
+    """受け入れ条件の JSON を読む。(条件, 問題) を返す。"""
+    if text is None:
+        return [], [f"{where}: missing; every module has acceptance criteria"]
+    try:
+        value = json.loads(text)
+    except json.JSONDecodeError as bad:
+        return [], [f"{where}: is not JSON: {bad}"]
+    criteria = value.get("criteria") if isinstance(value, dict) else None
+    if not isinstance(criteria, list) or not criteria:
+        return [], [f'{where}: needs a non-empty "criteria" list']
+    problems: list[str] = []
+    kept: list[dict] = []
+    for n, c in enumerate(criteria, 1):
+        if not isinstance(c, dict) or set(c) != CRITERION_KEYS \
+                or not all(isinstance(c[k], str) and c[k].strip() for k in CRITERION_KEYS):
+            problems.append(f"{where}: criterion {n} must have exactly case, kind, given "
+                            f"and then, each a non-empty string")
+            continue
+        if c["case"] not in CASES:
+            problems.append(f"{where}: criterion {n} case '{c['case']}' is not one of "
+                            f"{sorted(CASES)}")
+        if c["kind"] not in KINDS:
+            problems.append(f"{where}: criterion {n} kind '{c['kind']}' is not one of "
+                            f"{sorted(KINDS)}")
+        # 人間のレビューを省くには、機械が確かめられる条件が要る。`then` は単独で
+        # 確かめる。前提の中の数で通ると、2つの呼び出しの比べ合いが残る。
+        if not CONCRETE.search(c["then"]):
+            problems.append(f"{where}: the [{c['case']}] criterion {n} states no concrete "
+                            f"value in `then`")
+        # スタブはすでに契約どおりの形を持つので、形だけを確かめる条件は R4 で止まる。
+        if REFLECTION.search(c["given"]) and SHAPE.search(c["then"]):
+            problems.append(f"{where}: the [{c['case']}] criterion {n} checks the shape of "
+                            f"the code through reflection; a stub already has that shape, "
+                            f"so its test passes before anything is implemented (R4)")
+        kept.append(c)
+    missing = CASES - {c["case"] for c in kept}
+    if kept and missing:
+        problems.append(f"{where}: has no criterion of case {sorted(missing)}")
+    return kept, problems
+
+
+def module_files(module_id: str) -> list[str]:
+    """モジュールを作るファイル。C++ はヘッダとソースの対。"""
+    return [f"{LAYOUT['src']}/{module_id}{s}" for s in LANGUAGE["module_suffixes"]]
+
+
+def module_test_files(module_id: str, integration: bool, unit: bool = True) -> list[str]:
+    """モジュールのテストのファイル。ランナーが決め、ソルバーはここに書く。
+
+    単体テスト、統合テストの順で、条件のある種類のものだけを返す。条件の無い
+    ファイルを求めると、ソルバーは書くものが無く、TEST_WRITE が空のファイルで
+    止まる。テストを選ぶのにファイル名を使う言語（C# のクラス名、C++ のスイート名）
+    があるので、名前は言語の決まりに合わせる。
+    """
+    tests = LAYOUT["tests"]
+    parent, _, name = module_id.rpartition("/")
+    folder = f"{tests}/{parent}/" if parent else f"{tests}/"
+    language = LANGUAGE["name"]
+    if language == "python":
+        flat = module_id.replace("/", "_")
+        names = [f"{tests}/test_{flat}.py", f"{tests}/test_{flat}_integration.py"]
+    elif language == "typescript":
+        dotted = module_id.replace("/", ".")
+        names = [f"{tests}/{dotted}.test.ts", f"{tests}/{dotted}.integration.test.ts"]
+    elif language == "csharp":
+        names = [f"{folder}{name}Tests.cs", f"{folder}{name}IntegrationTests.cs"]
+    else:
+        names = [f"{folder}{name}Test.cpp", f"{folder}{name}IntegrationTest.cpp"]
+    if not integration:
+        return names[:1]
+    return names if unit else names[1:]
+
+
+def safe_id(step_id: str) -> str:
+    """モジュールの id を、ファイル名とタグに使える形にする。"""
+    return step_id.replace("/", "--")
+
+
+def shapeless_types(sig: str) -> list[str]:
+    """署名の中の、中身を述べていないコンテナ型。
+
+    後のモジュールに渡るのは契約の行だけだ。`-> tuple` は要素の数を言わないので、
+    呼び出し側は受け取ったものを分解できず、スタブは何を返せばよいか分からない。
+    """
+    shapeless = LANGUAGE["shapeless"]
+    opener = LANGUAGE["shape_bracket"]
+    pattern = LANGUAGE.get("shape_pattern", ANNOTATION)
+    return sorted({name for name, bracket in pattern.findall(sig)
+                   if name in shapeless and bracket != opener})
+
+
+def text_digest(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def read_texts(root: Path, suffix: str) -> dict[str, str]:
+    """root の下の `suffix` のファイルを、root からの相対パス（拡張子なし）ごとに読む。"""
+    if not root.is_dir():
+        return {}
+    found: dict[str, str] = {}
+    for directory, dirs, files in os.walk(root):
+        dirs.sort()
+        for name in sorted(files):
+            path = Path(directory) / name
+            if path.suffix != suffix or path.is_symlink():
+                continue
+            rel = path.relative_to(root).as_posix()
+            found[rel[:-len(suffix)]] = path.read_text(encoding="utf-8")
+    return found
+
+
+def head_files(prefix: str) -> set[str]:
+    """最後のコミットにある、`prefix` の下のファイル。"""
+    try:
+        listing = run(["git", "ls-tree", "-r", "-z", "--name-only", "HEAD", "--", prefix])
+    except OSError:
+        return set()
+    return set(filter(None, listing.stdout.split("\0"))) if listing.returncode == 0 else set()
+
+
+def design_problems(docs: dict[str, str],
+                    acs: dict[str, str]) -> tuple[dict[str, dict], list[str]]:
+    """詳細設計仕様書と受け入れ条件を読み、形を確かめる。(モジュール, 問題) を返す。"""
+    if not docs:
+        return {}, ["there is no module design: write at least one modules/<path>.md"]
+    modules: dict[str, dict] = {}
+    problems: list[str] = []
+    for mid, text in sorted(docs.items()):
+        where = f"modules/{mid}.md"
+        if not MODULE_ID.fullmatch(mid):
+            problems.append(f"{where}: the path does not name a source file under "
+                            f"{LAYOUT['src']}/ (letters, digits, '_' and '-' only)")
+            continue
+        provides, requires, bad = parse_contract(text)
+        problems += [f"{where}: {b}" for b in bad]
+        for heading in (BEHAVIOUR_HEADING, CONTRACT_HEADING):
+            if heading_count(text, heading) != 1:
+                problems.append(f"{where}: needs exactly one `{heading}` section")
+        if not is_japanese(text):
+            problems.append(f"{where}: is not written in Japanese")
+        if not bad and not provides:
+            problems.append(f"{where}: the contract provides nothing")
+        for p in provides:
+            bare = shapeless_types(p["sig"])
+            if bare:
+                problems.append(
+                    f"形: {mid} provides `{p['sig']}` with {', '.join(bare)} left "
+                    f"unparameterised; a later module is handed this line and nothing "
+                    f"else, so the contents have to be in it ({LANGUAGE['shape_example']})")
+        criteria, bad_ac = parse_ac(acs.get(mid), f"ac/{mid}.json")
+        problems += bad_ac
+        if any(c["kind"] == "integration" for c in criteria) and not requires:
+            problems.append(f"ac/{mid}.json: has integration criteria, but {mid} requires "
+                            f"nothing from another module")
+        modules[mid] = {
+            "id": mid, "doc": text, "provides": provides, "requires": requires,
+            "criteria": criteria, "files": module_files(mid),
+            "files_test": module_test_files(
+                mid, any(c["kind"] == "integration" for c in criteria),
+                unit=any(c["kind"] != "integration" for c in criteria)),
+            "design": text_digest(text + "\0" + (acs.get(mid) or "")),
+        }
+    for mid in sorted(set(acs) - set(docs)):
+        problems.append(f"ac/{mid}.json: there is no modules/{mid}.md for it")
+    # テストのファイル名は、C# のクラス名や C++ のスイート名になる。重なると、
+    # 2つのモジュールのテストが同じ名前で選ばれる。
+    owners: dict[str, str] = {}
+    for mid, module in modules.items():
+        for stem in sorted({Path(f).name for f in module["files_test"]}):
+            if stem in owners:
+                problems.append(f"{owners[stem]} and {mid} would both have tests named "
+                                f"{stem}; rename one of the modules")
+            owners[stem] = mid
+    return modules, problems
+
+
+def module_deps(modules: dict[str, dict]) -> dict[str, list[str]]:
+    """モジュールごとの、この設計の中の依存先。"""
+    return {mid: sorted({r["from"] for r in m["requires"]
+                         if r["from"] in modules and r["from"] != mid})
+            for mid, m in modules.items()}
+
+
+def module_order(modules: dict[str, dict]) -> tuple[list[str], list[str]]:
+    """依存先が先に来る順。輪があれば、(並べられた分, 輪に関わるモジュール)。"""
+    remaining = module_deps(modules)
+    order: list[str] = []
+    while remaining:
+        ready = sorted(mid for mid, deps in remaining.items() if set(deps) <= set(order))
+        if not ready:
+            return order, sorted(remaining)
+        order += ready
+        for mid in ready:
+            del remaining[mid]
+    return order, []
+
+
+def interface_problems(modules: dict[str, dict]) -> list[str]:
+    """インターフェースチェック。振る舞いは確かめず、契約の辻褄だけを見る。
+
+    存在       requires の名前を、from のモジュールか既存の src/ が提供している
+    署名の一致 計画したモジュールから求める署名が、提供する署名と同じ
+    依存の循環 モジュールの依存に輪が無い
+    未使用     どのモジュールも求めない provides が無い（"entry": true を除く）
+    居場所     1つの名前を提供するモジュールは1つ
+    """
+    problems: list[str] = []
+    provided = {mid: {declared_name(p["sig"]): p["sig"] for p in m["provides"]}
+                for mid, m in modules.items()}
+    existing: dict[str, list[str]] | None = None
+    head: set[str] | None = None
+    for mid, module in sorted(modules.items()):
+        for r in module["requires"]:
+            name, source = declared_name(r["sig"]), r["from"]
+            if source == mid:
+                problems.append(f"存在: {mid} requires `{name}` from itself")
+            elif source in modules:
+                sig = provided[source].get(name)
+                if sig is None:
+                    problems.append(f"存在: {mid} requires `{name}` from {source}, which "
+                                    f"does not provide it")
+                elif sig != r["sig"]:
+                    problems.append(f"署名の一致: {mid} requires `{r['sig']}` from "
+                                    f"{source}, which provides `{sig}`")
+            else:
+                if head is None:
+                    head, existing = head_files(LAYOUT["src"]), existing_declarations()
+                paths = [f for f in module_files(source) if f in head]
+                lines = [line for path in paths for line in existing.get(path, [])]
+                if not paths:
+                    problems.append(f"存在: {mid} requires `{name}` from {source}, which is "
+                                    f"neither a module of this design nor a file under "
+                                    f"{LAYOUT['src']}/")
+                elif lines and name not in {declared_name(line) for line in lines}:
+                    problems.append(f"存在: {mid} requires `{name}` from {source}, whose "
+                                    f"code does not declare it")
+    _, cycle = module_order(modules)
+    if cycle:
+        problems.append(f"依存の循環: these modules depend on one another in a cycle, or "
+                        f"on such a cycle: {', '.join(cycle)}")
+    used = {(r["from"], declared_name(r["sig"]))
+            for m in modules.values() for r in m["requires"]}
+    for mid, module in sorted(modules.items()):
+        for p in module["provides"]:
+            if not p["entry"] and (mid, declared_name(p["sig"])) not in used:
+                problems.append(f"未使用: {mid} provides `{declared_name(p['sig'])}`, which no "
+                                f"module requires; mark it \"entry\": true if something "
+                                f"outside this design calls it")
+    owners: dict[str, str] = {}
+    for mid, module in sorted(modules.items()):
+        for p in module["provides"]:
+            name = declared_name(p["sig"])
+            if name in owners and owners[name] != mid:
+                problems.append(f"居場所: `{name}` is provided by both {owners[name]} and {mid}")
+            owners.setdefault(name, mid)
     return problems
 
 
+def design_digest(modules: dict[str, dict]) -> str:
+    """設計全体のハッシュ。クリティックが読んだ設計と、承認する設計を突き合わせる。"""
+    return text_digest(json.dumps({mid: m["design"] for mid, m in sorted(modules.items())},
+                                  sort_keys=True))
+
+
+def basic_problems(docs: dict[str, str]) -> list[str]:
+    """基本設計仕様書の形。概要の節がちょうど1つあり、日本語で書いてある。"""
+    if not docs:
+        return ["there is no basic design: write at least one basic/<name>.md"]
+    problems = []
+    overviews = sum(heading_count(text, OVERVIEW_HEADING) for text in docs.values())
+    if overviews != 1:
+        problems.append(f"the basic design needs exactly one `{OVERVIEW_HEADING}` section "
+                        f"across its files, not {overviews}")
+    for name, text in sorted(docs.items()):
+        if not is_japanese(text):
+            problems.append(f"basic/{name}.md: is not written in Japanese")
+    return problems
+
+
+def basic_overview() -> str:
+    """基本設計仕様書の概要の節。"""
+    for text in read_texts(DOCS_BASIC, ".md").values():
+        found = section(text, OVERVIEW_HEADING)
+        if found is not None:
+            return found
+    return ""
+
+
+def current_design() -> tuple[dict[str, dict], list[str]]:
+    """docs/modules/ と ac/ にある、いまの設計。"""
+    return design_problems(read_texts(DOCS_MODULES, ".md"), read_texts(AC, ".json"))
+
+
+# --------------------------------------------------------------------------
+# 設計から下流の計画を作る
+# --------------------------------------------------------------------------
+#
+# 下流の位相はステップの辞書で回る。モジュールをそれに直したものを .runner/tasks.json
+# に置く。受け入れ条件を含むので、コミットしない。
+
+
+def legacy_line(sig: str, files: list[str]) -> str:
+    """契約の署名を、スタブを作る道具が読む行の形にする。置き場のファイルを添える。"""
+    language = LANGUAGE["name"]
+    if language == "python":
+        modules = modules_of(files)
+        return f"{sig} -- defined in {modules[0]}" if modules else sig
+    if language == "typescript":
+        return f"{files[0]}: " + re.sub(r"^export\s+(?:declare\s+)?", "", sig)
+    return f"{files[0]}: {sig}"
+
+
+def solver_tools_note() -> str:
+    """ソルバーがコマンドを走らせられないなら、そう言う文。"""
+    if any(tier in SOLVERS_THAT_RUN_COMMANDS for tier in SOLVER_TIERS):
+        return ""
+    return """The solver cannot run commands -- not the tests, and not anything else. It
+reads files and writes files, and that is all it can do. The runner runs the
+tests after the solver has finished and hands the failures to the next attempt.
+"""
+
+
+def module_context(module: dict, modules: dict[str, dict], overview: str) -> str:
+    """ソルバーに渡す背景。システムの目的、置き方、自分の設計、依存先の振る舞い。
+
+    ソルバーは docs/ を読めないので、要る部分だけをランナーが渡す。署名は契約の
+    節から別に渡す（dep_contracts と render_provides）。
+    """
+    deps = module_deps(modules)[module["id"]]
+    behaviours = "\n\n".join(
+        f"### {dep}\n{section(modules[dep]['doc'], BEHAVIOUR_HEADING) or '(not written)'}"
+        for dep in deps) or "(none -- this module uses no other module of this design)"
+    return f"""## What the system is for
+The overview of the basic design, written in Japanese:
+
+{overview or "(not written)"}
+
+## How the code is laid out
+{layout_text(LANGUAGE["layout_note"]).strip()}
+
+{solver_tools_note()}
+## This module: {module["id"]} ({", ".join(module["files"])})
+Its detailed design, written in Japanese. The signatures it provides are listed
+under "Signatures this step provides" below.
+
+{without_contract(module["doc"])}
+
+## What the modules it uses do
+{behaviours}
+"""
+
+
+def build_tasks(modules: dict[str, dict], stage: dict) -> dict:
+    """設計から、下流が回すステップの並びを作る。依存先が先に来る。"""
+    order, _ = module_order(modules)
+    overview = basic_overview()
+    deps = module_deps(modules)
+    steps = []
+    for mid in order:
+        module = modules[mid]
+        steps.append({
+            "id": mid,
+            "kind": "integration" if deps[mid] else "unit",
+            "goal": f"Implement the module {mid} so that its design above holds.",
+            "depends_on": deps[mid],
+            "contracts": {
+                "provides": [legacy_line(p["sig"], module["files"])
+                             for p in module["provides"]],
+                "requires": [legacy_line(r["sig"], module_files(r["from"]))
+                             for r in module["requires"]],
+                "invariants": [],
+            },
+            "acceptance": module["criteria"],
+            "files_write": module["files"],
+            "files_test": module["files_test"],
+            "expected_tests": len(module["criteria"]),
+            "max_attempts": 3,
+            "design": module["design"],
+            "context": module_context(module, modules, overview),
+        })
+    return {"version": 2, "language": stage.get("language") or LANGUAGE["name"],
+            "framework": stage.get("framework") or LANGUAGE["framework"],
+            "digest": design_digest(modules), "steps": steps}
+
+
 def load_plan(step_id: str) -> tuple[dict, str]:
-    tasks = json.loads((PLAN / "tasks.json").read_text(encoding="utf-8"))
+    tasks = json.loads(TASKS.read_text(encoding="utf-8"))
     steps = {s["id"]: s for s in tasks["steps"]}
     if step_id not in steps:
-        raise Halt("PLAN_LOAD", f"no step {step_id} in tasks.json")
-    context = (PLAN / "CONTEXT.md").read_text(encoding="utf-8")
-    return steps[step_id], context
+        raise Halt("PLAN_LOAD", f"no module {step_id} in the approved design")
+    return steps[step_id], steps[step_id].get("context", "")
 
 
-# --------------------------------------------------------------------------
-# プランナーの経路（BOOTSTRAP 1-4、RUNNER_SPEC 2 章）
-# --------------------------------------------------------------------------
+def green_designs() -> dict[str, str]:
+    """緑のモジュールと、緑になったときの設計のハッシュ。台帳から読む。
 
-
-def canon(obj) -> str:
-    """順序に依存しない比較用のキー。tasks.json の字下げを変えても、ステップの
-    キーを並べ替えても、変更と読まれてはならない。"""
-    return json.dumps(obj, sort_keys=True, ensure_ascii=False)
-
-
-def green_steps() -> set[str]:
-    """すでに緑になったステップの id。台帳から読む。"""
-    done: set[str] = set()
+    REOPEN は、そのモジュールの緑を取り消す。設計が変わったモジュールだけを、
+    下流に流し直すためだ。
+    """
+    done: dict[str, str] = {}
     if not LEDGER.exists():
         return done
     for line in LEDGER.read_text(encoding="utf-8").splitlines():
@@ -3831,52 +3924,247 @@ def green_steps() -> set[str]:
         except json.JSONDecodeError:
             continue
         if rec.get("event") == "GREEN" and rec.get("step"):
-            done.add(rec["step"])
+            done[rec["step"]] = rec.get("design", "")
+        elif rec.get("event") == "REOPEN":
+            for mid in rec.get("modules") or []:
+                done.pop(mid, None)
     return done
 
 
-def clear_proposal() -> None:
-    """新しい提案を頼む前に out/ を空にする。
+def green_steps() -> set[str]:
+    """すでに緑になったモジュールの id。"""
+    return set(green_designs())
 
-    そうしないと、前の呼び出しの残りのファイルが、プランナーがいま書いたものと
-    して適用される。ファイルは `planner` のものだが、ランナーはこれができる。
-    out/ はスティッキーで、スティッキーはファイルの所有者「または」ディレクトリの
-    所有者（ランナー）に削除を許す。
+
+# --------------------------------------------------------------------------
+# 段（RUNNER_SPEC 3 章）
+# --------------------------------------------------------------------------
+#
+# 段は plan/stage.json に書く。どの段にいるかで、プランナーが書けるものと、
+# ランナーが受け付けるコマンドが決まる。
+#
+#   stage      upstream | midstream | downstream | review
+#   open       中段で、プランナーが書き直してよいモジュール。None なら全部。
+#              [] は下流で止まった後で、人が直すモジュールを選ぶのを待っている
+#   critiqued  クリティックが読んだ設計のハッシュ
+
+
+def read_stage() -> dict:
+    try:
+        value = json.loads(STAGE_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def write_stage(**changes) -> dict:
+    stage = {**read_stage(), **changes}
+    STAGE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    STAGE_FILE.write_text(json.dumps(stage, ensure_ascii=False, indent=2) + "\n",
+                          encoding="utf-8")
+    STAGE_FILE.chmod(0o644)
+    return stage
+
+
+def use_stage_language(stage: dict) -> None:
+    """段に記録した言語と持ち込む先を使う。"""
+    if stage.get("language"):
+        load_settings({"language": stage["language"], "framework": stage.get("framework")})
+
+
+def refuse(message: str) -> int:
+    print(message, file=sys.stderr)
+    return 1
+
+
+def in_stage(stage: dict, *allowed: str) -> str | None:
+    """段が `allowed` のどれでもなければ、拒む理由。"""
+    now = stage.get("stage")
+    if now in allowed:
+        return None
+    return (f"refusing: this is for the {' or '.join(allowed)} stage, and the project is "
+            f"{'in the ' + now + ' stage' if now else 'not started (run spec import)'}")
+
+
+def tracked(rel: str) -> bool:
+    return bool(run(["git", "ls-files", "--", rel]).stdout.strip())
+
+
+def commit_paths(paths: list[Path], message: str, what: str) -> None:
+    """`paths` の変更だけをコミットして送る。変更が無ければ何もしない。
+
+    作業ツリーにほかの変更（止まったモジュールの試行）が残っていても、それは入れない。
     """
+    rel = [p.relative_to(PROJECT).as_posix() for p in paths]
+    rel = [r for r in rel if (PROJECT / r).exists() or tracked(r)]
+    if not rel:
+        return
+    run(["git", "add", "-A", "--"] + rel, check=True)
+    if run(["git", "diff", "--cached", "--quiet", "--"] + rel).returncode == 0:
+        return
+    run(["git", "commit", "-q", "-m", message, "--"] + rel, check=True)
+    publish(what)
+
+
+def write_texts(root: Path, files: dict[str, str], suffix: str,
+                only: set[str] | None = None) -> None:
+    """root の下を `files` にする。`only` があれば、その id のファイルだけを替える。"""
+    root.mkdir(parents=True, exist_ok=True)
+    current = read_texts(root, suffix)
+    for key in sorted(set(current) | set(files)):
+        if only is not None and key not in only:
+            continue
+        path = root / f"{key}{suffix}"
+        if key in files:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(files[key], encoding="utf-8")
+            path.chmod(0o644)
+        else:
+            path.unlink(missing_ok=True)
+    # 空になったディレクトリを、深いものから消す。
+    for directory in sorted((Path(d) for d, _, _ in os.walk(root)), reverse=True):
+        if directory != root and not any(directory.iterdir()):
+            directory.rmdir()
+
+
+def human_comment() -> str:
+    try:
+        return HUMAN_COMMENT.read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
+def cmd_spec_import() -> int:
+    """人が置いた仕様書を docs/spec/ に取り込む。最初の取り込みで上流を始める。"""
+    found: dict[str, bytes] = {}
+    if HUMAN_SPEC.is_dir():
+        for directory, dirs, files in os.walk(HUMAN_SPEC):
+            dirs.sort()
+            for name in sorted(files):
+                path = Path(directory) / name
+                if path.is_file() and not path.is_symlink():
+                    found[path.relative_to(HUMAN_SPEC).as_posix()] = path.read_bytes()
+    if not found:
+        return refuse(f"no specification at {HUMAN_SPEC}; put the files there "
+                      f"(`loop go <file>` does)")
+    if DOCS_SPEC.is_dir():
+        shutil.rmtree(DOCS_SPEC)
+    for rel, data in found.items():
+        path = DOCS_SPEC / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+        path.chmod(0o644)
+    if not read_stage().get("stage"):
+        write_stage(stage="upstream", open=None)
+    ledger("SPEC_IMPORT", files=sorted(found))
+    commit_paths([DOCS_SPEC, STAGE_FILE, LEDGER], "docs: import the specification",
+                 "the specification")
+    print(f"imported: {', '.join(sorted(found))}")
+    return 0
+
+
+def spec_text() -> str:
+    """docs/spec/ の仕様書。文書でないファイルは名前だけを挙げる。"""
+    parts = []
+    if DOCS_SPEC.is_dir():
+        for path in sorted(p for p in DOCS_SPEC.rglob("*") if p.is_file()):
+            rel = path.relative_to(DOCS_SPEC).as_posix()
+            if path.suffix in (".md", ".txt"):
+                parts.append(f"--- {rel} ---\n{path.read_text(encoding='utf-8')}")
+            else:
+                parts.append(f"--- {rel} --- (not text; it is in docs/spec/)")
+    return "\n\n".join(parts)
+
+
+# --------------------------------------------------------------------------
+# プランナーの経路
+# --------------------------------------------------------------------------
+#
+# プランナーは out/ の下の basic/、modules/、ac/ に書く。ランナーは呼ぶ前に
+# 今の文書をそこへ写して置き、プランナーはそれを書き直す。どの段で何を置くかが、
+# プランナーの書ける範囲だ。置かなかった部分に書いたものは、読まずに消す。
+#
+# 写しを置くディレクトリは runner の所有で、スティッキーにしない。プランナーの
+# Write は一時ファイルからの置き換えで書くので、スティッキーなら runner の
+# ファイルを置き換えられない。planner-run は umask 002 で動くので、プランナーが
+# 作ったものもランナーが消せる。
+
+PLANNER_PARTS = {"basic": ".md", "modules": ".md", "ac": ".json"}
+
+
+def share_with_planner(path: Path, directory: bool) -> None:
+    """プランナーが書き直せるように、グループ plannerw に開く。"""
+    shutil.chown(path, group="plannerw")
+    path.chmod(0o2770 if directory else 0o660)
+
+
+def clear_planner_out() -> None:
+    """out/ を空にする。前の呼び出しの残りを、今回の答えとして読まないためだ。"""
     PLANNER_OUT.mkdir(parents=True, exist_ok=True)
     for entry in PLANNER_OUT.iterdir():
-        if entry.is_dir() and not entry.is_symlink():
-            raise Halt("PLAN_PROPOSE",
-                       f"a directory is in the way in {PLANNER_OUT}: {entry.name}",
-                       "Remove it by hand; the runner will not recurse into a "
-                       "tree written by another uid.")
-        entry.unlink()
+        try:
+            if entry.is_dir() and not entry.is_symlink():
+                shutil.rmtree(entry)   # シンボリックリンクはたどらずに消す
+            else:
+                entry.unlink()
+        except OSError as error:
+            raise Halt("PLAN", f"cannot clear {PLANNER_OUT}: {error}",
+                       "planner-run must run with umask 002 so the runner can remove "
+                       "what the planner wrote")
 
 
-def restore_proposal(files: dict[str, str]) -> None:
-    """out/ を控えておいた提案に戻す。
+def prepare_planner_out(parts: dict[str, dict[str, str]]) -> None:
+    """out/ を空にし、`parts` の部分ごとに今の文書を写して置く。"""
+    clear_planner_out()
+    for part, files in parts.items():
+        root = PLANNER_OUT / part
+        root.mkdir()
+        share_with_planner(root, directory=True)
+        for key, text in sorted(files.items()):
+            path = root / f"{key}{PLANNER_PARTS[part]}"
+            for parent in reversed(path.relative_to(root).parents[:-1]):
+                if not (root / parent).is_dir():
+                    (root / parent).mkdir()
+                    share_with_planner(root / parent, directory=True)
+            path.write_text(text, encoding="utf-8")
+            share_with_planner(path, directory=False)
 
-    plan refine は改訂を頼む前に out/ を空にする。改訂が失敗したり、プランナーが
-    エスカレーションしたりすると、リンタを通っていた改訂前の提案が失われる。
-    それを防ぐために、ランナーが控えから書き戻す。書き戻したファイルは runner の
-    所有になるが、次の clear_proposal で消せるので支障はない。
+
+def prune_planner_out(parts: set[str]) -> list[str]:
+    """out/ の中で、この呼び出しに置かなかったものと、拡張子の違うものを消す。
+
+    プランナーは自分が書いたファイルを消せない。消せと言っても従えないので、
+    ランナーが消し、次の呼び出しにそう伝える。
     """
-    clear_proposal()
-    for name, text in files.items():
-        path = PLANNER_OUT / name
-        path.write_text(text, encoding="utf-8")
-        path.chmod(0o644)
+    notes = []
+    for entry in sorted(PLANNER_OUT.iterdir()):
+        if entry.name in parts and entry.is_dir() and not entry.is_symlink():
+            continue
+        notes.append(f"{entry.name} is not something you may write here; the runner deleted it")
+        if entry.is_dir() and not entry.is_symlink():
+            shutil.rmtree(entry)
+        else:
+            entry.unlink()
+    for part in sorted(parts):
+        root = PLANNER_OUT / part
+        for directory, dirs, files in os.walk(root):
+            for name in sorted(dirs + files):
+                path = Path(directory) / name
+                rel = f"{part}/{path.relative_to(root).as_posix()}"
+                if path.is_symlink():
+                    notes.append(f"{rel} is a symbolic link; the runner deleted it")
+                    path.unlink()
+                    if name in dirs:
+                        dirs.remove(name)
+                elif name in files and path.suffix != PLANNER_PARTS[part]:
+                    notes.append(f"{rel} is not a {PLANNER_PARTS[part]} file; the runner "
+                                 f"deleted it")
+                    path.unlink()
+    return notes
 
 
 def call_planner(brief: str) -> str:
-    """プランナーにブリーフを1つ渡す。形も理由も call_solver と同じ。
-
-    ブリーフが何を含むかに注意する。受け入れ条件を含む、いまの計画全体だ。それは
-    漏れではない。プランナーは条件の「書き手」だ。BOOTSTRAP 1-1 は条件を書く
-    アカウントとコードを書くアカウントを分けており、プランナーは `solverw` にも
-    `runner` にもいない。plan/ の 0700 が買うのは、プランナーが tasks.json を
-    「書けない」ことだ。望む変更はすべて、下の check_proposal を通って戻る。
-    """
+    """プランナーにブリーフを1つ渡す。形も理由も call_solver と同じ。"""
     PLANNER_BRIEF.mkdir(parents=True, exist_ok=True)
     brief_path = PLANNER_BRIEF / "plan.md"
     brief_path.write_text(brief, encoding="utf-8")
@@ -3887,529 +4175,673 @@ def call_planner(brief: str) -> str:
     try:
         # 上限は前提にせず渡す。planner-run の既定は 900 秒なので、ここで決めて
         # 渡さない値は、決して効かない上限になる。
-        proc = run_agent("planner", "PLAN_PROPOSE", lambda: run(
+        proc = run_agent("planner", "PLAN", lambda: run(
             agent_command("planner", PLANNER_RUN, brief_path, limit),
             timeout=limit + BACKSTOP_MARGIN))
     except subprocess.TimeoutExpired:
-        raise Halt("PLAN_PROPOSE", f"planner still running after {limit + BACKSTOP_MARGIN}s",
+        raise Halt("PLAN", f"planner still running after {limit + BACKSTOP_MARGIN}s",
                    "planner-run's internal timeout did not fire; check with: "
                    "pgrep -a -u planner")
     out = proc.stdout + proc.stderr
     if proc.returncode == 124:
-        raise Halt("PLAN_PROPOSE", "planner hit its own timeout in planner-run", out[-4000:])
+        raise Halt("PLAN", "planner hit its own timeout in planner-run", out[-4000:])
     if proc.returncode != 0:
-        raise Halt("PLAN_PROPOSE", f"planner exited {proc.returncode}", out[-4000:])
+        raise Halt("PLAN", f"planner exited {proc.returncode}", out[-4000:])
     return out
 
 
-def read_proposal() -> dict[str, str]:
-    """out/ にあるもの。読む前に、ファイル名の集合として確かめる。
-
-    「変更は3つのファイルに限る」の規則で、差分の検査ではなくファイル名の
-    許可リストにしてあるのは意図的だ。4つ目のファイルに触れて、その是非を議論
-    しなければならない提案は存在しない。4つ目のファイルの行き先が無いからだ。
-    """
-    if not PLANNER_OUT.is_dir():
-        raise Halt("PLAN_APPLY", f"no proposal directory at {PLANNER_OUT}")
-    entries = sorted(PLANNER_OUT.iterdir(), key=lambda p: p.name)
-    if not entries:
-        raise Halt("PLAN_APPLY", "the planner wrote nothing")
-
-    allowed = set(PROPOSAL_FILES) | {ESCALATE_NAME}
-    stray = sorted(e.name for e in entries if e.name not in allowed)
-    if stray:
-        raise Halt("PLAN_APPLY", "the proposal contains files the planner may not write",
-                   "wrote: " + ", ".join(stray) + "\nallowed: " + ", ".join(sorted(allowed)))
-
-    proposal = {}
-    for entry in entries:
-        if entry.is_symlink() or not entry.is_file():
-            raise Halt("PLAN_APPLY", f"{entry.name} is not a regular file",
-                       "A symlink here would apply content from outside the "
-                       "proposal directory.")
-        proposal[entry.name] = entry.read_text(encoding="utf-8")
-
-    if ESCALATE_NAME in proposal and len(proposal) > 1:
-        raise Halt("PLAN_APPLY",
-                   f"{ESCALATE_NAME} was written alongside a proposal",
-                   "Escalating and proposing at the same time is ambiguous: "
-                   "either the planner can fix this within its remit or it cannot.")
-    return proposal
-
-
-def removed_entries(old: list, new: list) -> int | None:
-    """new が old から項目を消しただけのものなら、消した数を返す。違えば None。
-
-    残った項目は、順番も中身も old のままでなければならない。書き換えや追加が
-    1つでもあれば、消しただけとは言えない。
-    """
-    kept = 0
-    for entry in old:
-        if kept < len(new) and canon(entry) == canon(new[kept]):
-            kept += 1
-    if kept != len(new):
-        return None
-    return len(old) - len(new)
-
-
-def r4_allowance() -> tuple[str, int] | None:
-    """いま開いているエスカレーションが R4 なら、(ステップ, 通ったテストの数)。
-
-    開いているかは ESCALATION.md の有無で決める。plan apply が答えると消え、
-    reset でも消える。台帳の最後の ESCALATED を見て、R4 で、通ったテストの数が
-    残っているときだけ返す。
-    """
-    if not ESCALATION.exists() or not LEDGER.exists():
-        return None
-    last = None
-    for line in LEDGER.read_text(encoding="utf-8").splitlines():
-        try:
-            record = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if record.get("event") == "ESCALATED":
-            last = record
-    if not last or last.get("phase") != "RED_GATE" \
-            or not str(last.get("reason", "")).startswith("R4"):
-        return None
-    passing = int(last.get("r4_passing") or 0)
-    return (last.get("step"), passing) if passing > 0 else None
-
-
-def check_proposal(old: dict, new: dict) -> list[str]:
-    """すでにあるステップについて、プランナーが変えてはならないものすべて。
-
-    BOOTSTRAP 1-4 は、プランナーがエスカレーションに (a)（goal を締め、進め方を
-    計画し直す）で答えることを許し、受け入れ条件を書き直すか捨てる (b) と (c) を
-    人間に残している。その区別を、ここで機械的に強制する。「テストを通すために
-    条件を緩めるな」は、詰まったエージェントが読み替える理由を最も多く持つ指示
-    だからだ。
-
-    ステップを足すのは許す。計画はそうやって育つ。
-
-    例外は1つだけある。RED_GATE の R4（スタブに対して通るテスト）で止まった
-    ステップでは、条件を「消す」ことを許す。スタブに対して通るテストは、落ちうる
-    ことを一度も示しておらず、どの実装でも同じ結果になる。そういう条件は緩める
-    対象ではなく、最初から何も確かめていない。run 8 の S10 では、環境が置いた
-    index.html の中身を確かめる条件のために、人間が計画を手で直した。
-
-    許すのは消すことだけで、残す条件は一字も変えない。消せる数は R4 で通った
-    テストの数まで、expected_tests を下げられるのも消した数までにする。どれを
-    消したかまでは機械で確かめられないので、数で縛る。
-    """
-    problems: list[str] = []
-    done = green_steps()
-    allowance = r4_allowance()
-    old_steps = {s["id"]: s for s in old.get("steps", [])}
-    new_steps = {s["id"]: s for s in new.get("steps", [])}
-
-    for sid, o in old_steps.items():
-        n = new_steps.get(sid)
-        if n is None:
-            problems.append(
-                f"P1: step {sid} was removed. Deleting a step deletes its acceptance "
-                f"criteria, which is case (c) and belongs to the human")
-            continue
-        dropped = 0
-        if canon(o.get("acceptance")) != canon(n.get("acceptance")):
-            removed = removed_entries(o.get("acceptance") or [], n.get("acceptance") or [])
-            limit = allowance[1] if allowance and allowance[0] == sid else 0
-            if not limit:
-                problems.append(
-                    f"P2: step {sid} has different acceptance criteria. That is case (b) "
-                    f"and belongs to the human")
-            elif removed is None:
-                problems.append(
-                    f"P2: step {sid} rewrites or adds acceptance criteria. After R4 you "
-                    f"may only delete entries; the ones you keep must stay word for word")
-            elif removed > limit:
-                problems.append(
-                    f"P2: step {sid} deletes {removed} acceptance entries, but R4 found "
-                    f"only {limit} test(s) passing against the stub")
-            else:
-                dropped = removed
-        # expected_tests は RED_GATE の R1 が照らす数なので、下げることは同じ条件に
-        # 対してテストを減らせと頼むことになる。リンタの L7 は条件の数を下回ることを
-        # すでに禁じている。これは、少しでも下がることを禁じる。R4 の例外で条件を
-        # 消したときだけ、消した数まで下げてよい。
-        if int(n.get("expected_tests", 0)) < int(o.get("expected_tests", 0)) - dropped:
-            problems.append(
-                f"P3: step {sid} lowers expected_tests from {o.get('expected_tests')} "
-                f"to {n.get('expected_tests')}"
-                + (f"; deleting {dropped} entr{'y' if dropped == 1 else 'ies'} allows "
-                   f"at most {int(o.get('expected_tests', 0)) - dropped}" if dropped else ""))
-        if o.get("review_gate") and not n.get("review_gate"):
-            problems.append(f"P4: step {sid} turns review_gate off")
-        # すでに緑のステップは、いまでは過去となった定義に対して測られた。書き
-        # 直してもコードは変わらない（ランナーは走らせ直さない）。台帳が、起きても
-        # いないことを記述するようになるだけだ。
-        if sid in done and canon(o) != canon(n):
-            problems.append(
-                f"P5: step {sid} is already green; its definition is a record of what "
-                f"was checked and cannot be edited")
-
-    return problems
-
-
-def preplan_tests_section(tasks: str, done: list[str]) -> str:
-    """改訂のブリーフの、計画より前からあるテストについての節。無ければ空。
-
-    HEAD には緑になったステップのテストも入っている。それは L17 で差し替えられない
-    ので、見せない。止まった理由が「前からあるテストを壊した」なら、そのテストが
-    確かめる振る舞いを要件が変えているのかもしれず、差し替えがプランナーの手になる。
-    """
-    try:
-        plan = json.loads(tasks)
-    except ValueError:
-        return ""
-    steps = plan.get("steps", []) if isinstance(plan, dict) else []
-    green = {f for s in steps if isinstance(s, dict) and s.get("id") in done
-             for f in s.get("files_test", []) or []}
-    preplan = {f: names for f, names in existing_tests().items() if f not in green}
-    if not preplan:
-        return ""
-    listing = "\n".join(f"    {f}\n" + "\n".join(f"        {n}" for n in names[:TEST_NAMES_SHOWN])
-                        for f, names in preplan.items())
-    return f"""
-# Tests that were in the repository before this plan
-
-{listing}
-
-If the step stopped because it breaks one of these, and the requirements change
-the behaviour that test checks, list its file in that step's `files_test`. The
-step then replaces the whole file: every test now in it is removed, and the file
-holds only that step's tests, counted in the same `expected_tests`. A test in
-that file for behaviour that does not change is removed with it. If the broken
-test checks behaviour the requirements keep, the implementation is what is wrong;
-do not replace the file.
-"""
-
-
-def human_answer_section() -> str:
-    """エスカレーションへの人の答え。無ければ空。"""
-    try:
-        answer = HUMAN_ANSWER.read_text(encoding="utf-8").strip()
-    except OSError:
-        return ""
-    if not answer:
+def feedback_section(feedback: str) -> str:
+    if not feedback:
         return ""
     return f"""
-# The human's answer
-The human read why the runner stopped and wrote this. It is a decision you
-do not get to overrule:
+# Your previous attempt was rejected
 
-{answer}
+The files you wrote are still in the current directory. Read them and FIX them
+in place -- do not start over. The runner checked them and reported exactly
+this:
 
-Follow it with the changes you may make. If it asks for one the runner rejects
-mechanically -- an acceptance entry changed or removed, a step removed -- do
-not attempt it: write `{ESCALATE_NAME}` naming the change, and the human makes
-it with `loop plan amend`.
+{feedback}
+
+Every line above is a rule the runner enforces in code. There is no arguing
+with them and no partial credit: fix all of them, then stop.
 """
 
 
-def brief_plan_revise(step: dict | None, escalation: str, feedback: str = "") -> str:
-    spec = SYSTEM_SPEC.read_text(encoding="utf-8") if SYSTEM_SPEC.exists() \
-        else "(not written yet)"
-    context = (PLAN / "CONTEXT.md").read_text(encoding="utf-8")
-    tasks = (PLAN / "tasks.json").read_text(encoding="utf-8")
-    done = sorted(green_steps())
-    focus = f"step {step['id']}" if step else "the plan"
-    # R4 で止まったときだけ、条件を消す手を伝える。check_proposal が許す範囲と
-    # 同じことを言う。
-    allowance = r4_allowance()
-    r4_section = "" if not allowance else f"""
-# When a test already passed against the stub (R4)
+def comment_section(comment: str) -> str:
+    if not comment:
+        return ""
+    return f"""
+# What the human said about the last version
 
-Step {allowance[0]} stopped because {allowance[1]} test(s) passed against the stub,
-before anything was implemented. A test that passes there has never shown that
-it can fail. Usually the criterion behind it checks something no step's code
-decides: a file the environment provides, or what a tool such as a development
-server produces. No implementation can make that criterion fail, so the step
-stops at R4 every time, however the goal is written.
+The human read the last version and wrote this. It is their decision, and you
+do not get to overrule it:
 
-For this step only, you may DELETE such acceptance entries:
-- at most {allowance[1]} of them, and only ones that cannot fail against any stub
-- keep every other entry word for word, in the same order
-- lower expected_tests by at most the number you delete
-- keep a "normal", a "boundary" and an "error" case (L6)
-
-If the criterion is about this step's own behaviour and the stub happened to
-satisfy it, do not delete it. Tighten the goal or the contract instead so that a
-stub cannot satisfy it, or escalate.
+{comment}
 """
-    return f"""You are the planner. Revise the plan so that {focus} can succeed.
 
-You do not write code and you cannot reach the repository. You write files into
-the current directory and the runner decides whether to apply them.
-{preplan_tests_section(tasks, done)}
-# SYSTEM_SPEC.md
+
+def draft_with_retry(brief_for, check, parts: set[str], tag: str) -> list[str]:
+    """プランナーを呼び、書いたものを確かめる。通れば空、上限まで落ちたら最後の問題。
+
+    規則を述べる唯一の正式なものは、ランナーが持つ検査のコードだ。だからブリーフが
+    規則を漏れなく説明したことに期待せず、検査を走らせ、何が落ちたかを伝える。
+    ファイルは out/ に残し、プランナーは見えるものを直す。
+    """
+    feedback = ""
+    for attempt in range(1, LIMITS["revisions"] + 2):
+        call_planner(brief_for(feedback))
+        notes = prune_planner_out(parts)
+        problems = check()
+        ledger(tag, attempt=attempt, problems=problems)
+        if not problems:
+            return []
+        if attempt > LIMITS["revisions"]:
+            return problems
+        feedback = "\n".join(notes + problems)
+    return []   # 届かない。ループは必ず戻る
+
+
+def planner_reads_note() -> str:
+    return layout_text(f"""
+The code already in the repository is under {PROJECT}/{{SRC}}/. You may read it
+with Read, Grep and Glob to learn what exists and how it is written. You cannot
+write it, and you never see the tests.
+""")
+
+
+def brief_basic(spec: str, comment: str, feedback: str = "") -> str:
+    module_files_note = " and ".join(f"`{s}`" for s in LANGUAGE["module_suffixes"])
+    return f"""You are the planner. Write the basic design (基本設計仕様書) of the system the
+specification below asks for.
+
+You do not write code and you never will. A person reads what you write, and
+decides whether it is right before anything else is designed.
+
+# The specification, written by the human
+{spec}
+{planner_reads_note()}
+{environment_facts(short=True)}
+# What you write
+
+The basic design is the files under `basic/` in the current directory. If any
+are there, they are the current version: edit them. Otherwise create them,
+e.g. `basic/design.md`. Write it in Japanese.
+
+- Exactly one `{OVERVIEW_HEADING}` section across all the files. It says what the
+  system is for and how it is put together, and no concrete values: no
+  numbers, sizes, names of settings. Every module's solver receives this
+  section, and a value written here would compete with the module's own design.
+- The requirements you extracted from the specification, each stated so that a
+  person can tell whether it is met.
+- The design that meets them: the modules and what each is responsible for,
+  and how they work together. A module is one source file under
+  {LAYOUT["src"]}/ (its {module_files_note} file{"s" if len(LANGUAGE["module_suffixes"]) > 1 else ""}).
+  A type with no behaviour of its own -- a struct, an enum, a class that only
+  holds data -- is not a module; it belongs to the module that uses it, or to
+  one shared types module.
+- What this version will not do.
+
+Write nothing outside `basic/`. Do not write the modules' detailed design yet;
+that comes after the person approves this.
+{comment_section(comment)}{feedback_section(feedback)}
+Output nothing but the files. Do not restate the design in your final message.
+"""
+
+
+def brief_modules(spec: str, basic: str, open_: list[str] | None, comment: str,
+                  feedback: str = "") -> str:
+    suffixes = LANGUAGE["module_suffixes"]
+    pairing = ("" if len(suffixes) == 1 else
+               f" The {' and '.join(suffixes)} files of the same name are one module "
+               f"with one design: `modules/logic/board.md` is "
+               f"{' and '.join(f'`{{SRC}}/logic/board{s}`' for s in suffixes)}.")
+    rollback = "" if open_ is None else f"""
+# Only these modules may change
+
+A module failed downstream, and the person chose the modules whose design is
+wrong: {", ".join(open_)}.
+
+Change only modules/<module>.md and ac/<module>.json for those. Every other
+file under modules/ and ac/ must stay exactly as it is, and you may not add or
+remove a module: the runner compares every other file with the approved design
+and rejects any difference. The basic design does not change either.
+"""
+    return layout_text(f"""You are the planner. Split the basic design below into modules, and write the
+detailed design (詳細設計仕様書) and the acceptance criteria of each module.
+
+You do not write code. A separate agent writes each module, one at a time. It
+cannot see this design as a whole: it receives the overview of the basic
+design, its own module's design and acceptance criteria, and the contract and
+behaviour of the modules it uses. Nothing else reaches it.
+
+# The specification, written by the human
 {spec}
 
-# plan/CONTEXT.md
-{context}
+# The basic design, approved by the human
+{basic}
+{planner_reads_note()}
+{environment_facts(short=True)}{rollback}
+# How the code is laid out
 
-# plan/tasks.json
-{tasks}
+{LANGUAGE["layout_note"].strip()}
 
-# Why the runner stopped
-{escalation}
-{human_answer_section()}
-# Steps that are already green
-{", ".join(done) if done else "(none)"}
+# What you write, into the current directory
 
-# What you may write, into the current directory
-- `tasks.json`      the full revised plan, not a diff
-- `CONTEXT.md`      optional, only if the background the solver receives is what
-                    was wrong
-- `SYSTEM_SPEC.md`  optional, only if an agreed decision has to change
-- `{ESCALATE_NAME}`   instead of all of the above; see below
+For every module, two files. Those already here are the current version: edit
+them in place.
 
-Write no other file. A fourth filename is rejected without being read.
+- `modules/<path>.md` -- the module's detailed design. `<path>` is the source
+  file's path under {{SRC}}/ without its extension: `{{SRC}}/logic/board{suffixes[0]}`
+  is `modules/logic/board.md`.{pairing}
+- `ac/<path>.json` -- the module's acceptance criteria.
 
-# What you may change about a step that already exists
-The goal, the contracts, files_write, files_test, depends_on, max_attempts.
-That is: how the step is approached, and how it is described to the solver.
+Write nothing else. A file anywhere else is deleted without being read.
 
-The goal reaches only the solver that writes the implementation. The solver
-that writes the tests reads the contracts (invariants included) and the
-acceptance criteria, and never the goal. An instruction about how the tests
-must be written belongs in `contracts.invariants`; written into the goal, it
-reaches no one who writes a test.
+# The detailed design
 
-# What is rejected mechanically
-- changing any `acceptance` entry of a step that already exists
-- removing a step
-- lowering `expected_tests`, or turning `review_gate` off
-- any change at all to a step that is already green
-- a plan that fails the linter (RUNNER_SPEC section 8)
-{r4_section}
-This is BOOTSTRAP 1-4. Case (a) -- the implementation is what is wrong, so
-tighten the goal -- is yours. Case (b) -- the acceptance criteria themselves are
-wrong or unreachable -- and case (c) -- the upstream design is wrong -- are
-decisions for the human, not for you.
+Write it in Japanese, for a person to read. It has two sections:
 
-So if you conclude that this step cannot be made to pass without changing what
-it is required to do, do not try. Write a single file named `{ESCALATE_NAME}`
-saying which criterion is unreachable and why, and write nothing else. That is a
-correct outcome, and it is the only route to the human.
+    {BEHAVIOUR_HEADING}
+    What the module does and why: its responsibility, its rules, what it does
+    at the edges, which modules it uses and for what. Do not copy signatures
+    here; they are in the contract.
 
-{feedback_section(feedback)}
-Output nothing but the files. Do not restate the plan in your final message.
-"""
+    {CONTRACT_HEADING}
+    Exactly one code block with the language `ndjson contract`, one JSON
+    object per line, and nothing else that the runner reads.
 
-# --------------------------------------------------------------------------
-# 人間の要件から計画を起こす（BOOTSTRAP Phase 0〜3）
-# --------------------------------------------------------------------------
+A contract line is one of:
 
+    {{"provides": "<signature>"}}
+    {{"provides": "<signature>", "entry": true}}
+    {{"requires": "<signature>", "from": "<module>"}}
 
-# このランナーが受け入れる計画を作るのに、プランナーが要るものすべて。JSON の
-# 波括弧を含むので、f-string ではなく普通の文字列にしてある。中の規則はどれも
-# ランナーがどのみち強制するもので、ここに書くのは往復を1回省くためだけだ。
-# 書いたからといって、それが真になるわけではない。
-BOOTSTRAP_RULES = """
-# What to write, into the current directory
+- `provides` is what this module declares, one line per name.
+- `requires` is what it uses from another module, copied exactly as that
+  module's provides line has it. `from` is that module's path, e.g.
+  `logic/board`. Code already under {{SRC}}/ that no module of this design
+  rewrites is used the same way: `from` names its file without the extension.
+- `"entry": true` marks a provides line that something outside this design
+  calls: the program's starting point, what a framework calls, what existing
+  code calls, a library's public API.
 
-- `SYSTEM_SPEC.md`  the design, as agreed with the human. Short. The data model,
-                    the module boundaries, ONE OR TWO decisions that would be
-                    expensive to reverse, and a list of what v1 will not do.
-- `CONTEXT.md`      the only background the solver ever receives. It gets the
-                    same text on every step and has no memory between steps, so
-                    it must be self-contained: language and version, the exact
-                    test command, project conventions, domain vocabulary. Under
-                    100 lines.
-- `tasks.json`      the plan. Format below.
-- `ESCALATE.md`     INSTEAD of all of the above, if you cannot plan yet. See the
-                    last section.
+{LANGUAGE["contract_note"]}
 
-Write no other file. A fifth filename is rejected without being read.
+# The acceptance criteria
 
-# tasks.json
+    {{"criteria": [
+      {{"case": "normal", "kind": "unit", "given": "...", "then": "..."}},
+      ...
+    ]}}
 
-Top level:
+- `case` is "normal", "boundary" or "error", and every module has all three.
+- `kind` is "unit", or "integration" for a criterion that runs this module
+  together with the real modules it requires -- no stand-ins. Only a module
+  that requires something may have integration criteria.
+- Each criterion becomes exactly one test, written before the code.
+- `then` states a concrete value on its own: a number, a quoted literal, an
+  exception type, an empty collection ([] {{}} ()), or True / False / None.
 
-    "version": 1
-    "timeouts": {"test": 120, "solver": 960, "planner": 1800}  (optional)
-    "limits":   {"escalations": 1}                             (optional)
-    "steps":    [ ... ]
+# What the runner checks before the person sees it
 
-Two further top-level keys exist, "policy" and "solver_tiers", and you must not
-write them. They select how retries and solver backends behave, which is a
-property of the machine the plan runs on and not of the plan.
-
-Each step:
-
-    "id"              short and stable, e.g. "S1"
-    "kind"            "skeleton", "unit" or "integration". Exactly one skeleton,
-                      and it is the first step -- see "Start with a skeleton".
-    "goal"            what to build, addressed to the solver. It sees this only
-                      while implementing, never while writing the tests.
-    "depends_on"      ids of earlier steps; [] for the first
-    "contracts"       {"requires": [...], "provides": [...], "invariants": [...]}
-    "acceptance"      [{"case": "normal|boundary|error",
-                        "given": "...", "then": "..."}, ...]
-    "files_write"     exact paths the solver may create or modify
-    "files_test"      exact paths for the tests; never overlaps files_write
-    "expected_tests"  how many tests this step must produce
-    "max_attempts"    3 is normal
-    "review_gate"     false unless a human must read the tests before freezing
-
-Aim for 10 to 15 steps. One step is ONE behaviour that can fail on its own. If
-an implementation would run past roughly 150 lines, split it.
-
-# Start with a skeleton
-
-The first step is `"kind": "skeleton"`, and it is the only one. It is the thin
-end-to-end slice: starting from the state the system is in when it is brand new,
-going through the public API, arriving somewhere a person would recognise as the
-product doing its job.
-
-Thin is the point. Hardcode. Support one case, not the general one. Later steps
-deepen it, and its tests stay in the suite -- every later step is checked against
-them, so once this slice works it keeps working.
-
-Why this rule exists, plainly. A plan can decompose a system into ten clean
-layers, satisfy every rule here, go green on all ten, pass its whole suite, and
-still have built something that cannot be reached from where it starts. That is
-not hypothetical: it is what the previous plan for this project did. Every step
-was correct. There was no step about starting, so nothing ever asked whether
-starting was possible, and it was not.
-
-You cannot write this step's acceptance criteria without settling how the thing
-begins -- what a new instance holds, what the user's first action is, what it
-produces. If settling that turns out to need a decision the requirements did not
-make, that is worth knowing now, while it is still a sentence, rather than after
-ten steps of work. Decide it yourself if the requirements leave room; escalate
-only if the requirements rule out every answer.
-
-# Where the code goes -- not negotiable
-
-Every path in `files_write` starts with `{SRC}/`, and every path in `files_test`
-starts with `{TESTS}/`. Those two directories are the only ones the runner can
-open and close for writing, so a plan that puts code anywhere else cannot be
-enforced and is rejected.
-
-{LAYOUT_NOTE}
-
-# Rules the runner checks before it will run the plan
-
-A plan that breaks any of these is rejected without being run, so check them
-yourself first.
-
-    L2   a step may depend only on steps listed BEFORE it
-    L3   everything in contracts.requires is provided by something it depends on,
-         or is declared by the code already in the repository
-    L4   no file appears in files_write of two different steps
-    L5   files_write and files_test never overlap
-    L6   every step has at least one "normal", one "boundary" and one "error"
-         acceptance case
-    L7   expected_tests is at least the number of acceptance criteria
-    L8   with review_gate false, the `then` of every criterion states a concrete
-         value ON ITS OWN: a number, a quoted literal, an exception type, an
-         empty collection ([] {} ()), or True / False / None
-    L10  the LAST step is kind "integration"
-    L11  a "unit" step may not provide something that no later step requires
-    L12  files_write is under {SRC}/, files_test is under {TESTS}/
-    L13  the FIRST step is kind "skeleton", and it is the only one
-    L14  every type in contracts.provides states its contents: dict[str, Item],
-         tuple[State, int], list[str]. A bare dict, list, tuple or set is
-         rejected
-    L15  every line of contracts.provides names the module it lives in, and that
-         module is one of this step's own files_write
-    L16  no criterion inspects the code by reflection (typeof, GetMethod,
-         BaseType, hasattr, inspect) to check only its shape -- a type's name,
-         base type, or which members it has. The stub already has that shape
-    L17  no file appears in files_test of two different steps
+    存在        every requires line names something its `from` module provides,
+                or that the code already under {{SRC}}/ declares
+    署名の一致  a requires line is identical to the provides line it names
+    依存の循環  no module depends on itself through other modules
+    未使用      every provides line is required by some module, or is "entry": true
+    形          every container type in a provides line states its contents
+                ({LANGUAGE["shape_example"]}); a bare one is rejected
+    居場所      one name is provided by one module only
 
 # Four things that are not obvious
 
-These were each learned by watching a run fail on them.
+1. **A contract line carries shape, not meaning.** The tests run first against
+   a stub built from the provides lines. Anything in a provides line that says
+   what the code DOES ends up in the stub, and a criterion the stub already
+   satisfies stops the module.
 
-1. **contracts.provides holds signature strings and nothing else.**
-   The solver is asked for a stub before it is asked for an implementation, and
-   `provides` is what it is given. Anything in there that carries MEANING rather
-   than SHAPE gets faithfully implemented in the stub -- and a criterion that
-   the stub already satisfies has never been observed to fail, which stops the
-   step. Write `def parse(s: str) -> Config`. Do not write "raises ValueError on
-   bad input" here; that belongs in acceptance.
+2. **The next module is handed the contract line and nothing else.** A return
+   type of a bare tuple or list cannot be taken apart by a caller who has only
+   that line. Where the shape has meaning, a named type you provide beats a
+   parameterised container.
 
-2. **A contract states the shape of what it hands over (L14).**
-   A later step is handed this one line and nothing else -- not the source, not
-   the tests. `-> tuple` cannot be discharged from that line: the arity is not
-   in it, so the caller cannot take the result apart and the stub cannot know
-   what to build. Write `-> tuple[GameState, int]`, `-> dict[str, Generator]`,
-   `list[str]`. Where the shape carries meaning, a named type is better than a
-   parameterised container -- `-> Purchase` beats `-> tuple[GameState, int]`,
-   and it is a class you declare in `provides` like any other.
+3. **Every test must fail against the stub.** A criterion whose answer is a
+   value the stub can produce -- an empty string, zero, an empty list, an
+   argument returned unchanged -- or that compares two things the code under
+   test produced, passes there and stops the module. Write the expected value
+   out.
 
-3. **contracts.invariants must be observable through the public contract.**
-   Invariants go into the brief for writing the TESTS. An invariant about
-   internal structure ("must call normalize() rather than reimplement it")
-   makes the solver write a test that reaches inside the module, which then
-   errors instead of failing, and the runner rejects the step. State invariants
-   as facts about inputs and outputs. Put implementation requirements in `goal`,
-   which only the implementation phase sees.
-
-4. **The acceptance criteria are the specification.**
-   Write each as an exact input and an exact expected output, concrete enough
-   that two engineers who never spoke would write the same test. Prefer values
-   you can compute by hand. "the result is correct" is not a criterion;
-   "the result is exactly 2011.357" is.
-
-Also, and this one has stopped a step twice: the tests are first run against a
-stub, and RED_GATE rejects the step if ANY of them passes there (R4) -- a test
-that has never been seen to fail proves nothing later. Other criteria do not
-make up for it; one passing test stops the step. Two ways a criterion walks into
-this:
-
-- Its expected answer is a value the stub can produce -- an empty string, zero,
-  an empty list, or an argument returned unchanged.
-- It states the expected result as a comparison between two things the code
-  under test produced. `advance(p.state, catalog, 0.0) == p.state` is one:
-  both sides come from the stub, so both are the same sentinel and the test
-  passes. Write the expected value out instead -- `resource == 0.0,
-  generators == {'cursor': 1}, last_update == 0.0`. That is a criterion the
-  stub fails and a correct implementation passes, which is what a criterion is
-  for.
-"""
-
-BOOTSTRAP_ESCALATE = """
-# If you cannot plan yet
-
-BOOTSTRAP Phase 0: do not start designing while an important question is still
-open. If the requirements leave something undecided that would change the SHAPE
-of the plan -- a representation that is expensive to reverse, a scope boundary,
-a format, a rule with no stated behaviour at its edges -- do not guess.
-
-Write a single file named ESCALATE.md containing your questions, and write
-nothing else.
-
-Ask as few questions as will do; the human wants to answer once. For each
-question, state the assumption you would proceed on if they said nothing, so
-that "your assumptions are fine" is a complete answer.
-"""
+4. **No criterion checks the code's shape by reflection** -- a type's name, its
+   base type, which members it has. The stub already has that shape.
+{comment_section(comment)}{feedback_section(feedback)}
+Output nothing but the files. Do not restate the design in your final message.
+""")
 
 
-def brief_plan_bootstrap(requirements: str, feedback: str = "") -> str:
-    return f"""You are the planner. Turn the requirements below into a plan.
+def check_basic_out() -> list[str]:
+    return basic_problems(read_texts(PLANNER_OUT / "basic", ".md"))
 
-You do not write code and you never will. Implementation is done by a separate
-agent that cannot see this conversation, has no memory between steps, and
-receives exactly one step's worth of information at a time. Your output has to
-work as a standalone instruction for someone in that position.
 
-You write files into the current directory. The runner checks them before
-anything is run, and if they do not pass it will come back to you with the
-reasons -- so the requirements below are about the thing being built, and
-making a plan this machine accepts is your problem, not the author's.
+def check_modules_out(open_: list[str] | None, docs: dict[str, str],
+                      acs: dict[str, str]) -> list[str]:
+    """プランナーが書いた詳細設計を確かめる。差し戻しでは、指定外の変更を拒む。"""
+    new_docs = read_texts(PLANNER_OUT / "modules", ".md")
+    new_acs = read_texts(PLANNER_OUT / "ac", ".json")
+    problems = []
+    if open_ is not None:
+        for name, before, after in (("modules", docs, new_docs), ("ac", acs, new_acs)):
+            suffix = PLANNER_PARTS[name]
+            for mid in sorted(set(before) | set(after)):
+                if mid not in open_ and before.get(mid) != after.get(mid):
+                    problems.append(f"差し戻し: {name}/{mid}{suffix} changed, but only "
+                                    f"{', '.join(open_)} may change")
+    modules, shape = design_problems(new_docs, new_acs)
+    problems += shape
+    if not shape:
+        problems += interface_problems(modules)
+    return problems
 
-# The requirements, written by the human
-{requirements}
-{environment_facts(short=True)}
-{layout_text(BOOTSTRAP_RULES.replace('{LAYOUT_NOTE}', LANGUAGE['layout_note']))}
-{BOOTSTRAP_ESCALATE}
-{feedback_section(feedback)}
-Output nothing but the files. Do not restate the plan in your final message.
-"""
+
+def cmd_basic_draft(language: str | None, framework: str | None) -> int:
+    """仕様書から基本設計仕様書を書かせる。人の意見があれば渡す。"""
+    stage = read_stage()
+    refused = in_stage(stage, "upstream")
+    if refused:
+        return refuse(refused)
+    if language or framework:
+        language = language or stage.get("language") or "python"
+        load_settings({"language": language, "framework": framework})
+        stage = write_stage(language=language, framework=LANGUAGE["framework"])
+    elif not stage.get("language"):
+        return refuse("refusing: name the language the first time, with --language")
+    use_stage_language(stage)
+    spec = spec_text()
+    if not spec:
+        return refuse(f"refusing: there is no specification in {DOCS_SPEC}; run spec import")
+    comment = human_comment()
+    ledger("BASIC_DRAFT", language=LANGUAGE["name"], framework=LANGUAGE["framework"],
+           comment=bool(comment))
+    prepare_planner_out({"basic": read_texts(DOCS_BASIC, ".md")})
+    problems = draft_with_retry(lambda feedback: brief_basic(spec, comment, feedback),
+                                check_basic_out, {"basic"}, "BASIC_DRAFT_CHECK")
+    if problems:
+        for problem in problems:
+            print("  " + problem, file=sys.stderr)
+        print(f"the planner could not write an acceptable basic design; "
+              f"{PLANNER_OUT} holds the last one", file=sys.stderr)
+        return 2
+    write_texts(DOCS_BASIC, read_texts(PLANNER_OUT / "basic", ".md"), ".md")
+    HUMAN_COMMENT.unlink(missing_ok=True)
+    ledger("BASIC_WRITTEN", files=sorted(read_texts(DOCS_BASIC, ".md")))
+    commit_paths([DOCS_BASIC, STAGE_FILE, LEDGER], "docs: write the basic design",
+                 "the basic design")
+    clear_planner_out()
+    print(f"basic design written to {DOCS_BASIC}; read it, then run basic approve, "
+          f"or write a comment and run basic draft again")
+    return 0
+
+
+def cmd_basic_approve() -> int:
+    """基本設計を承認して中段へ流す。"""
+    stage = read_stage()
+    refused = in_stage(stage, "upstream")
+    if refused:
+        return refuse(refused)
+    problems = basic_problems(read_texts(DOCS_BASIC, ".md"))
+    if problems:
+        for problem in problems:
+            print(problem, file=sys.stderr)
+        return 2
+    write_stage(stage="midstream", open=None, critiqued=None)
+    ledger("BASIC_APPROVE")
+    commit_paths([STAGE_FILE, LEDGER], "stage: approve the basic design", "the stage")
+    print("basic design approved; next: modules draft")
+    return 0
+
+
+def interface_record(modules: dict[str, dict], problems: list[str]) -> dict:
+    """INTERFACE.json に書く中身。ダッシュボードが依存の図と入口の行を描く。"""
+    return {"digest": design_digest(modules), "problems": problems,
+            "order": module_order(modules)[0], "depends_on": module_deps(modules),
+            "entries": {mid: [p["sig"] for p in m["provides"] if p["entry"]]
+                        for mid, m in sorted(modules.items())
+                        if any(p["entry"] for p in m["provides"])}}
+
+
+def cmd_modules_draft() -> int:
+    """基本設計からモジュールの詳細設計と受け入れ条件を書かせ、クリティックに1回読ませる。"""
+    stage = read_stage()
+    refused = in_stage(stage, "midstream")
+    if refused:
+        return refuse(refused)
+    open_ = stage.get("open")
+    if open_ == []:
+        return refuse("refusing: a module failed downstream; choose the modules whose "
+                      "design is wrong with `reopen <module>...` first")
+    use_stage_language(stage)
+    spec = spec_text()
+    basic = "\n\n".join(f"--- basic/{name}.md ---\n{text}"
+                        for name, text in read_texts(DOCS_BASIC, ".md").items())
+    docs, acs = read_texts(DOCS_MODULES, ".md"), read_texts(AC, ".json")
+    comment = human_comment()
+    ledger("MODULES_DRAFT", open=open_, comment=bool(comment))
+    prepare_planner_out({"modules": docs, "ac": acs})
+    problems = draft_with_retry(
+        lambda feedback: brief_modules(spec, basic, open_, comment, feedback),
+        lambda: check_modules_out(open_, docs, acs), {"modules", "ac"}, "MODULES_DRAFT_CHECK")
+    if problems:
+        for problem in problems:
+            print("  " + problem, file=sys.stderr)
+        print(f"the planner could not write an acceptable module design; "
+              f"{PLANNER_OUT} holds the last one", file=sys.stderr)
+        return 2
+    only = None if open_ is None else set(open_)
+    write_texts(DOCS_MODULES, read_texts(PLANNER_OUT / "modules", ".md"), ".md", only)
+    write_texts(AC, read_texts(PLANNER_OUT / "ac", ".json"), ".json", only)
+    modules, _ = current_design()
+    INTERFACE.write_text(json.dumps(interface_record(modules, []), ensure_ascii=False,
+                                    indent=2) + "\n", encoding="utf-8")
+    INTERFACE.chmod(0o644)
+    HUMAN_COMMENT.unlink(missing_ok=True)
+    write_stage(critiqued=None)
+    ledger("MODULES_WRITTEN", modules=sorted(modules))
+    commit_paths([DOCS_MODULES, INTERFACE, STAGE_FILE, LEDGER],
+                 "docs: write the module design", "the module design")
+    clear_planner_out()
+    return cmd_modules_critique()
+
+
+# --------------------------------------------------------------------------
+# クリティック
+# --------------------------------------------------------------------------
+#
+# クリティックは詳細設計を1回だけ読み、おかしな点を言う。指摘でプランナーを
+# 呼び直すことはしない。呼び直すかは人が決める。受け入れ条件もコードも見せない。
+# 実装の合否は VERIFY が決める。
+
+
+def brief_critique(spec: str, basic: str, modules: dict[str, dict]) -> str:
+    designs = "\n\n".join(f"--- modules/{mid}.md ---\n{m['doc']}"
+                          for mid, m in sorted(modules.items()))
+    return f"""Below are a specification, the basic design made from it, and the detailed
+design of every module. Your role and your task follow after them.
+
+# The specification, written by the human
+{spec}
+
+# The basic design
+{basic}
+
+# The module designs
+{designs}
+
+# Your role
+
+You are the critic. You review the module design once. Nothing has been built
+yet. A separate agent will build each module from its design alone, tests
+first, and a machine has already checked that the contracts fit together.
+
+# What to look for
+
+- **Coverage.** If every module did exactly what its design says, would the
+  specification be met? Name anything the specification asks for that no
+  module does.
+- **Reach.** Start from the entry points (`"entry": true`). What state does the
+  system hold before anything happens, what can a person using it actually do,
+  and what can they reach from there? Name behaviour that some module carries
+  but that nothing reachable ever calls, and anything the system reads that no
+  module ever writes.
+- **Boundaries.** Responsibilities split so that a module needs something its
+  contract does not hand it, or two modules that each assume the other does a
+  job.
+
+You see neither the acceptance criteria nor any code. Do not guess at them.
+
+{findings_contract()}"""
+
+
+def clear_critique() -> None:
+    """批評を頼む前に out/ を空にする。
+
+    前の呼び出しの残りのファイルは、今回の答えとして読まれる。「クリティックは
+    何も見つけなかった」と「クリティックは走らなかった」は、決して同じに見えては
+    ならない。
+    """
+    CRITIC_OUT.mkdir(parents=True, exist_ok=True)
+    for entry in CRITIC_OUT.iterdir():
+        if entry.is_dir() and not entry.is_symlink():
+            raise Halt("CRITIQUE",
+                       f"a directory is in the way in {CRITIC_OUT}: {entry.name}",
+                       "Remove it by hand; the runner will not recurse into a "
+                       "tree written by another uid.")
+        entry.unlink()
+
+
+def cmd_modules_critique() -> int:
+    """いまの詳細設計をクリティックに1回読ませ、指摘を人に渡す。"""
+    stage = read_stage()
+    refused = in_stage(stage, "midstream")
+    if refused:
+        return refuse(refused)
+    use_stage_language(stage)
+    modules, problems = current_design()
+    if problems:
+        for problem in problems:
+            print(problem, file=sys.stderr)
+        return 2
+    digest = design_digest(modules)
+    basic = "\n\n".join(f"--- basic/{name}.md ---\n{text}"
+                        for name, text in read_texts(DOCS_BASIC, ".md").items())
+    ledger("CRITIQUE", digest=digest)
+    clear_critique()
+    call_critic(brief_critique(spec_text(), basic, modules), "modules")
+    findings = plain_findings({"modules": read_findings()})
+    ledger("FINDINGS", count=len(findings["modules"]),
+           titles=[f["title"][:200] for f in findings["modules"]])
+    CRITIQUE.write_text(json.dumps({"digest": digest, "findings": findings["modules"]},
+                                   ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    CRITIQUE.chmod(0o644)
+    write_critique_for_human(1, findings, waiting=False)
+    write_stage(critiqued=digest)
+    commit_paths([CRITIQUE, STAGE_FILE, LEDGER], "plan: critique the module design",
+                 "the critique")
+    # 行頭の `=== critique ` は、loop_now.py が走行ログから指摘を探す目印。
+    print("=== critique of the module design ===")
+    print(render_findings(findings))
+    print("next: modules approve, or write a comment and run modules draft again")
+    return 0
+
+
+# --------------------------------------------------------------------------
+# 中段の出口と、差し戻し
+# --------------------------------------------------------------------------
+
+
+def discard_modules(mids: list[str], tasks: dict | None) -> None:
+    """緑を取り消すモジュールのテストと、凍結のマニフェストと契約を消す。
+
+    テストはコミットしないので、git の巻き戻しでは消えない。ここで消さないと、
+    古い設計のテストが VERIFY のたびに走り続ける。
+    """
+    steps = {s["id"]: s for s in (tasks or {}).get("steps", [])}
+    files = sorted({f for mid in mids
+                    for f in steps.get(mid, {}).get("files_test", module_test_files(mid, True))})
+    if TESTS.is_dir():
+        adopt(TESTS)
+        set_writable(tests=True, src=None)
+    restore_to_head(files)
+    for mid in mids:
+        for kind in ("contracts", "freeze"):
+            (STATE / kind / f"{safe_id(mid)}.json").unlink(missing_ok=True)
+
+
+def cmd_modules_approve() -> int:
+    """詳細設計を承認して下流へ流す。設計が変わった緑のモジュールは流し直す。"""
+    stage = read_stage()
+    refused = in_stage(stage, "midstream")
+    if refused:
+        return refuse(refused)
+    if stage.get("open") == []:
+        return refuse("refusing: a module failed downstream; choose the modules whose "
+                      "design is wrong with `reopen <module>...` first")
+    use_stage_language(stage)
+    modules, problems = current_design()
+    if not problems:
+        problems = interface_problems(modules)
+    if problems:
+        for problem in problems:
+            print(problem, file=sys.stderr)
+        return 2
+    digest = design_digest(modules)
+    if stage.get("critiqued") != digest:
+        return refuse("refusing: the critic has not read this design; run modules critique")
+
+    try:
+        before = json.loads(TASKS.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        before = None
+    changed = sorted(mid for mid, design in green_designs().items()
+                     if modules.get(mid, {}).get("design") != design)
+    if changed:
+        discard_modules(changed, before)
+        ledger("REOPEN", modules=changed, note="the design changed; these run again")
+    tasks = build_tasks(modules, stage)
+    TASKS.parent.mkdir(parents=True, exist_ok=True)
+    TASKS.write_text(json.dumps(tasks, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    INTERFACE.write_text(json.dumps(interface_record(modules, []), ensure_ascii=False,
+                                    indent=2) + "\n", encoding="utf-8")
+    INTERFACE.chmod(0o644)
+    FAILURE.unlink(missing_ok=True)
+    write_stage(stage="downstream", open=None)
+    ledger("MODULES_APPROVE", digest=digest, order=[s["id"] for s in tasks["steps"]])
+    commit_paths([STAGE_FILE, INTERFACE, FAILURE, LEDGER], "stage: approve the module design",
+                 "the stage")
+    print(f"module design approved; next: run --all "
+          f"({len(tasks['steps']) - len(green_steps())} module(s) to build)")
+    return 0
+
+
+def clean_tree() -> None:
+    """作業ツリーを最後のコミットに戻し、緑でないモジュールのテストを消す。"""
+    for fence in (TESTS, SRC):
+        fence.mkdir(parents=True, exist_ok=True)
+    adopt(TESTS, SRC)
+    set_writable(tests=True, src=True)
+    kept = LEDGER.read_bytes() if LEDGER.exists() else b""
+    run(["git", "reset", "--hard", "HEAD"], check=True)
+    run(["git", "clean", "-fdq"], check=True)   # -x は付けない。.venv と .runner は残す
+    for fence in (TESTS, SRC):
+        fence.mkdir(parents=True, exist_ok=True)
+    set_writable(tests=True, src=True)
+    if kept:
+        LEDGER.write_bytes(kept)
+    try:
+        tasks = json.loads(TASKS.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    done = green_steps()
+    pending = [s for s in tasks.get("steps", []) if s.get("id") not in done]
+    restore_to_head(sorted({f for s in pending for f in s.get("files_test", [])}))
+    for s in pending:
+        (STATE / "freeze" / f"{safe_id(s['id'])}.json").unlink(missing_ok=True)
+
+
+def cmd_reopen(mids: list[str]) -> int:
+    """詳細設計を直すモジュールを人が選び、中段に戻す。"""
+    stage = read_stage()
+    refused = in_stage(stage, "midstream", "downstream", "review")
+    if refused:
+        return refuse(refused)
+    known = set(read_texts(DOCS_MODULES, ".md"))
+    unknown = sorted(set(mids) - known)
+    if unknown or not mids:
+        return refuse(f"refusing: not a module of this design: {', '.join(unknown) or '(none)'}; "
+                      f"the modules are {', '.join(sorted(known))}")
+    clean_tree()
+    write_stage(stage="midstream", open=sorted(set(mids)), critiqued=stage.get("critiqued"))
+    ledger("SENT_BACK", modules=sorted(set(mids)))
+    commit_paths([STAGE_FILE, LEDGER], f"stage: send {', '.join(sorted(set(mids)))} back "
+                 f"to the module design", "the stage")
+    print(f"back in the midstream; the planner may change {', '.join(sorted(set(mids)))}. "
+          f"next: modules draft, or modules approve to run them again as they are")
+    return 0
+
+
+def failed_modules(step: dict, run_: TestRun | None) -> list[str]:
+    """止まったモジュールと、テストが落ちたモジュール。"""
+    involved = [step["id"]]
+    if run_ is None:
+        return involved
+    try:
+        tasks = json.loads(TASKS.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return involved
+    for other in tasks.get("steps", []):
+        keys = own_test_keys(other)
+        if other["id"] not in involved and any(test_owner(f) in keys for f in run_.failed_files):
+            involved.append(other["id"])
+    return involved
+
+
+def fail_module(step: dict, halt: Halt, attempt: int, run_: TestRun | None) -> None:
+    """下流で止まったことを人に渡し、中段に戻す。直すモジュールは人が選ぶ。"""
+    involved = failed_modules(step, run_)
+    failed = "\n".join(f"- {k}" for k in (run_.failure_kinds if run_ else [])) \
+        or "(記録なし)"
+    FAILURE.write_text(f"""# 下流で止まったモジュール: {step["id"]}
+
+- 位相: {halt.phase}
+- 理由: {halt.reason}
+- 試行: {attempt} / {len(attempt_schedule(step))}
+- 関わったモジュール: {", ".join(involved)}
+
+## 落ちたテスト
+
+{failed}
+
+## 詳細
+
+```text
+{halt.detail[-4000:]}
+```
+
+## 次にすること
+
+詳細設計を直すモジュールを `loop reopen <モジュール>...` で選ぶ。複数選べる。
+""", encoding="utf-8")
+    FAILURE.chmod(0o644)
+    write_stage(stage="midstream", open=[])
+    ledger("FAILED", step=step["id"], phase=halt.phase, reason=halt.reason, modules=involved)
+    commit_paths([FAILURE, STAGE_FILE, LEDGER], f"run: {step['id']} failed in {halt.phase}",
+                 "the failure")
+    print(f"\nFAILED: {step['id']} in {halt.phase}; read {FAILURE}", file=sys.stderr)
+
+
+def cmd_check() -> int:
+    """いまの設計を確かめる。何も呼ばない。"""
+    stage = read_stage()
+    use_stage_language(stage)
+    problems = basic_problems(read_texts(DOCS_BASIC, ".md"))
+    if stage.get("stage") not in (None, "upstream"):
+        modules, shape = current_design()
+        problems += shape if shape else interface_problems(modules)
+    for problem in problems:
+        print(problem)
+    print(f"\n{len(problems)} problem(s)" if problems else "the design passes every check")
+    return 1 if problems else 0
+
+
+def cmd_status() -> int:
+    """段と、モジュールごとの状態。"""
+    stage = read_stage()
+    print(f"stage: {stage.get('stage') or '(not started)'}")
+    if stage.get("open"):
+        print(f"open for the planner: {', '.join(stage['open'])}")
+    elif stage.get("open") == []:
+        print("waiting: choose the modules to fix with reopen")
+    for row in steps_now():
+        print(f"  {row['state']:8} {row['id']}")
+    return 0
 
 
 def python_signature(node: ast.FunctionDef | ast.AsyncFunctionDef) -> str:
@@ -4725,7 +5157,8 @@ def existing_tests() -> dict[str, list[str]]:
     """HEAD にあるテストのファイルと、それぞれのテストの名前。
 
     テストを1つも見つけられないファイル（`__init__.py` や共通の道具）は入れない。
-    計画の途中で呼べば、緑になったステップのテストも入る。
+    モジュールのテストはコミットしないので、ここに入るのは設計より前からある
+    テストだけだ。
     """
     try:
         listing = run(["git", "ls-tree", "-r", "-z", "--name-only", "HEAD", "--",
@@ -4751,21 +5184,14 @@ def existing_tests() -> dict[str, list[str]]:
 TEST_NAMES_SHOWN = 30
 
 
-def existing_tests_text(plan: dict | None) -> str:
-    """既存のテストと、それを差し替える決まり。無ければ空。
+def existing_tests_text() -> str:
+    """設計より前からあるテストの、ファイルと名前。無ければ空。
 
-    既存のテストは毎ステップ走り、落ちればステップは緑にならない。要件が
+    既存のテストは毎モジュール走り、落ちればモジュールは緑にならない。仕様が
     振る舞いを変えるなら、それを確かめる既存のテストは、どんな実装でも落ちる。
-    そのファイルは、振る舞いを変えるステップが files_test に挙げて丸ごと
-    書き直す。
-
-    計画を渡すと（クリティック）、計画が差し替えるファイルだけを見せる。
+    プランナーがそれを知るために、名前だけを見せる。
     """
     by_file = existing_tests()
-    if plan is not None:
-        listed = {f for s in plan.get("steps", []) if isinstance(s, dict)
-                  for f in s.get("files_test", []) or []}
-        by_file = {f: names for f, names in by_file.items() if f in listed}
     if not by_file:
         return ""
 
@@ -4776,74 +5202,19 @@ def existing_tests_text(plan: dict | None) -> str:
         return "\n".join(shown)
 
     listing = "\n".join(f"    {f}\n{names(found)}" for f, found in by_file.items())
-    if plan is not None:
-        return f"""
-# Test files this plan replaces
-
-These test files are in the repository already, with the tests named below. The
-step that lists one in `files_test` replaces the whole file: the tests now in it
-are removed, and the file holds only that step's tests.
-
-{listing}
-"""
     return f"""
 # Tests already in the repository
 
-These test files are in the last commit, written before this plan. The runner
-runs every one of them on every step, and a step that makes one of them fail is
-not green. Only the test names are shown, not the bodies.
+These test files are in the last commit, written before this design. The runner
+runs every one of them on every module, and a module that makes one of them fail
+is not green. Only the test names are shown, not the bodies.
 
 {listing}
 
-When the requirements change behaviour that one of these tests checks, that test
-fails however well the step is implemented. The step that makes the change lists
-the test file in its `files_test`, and the step REPLACES the whole file:
-
-- every test now in the file is removed, and the file then holds only this
-  step's tests, counted in `expected_tests` together with its other test files
-- replace a file only when the requirements change what its tests check
-- a test in that file for behaviour that does not change is removed with it.
-  Its behaviour stays checked only if this step writes a criterion for it that
-  calls a name this step provides (R4)
-- only one step may list a given file (L17)
+A design that changes behaviour one of these tests checks cannot go green while
+that test stands. Say so in the basic design, so the person can remove or
+change the test before the modules are built.
 """
-
-
-def declarations_for_plan(by_file: dict[str, list[str]],
-                          plan: dict) -> tuple[list[str], list[str]]:
-    """計画が触れる宣言だけを行で残し、ほかはファイル名だけにする。
-
-    返すのは (残す行, 行を外したファイル)。残すのは、どこかのステップの
-    `requires` か `provides` に出る名前の宣言と、どこかの `files_write` にある
-    ファイルの宣言。C# のメンバー（`Board.Score`）が出れば、その型の頭（`Board`）
-    も残す。クリティックがこの一覧を使うのは、既にあるものを「どのステップも
-    書いていない」と指摘しないためだけで、計画が口にしない宣言は要らない。
-    取り込んだ Unity のプロジェクトでは、この一覧がブリーフの3分の2を占めていた。
-    """
-    names: set[str] = set()
-    files: set[str] = set()
-    for step in plan.get("steps") or []:
-        if not isinstance(step, dict):
-            continue
-        contracts = step.get("contracts") or {}
-        for line in (contracts.get("requires") or []) + (contracts.get("provides") or []):
-            if isinstance(line, str):
-                name = declared_name(line)
-                names.add(name)
-                if "." in name:
-                    names.add(name.split(".")[0])
-        files |= {f for f in step.get("files_write") or [] if isinstance(f, str)}
-    kept: list[str] = []
-    dropped: list[str] = []
-    for path, lines in by_file.items():
-        if path in files:
-            kept += lines
-            continue
-        chosen = [line for line in lines if declared_name(line) in names]
-        kept += chosen
-        if len(chosen) < len(lines):
-            dropped.append(path)
-    return kept, dropped
 
 
 def head_sources(paths: list[str]) -> dict[str, str]:
@@ -4862,7 +5233,7 @@ def restore_to_head(paths: list[str]) -> None:
     `git checkout -- <paths>` は、コミットに無いパスが1つでも混ざると全体を断り、
     ほかのパスも戻さない。取り込んだ Unity のプロジェクトの S1 では、既存のコードの
     スタブを消したまま TEST_WRITE をやり直し、消えたファイルを柵の外への書き込みと
-    読んでエスカレーションした。だから、コミットにあるものだけを渡す。
+    読んで止まった。だから、コミットにあるものだけを渡す。
     """
     present = sorted(head_sources(paths))
     for path in paths:
@@ -5858,12 +6229,12 @@ def test_runner_version() -> str:
 
 
 def python_facts() -> tuple[str, str, str]:
-    """Python の計画に伝える、インタプリタと画面についての事実。
+    """Python の設計に伝える、インタプリタと画面についての事実。
 
     書き写さずに集める。これは効き目が大きい。「窓が開く」のような条件は TclError
     で落ちるテストになり、それは本物の赤で、RED_GATE をきれいに通る。ソルバーが何を
-    書いても緑にならないので、ステップはすべての段の試行を使い、エスカレーション
-    まで使い、その原因はどれにも見えるところに無い。
+    書いても緑にならないので、モジュールはすべての段の試行を使って中段に戻り、
+    その原因はどれにも見えるところに無い。
     """
     interpreter = PROJECT / ".venv" / "bin" / "python"
 
@@ -6048,7 +6419,7 @@ goal may name a type here without spelling out its members.
 
 
 # DXライブラリの主な関数。画面、入力、音を扱う薄いファイルを書くのに足りるところまでに
-# 絞る。プランナーが CONTEXT.md に写してソルバーに渡す。人が `loop refs dxlib` で
+# 絞る。プランナーが詳細設計に写してソルバーに渡す。人が `loop refs dxlib` で
 # DxLib.h を送っていれば、ソルバーはほかの関数をそこから引く（library_refs_section）。
 DXLIB_SHEET = """DXLib (DX Library) in brief. Every call returns -1 on failure unless noted.
 TRUE and FALSE are ints.
@@ -6094,14 +6465,14 @@ None of these exist in the box. Key presses are levels, not edges: a press is
 
 
 def cpp_uses_dxlib(left_out: dict[str, str]) -> bool:
-    """このプロジェクトが DXライブラリを使うか。外したファイルか要件で見分ける。"""
+    """このプロジェクトが DXライブラリを使うか。外したファイルか仕様書で見分ける。"""
     if any(header.lower().endswith("dxlib.h") for header in left_out.values()):
         return True
     try:
-        requirements = REQUIREMENTS.read_text(encoding="utf-8")
+        spec = spec_text()
     except OSError:
         return False
-    return bool(re.search(r"dx\s*lib|DXライブラリ", requirements, re.I))
+    return bool(re.search(r"dx\s*lib|DXライブラリ", spec, re.I))
 
 
 def cpp_facts() -> tuple[str, str]:
@@ -6132,15 +6503,14 @@ values -- positions, scores, states, which key is held -- and keep them in files
 that include only standard headers and each other. The platform code calls
 them: it reads input, passes it in, and draws what comes back.
 
-A step may also write a platform file -- the code that draws, reads input or
-plays sound -- by listing it in `files_write` next to the logic its tests
-check. Nothing here builds or runs that file; a person builds it in Visual
-Studio and looks at the screen. Keep such a file thin, and do not write
-criteria about what it draws or plays. A test that includes it does not build,
-and the step is rejected.
+A platform file -- the code that draws, reads input or plays sound -- may be a
+module of its own. Nothing here builds or runs that file; a person builds it in
+Visual Studio and looks at the screen. Keep such a module thin, and do not
+write criteria about what it draws or plays. A test that includes it does not
+build, and the module is rejected.
 
 A new source file must also be added to the person's Visual Studio project by
-hand. List every new `.cpp` and `.h` in CONTEXT.md so the person can.
+hand. Name every new module in the basic design so the person can.
 """)
     if dxlib:
         text += "\n" + DXLIB_SHEET + "\n"
@@ -6153,35 +6523,28 @@ hand. List every new `.cpp` and `.h` in CONTEXT.md so the person can.
     return summary, text
 
 
-def environment_facts(plan: dict | None = None, short: bool = False) -> str:
+def environment_facts(short: bool = False) -> str:
     """プロジェクトが実際にどうなっているかを、機械から読み取る。
 
-    `plan` を渡すと、既存の宣言を、その計画が触れるものだけに絞る
-    （declarations_for_plan）。クリティックのブリーフが使う。`short` なら、C# の
-    メンバーの行から引数と戻り値の型を外す（csharp_short_declaration）。bootstrap の
-    ブリーフが使う。
+    `short` なら、C# のメンバーの行から引数と戻り値の型を外す
+    （csharp_short_declaration）。
 
-    BOOTSTRAP_RULES の規則は、ランナーが強制するものの書き写しだ。つまり、書いた
-    者が覚えていた分しか揃わない。最初の版には L12 が無く、その隙間に向けて
-    計画が作られた。木、インタプリタ、テストのコマンドについての事実には、その
-    失敗の仕方が無いので、書き写さずに集める。
-
-    その問題への本当の答えは、下のやり直しのループだ。ブリーフが言い忘れたことも、
-    リンタが捕まえ、プランナーに伝わる。
+    木、インタプリタ、テストのコマンドについての事実は、書き写さずに集める。
+    書き写した規則は、書いた者が覚えていた分しか揃わない。
     """
-    skip = {".git", ".venv", ".runner", "plan", "__pycache__", ".pytest_cache",
-            "node_modules"}
-    # 箱は計画の言語を知らないので、すべての言語の環境のファイルを根に置く。
-    # ほかの言語のものを見せると、クリティックは的外れな指摘を出す。Python の計画に
-    # index.html を見せると「人が開く index.html からこの計画のコードに届かない」と
-    # 指摘し、プランナーはそれに答えられない。計画の言語と持ち込む先のものだけを見せる。
+    skip = {".git", ".venv", ".runner", "plan", "docs", "ac", "__pycache__",
+            ".pytest_cache", "node_modules"}
+    # 箱はプロジェクトの言語を知らないので、すべての言語の環境のファイルを根に置く。
+    # ほかの言語のものを見せると、的外れな設計と指摘が出る。Python の設計に
+    # index.html を見せると「人が開く index.html からこのコードに届かない」と
+    # 指摘される。プロジェクトの言語と持ち込む先のものだけを見せる。
     for files in [base["environment_files"] for base in LANGUAGE_BASES.values()] + [
             overlay.get("environment_files", frozenset())
             for overlays in FRAMEWORKS.values() for overlay in overlays.values()]:
         skip |= files - LANGUAGE["environment_files"]
-    # 根の直下と、ステップが書く2つのディレクトリの中だけを並べる。取り込んだ
-    # リポジトリの残り（Unity なら Assets/ の下の画像や音や .meta）は、どのステップも
-    # 書かず、並べるとブリーフが数万トークンになる。
+    # 根の直下と、柵の2つのディレクトリの中だけを並べる。取り込んだリポジトリの
+    # 残り（Unity なら Assets/ の下の画像や音や .meta）は、どのモジュールも書かず、
+    # 並べるとブリーフが数万トークンになる。
     def shown(child: Path) -> bool:
         parts = child.relative_to(PROJECT).parts
         return not any(part in skip for part in parts) and child.suffix != ".meta"
@@ -6192,16 +6555,14 @@ def environment_facts(plan: dict | None = None, short: bool = False) -> str:
 
     listing = [entry(child) for child in sorted(PROJECT.iterdir())
                if shown(child)] if PROJECT.is_dir() else []
-    for base in (SRC, TESTS):
-        if base.is_dir():
-            listing += [entry(child) for child in sorted(base.rglob("*")) if shown(child)]
+    if SRC.is_dir():
+        listing += [entry(child) for child in sorted(SRC.rglob("*")) if shown(child)]
     tree = "\n".join(listing) or "  (empty apart from the directories above)"
 
-    # 根に置かれたファイルは環境の持ち物で、どのステップも書かない。最初の
-    # ステップより前に完成しているので、中身だけを確かめる条件はスタブの時点で
-    # 通り、RED_GATE の R4 で必ず止まる。run 8 の S10 は index.html の中身を
-    # 確かめる条件で止まり、プランナーは人間に差し戻した。名前は書き写さず、
-    # 実際に置かれているものから取る。
+    # 根に置かれたファイルは環境の持ち物で、どのモジュールも書かない。最初の
+    # モジュールより前に完成しているので、中身だけを確かめる条件はスタブの時点で
+    # 通り、RED_GATE の R4 で必ず止まる。名前は書き写さず、実際に置かれているもの
+    # から取る。
     provided = sorted(child.name for child in PROJECT.iterdir()
                       if child.is_file() and child.name not in skip) \
         if PROJECT.is_dir() else []
@@ -6209,82 +6570,59 @@ def environment_facts(plan: dict | None = None, short: bool = False) -> str:
     if provided:
         provided_text = layout_text(f"""
 These files at the root belong to the environment: {", ".join(provided)}.
-No step writes them, and each is already in its final form before the first
-step runs. So a criterion that checks only one of them -- what it says, what it
-imports, that it exists -- is already true against the stub. RED_GATE runs every
-test before anything is implemented, sees that one pass, and stops the step
-(R4). Every criterion has to stay false until this step's own code under {{SRC}}/
-is written. Where one of these files matters, test the code it calls, not the
-file.
+No module writes them, and each is already in its final form before the first
+module is built. So a criterion that checks only one of them -- what it says,
+what it imports, that it exists -- is already true against the stub. RED_GATE
+runs every test before anything is implemented, sees that one pass, and stops
+the module (R4). Every criterion has to stay false until the module's own code
+under {{SRC}}/ is written. Where one of these files matters, test the code it
+calls, not the file.
 """)
         if "index.html" in provided:
             provided_text += """For the page: call `start` on an element and check what it puts there. Do not
 write a criterion about the text of index.html.
 """
 
-    # 取り込んだリポジトリには、最初のステップより前からコードがある。プランナーは
-    # コードを読めない（BOOTSTRAP 1-1）ので、ここに無ければ、そこにある関数も型も
-    # 知らずに計画を書く。署名だけを渡し、本体は渡さない。
-    by_file = existing_declarations()
-    existing = [line for lines in by_file.values() for line in lines]
-    others: list[str] = []
-    if plan is not None:
-        existing, others = declarations_for_plan(by_file, plan)
+    # 取り込んだリポジトリには、最初のモジュールより前からコードがある。署名を
+    # まとめて渡す。プランナーは本体を src/ から読める。
+    existing = existing_contracts()
     shortened = short and LANGUAGE["name"] == "csharp"
     if shortened:
         existing = [csharp_short_declaration(line) for line in existing]
     existing_text = ""
-    if existing or others:
+    if existing:
         existing_text = layout_text("""
 # What the code already declares
 
-The repository already has code under {SRC}/, written before this plan. These are
-its public declarations, read from the last commit and written in the same form
-as `contracts.provides`. They exist before the first step runs.
+The repository already has code under {SRC}/. These are its public
+declarations, read from the last commit. They exist before the first module is
+built.
 
-Only the signatures are shown. The bodies are left out on purpose: you write
-the criteria, and criteria written while looking at an implementation describe
-that implementation rather than what the requirements ask for.
-
-A step that uses one of these puts that line in `contracts.requires`, copied as
-it stands, and needs no step to provide it (L3). If a step of this plan
-provides the same name, that step changes it: a step that uses the name then
-depends on that step instead.
-
-To change one of these, a step lists its file in `files_write` and the name in
-`contracts.provides`. Its stub replaces only the names in `provides`; every
-other declaration in the file keeps its real, working code while the tests
-first run. So a criterion that is already true because of code the step does
-not change passes against the stub, and RED_GATE stops the step (R4). Write
-each criterion so that it calls a name this step provides and fails until
-that name is written.
+A module that uses one of these writes a requires line for it, with `from`
+naming its file under {SRC}/ without the extension. A module of this design
+whose path is that file rewrites it: its stub replaces only the names it
+provides, and every other declaration in the file keeps its real, working code
+while the tests first run. So a criterion that is already true because of code
+the module does not change passes against the stub, and RED_GATE stops the
+module (R4). Write each criterion so that it calls a name the module provides.
 
 Do not write criteria to show that the rest still works. The tests already in
-the repository run on every step, and a step that breaks one of them is not
+the repository run on every module, and a module that breaks one of them is not
 green. That is how unchanged behaviour is kept.
 
 """)
         if shortened:
             existing_text += """Members are shown without their parameter and return types:
-`static Board.Score(board)` is a static method that takes one argument. Copy
-such a line into `contracts.requires` as it stands; the runner hands the solver
-the full signature from the code. A step that changes a member writes the full
-signature it wants in `contracts.provides`.
+`static Board.Score(board)` is a static method that takes one argument. The
+runner matches requires lines against these by name, and hands the solver the
+full signature from the code.
 
 """
         existing_text += "\n".join(f"    {line}" for line in existing) + "\n"
-        if others:
-            existing_text += layout_text("""
-Only the declarations this plan names in `requires` or `provides`, and those in
-a file some step writes, are shown above. These files under {SRC}/ declare
-more, not shown line by line. They also exist before the first step runs:
-
-""") + "\n".join(f"    {path}" for path in others) + "\n"
-
-    existing_text += existing_tests_text(plan)
+    existing_text += existing_tests_text()
 
     # テストが何に届くかを決めるファイル。言語ごとに名前は違うが仕事は同じで、
-    # どちらでもプランナーに見せる必要がある。import のパスに逆らう計画は負ける。
+    # どちらでもプランナーに見せる必要がある。import のパスに逆らう設計は負ける。
     #
     # C# にはそのファイルが根に無い。ランナーが書くテストの csproj がその仕事を
     # するので、それを見せる。Unity の参照の一覧は長いので、見せる前に数にまとめる。
@@ -6294,11 +6632,11 @@ more, not shown line by line. They also exist before the first step runs:
         wiring_text = wiring.read_text(encoding="utf-8") if wiring.exists() else "(none)"
     elif LANGUAGE["name"] == "cpp":
         wiring_heading = ("The CMake project the runner writes and builds before every test "
-                          "run (outside the repository; no step writes it):")
+                          "run (outside the repository; no module writes it):")
         wiring_text = cpp_cmake_lists()
     else:
         wiring_heading = ("The test project the runner writes and builds (outside the "
-                          "repository; no step writes it):")
+                          "repository; no module writes it):")
         try:
             wiring_text = dotnet_projects()[DOTNET_BUILD / "tests" / "Tests.csproj"]
             refs = wiring_text.count("<Reference ")
@@ -6309,23 +6647,16 @@ more, not shown line by line. They also exist before the first step runs:
             wiring_text = "(not available: the .NET toolchain is not installed)"
 
     display = os.environ.get("DISPLAY", "")
-    argv, _ = test_argv(["<the step's files_test>"], STATE / "report.xml")
+    argv, _ = test_argv(["<the module's test files>"], STATE / "report.xml")
     command = " ".join(a.replace(str(PROJECT) + "/", "") for a in argv)
 
     # ソルバーが何をできるかも、書き写さずに使うバックエンドから決める。
-    # テストのコマンドだけを見せると、プランナーは CONTEXT.md に「このコマンドで
-    # 確かめてから終えよ」と書く。claude と local はファイルの読み書きしか
-    # できないので、ソルバーは実行を試みて断られ、試行の一部をそれに使う。
-    if any(tier in SOLVERS_THAT_RUN_COMMANDS for tier in SOLVER_TIERS):
-        solver_tools = ""
-    else:
-        solver_tools = """
-The solver cannot run commands -- not the test command above, and not anything
-else. It reads files and writes files, and that is all it can do. The runner
-runs the tests after the solver has finished and hands the failures to the next
-attempt. So do not tell the solver, in CONTEXT.md or anywhere else, to run the
-tests, to check its work by running something, or to install anything: it will
-try, be refused, and spend part of its attempt on it.
+    # claude と local はファイルの読み書きしかできないので、設計に「このコマンドで
+    # 確かめよ」と書くと、ソルバーは実行を試みて断られ、試行の一部をそれに使う。
+    solver_tools = solver_tools_note()
+    if solver_tools:
+        solver_tools = "\n" + solver_tools + """So do not write, in a design or anywhere else, that the solver runs the tests,
+checks its work by running something, or installs anything.
 """
 
     runtime, toolkit, screen = LANGUAGE["facts"]()
@@ -6344,9 +6675,8 @@ Graphical display: {f"DISPLAY={display}" if display else "NONE. DISPLAY is not s
 The runner executes the tests itself, as:
     {command}
 {solver_tools}
-The project root, and everything under the two directories steps write to
-({LAYOUT["src"]}/ and {LAYOUT["tests"]}/), except plan/, .git/ and the frozen
-toolchain:
+The project root and everything under {LAYOUT["src"]}/, except plan/, docs/, ac/,
+.git/ and the frozen toolchain:
 
 {tree}
 {provided_text}{existing_text}
@@ -6357,457 +6687,12 @@ toolchain:
 """
 
 
-def prune_proposal() -> list[str]:
-    """out/ の中で、提案が使ってよい名前でないものをすべて消す。
-
-    やり直しのあいだにだけ使う。プランナーは自分が書いたファイルを消す手段を
-    持たない（作ることと編集することしかできない）ので、「それを消せ」と伝えても
-    従えない助言になる。ディレクトリはランナーの所有なので、ランナーが消し、
-    フィードバックでそう伝える。
-    """
-    allowed = set(PROPOSAL_FILES) | {ESCALATE_NAME}
-    removed = []
-    for entry in PLANNER_OUT.iterdir():
-        if entry.name in allowed and entry.is_file() and not entry.is_symlink():
-            continue
-        removed.append(entry.name)
-        if entry.is_dir() and not entry.is_symlink():
-            shutil.rmtree(entry, ignore_errors=True)
-        else:
-            entry.unlink(missing_ok=True)
-    return removed
-
-
-# validate_plan の L11 の文言。規則を2つ目に実装せず、リンタが言ったことを読む。
-L11_VIOLATION = re.compile(r"L11: step (\S+) provides `(.+)`, which no step requires")
-
-
-def wire_unused_provides(problems: list[str], text: str) -> tuple[str, list[dict]]:
-    """L11 だけで落ちた tasks.json を、ランナーが requires を足して直す。
-
-    L11 の多くは、後のステップが名前を使っているのに requires に書き忘れたものだ。
-    プランナーの直し方もそれで、そのために呼び出しを丸ごと1回使っていた
-    （取り込んだ Unity のプロジェクトの refine で、S3 の
-    `SaveManager.CopyTacticalFromSaveData` を S4 の requires に足しただけ）。
-    提供する側から消すことはしない。そのステップのテストや、後のステップの goal
-    が使っていれば、消すと壊れる。
-
-    足す先は、提供したステップに直接依存し（L3 は直接の依存しか数えない）、
-    goal か acceptance にその名前がそのまま現れるステップ。1つでも足す先の無い
-    名前があれば何もしない。直すかどうかの判断が要るので、プランナーに返す。
-    足した結果を採るかは呼び出し側が proposal_problems で決める。
-    """
-    found = [L11_VIOLATION.fullmatch(p) for p in problems]
-    if not found or not all(found):
-        return text, []
-    tasks = json.loads(text)
-    steps = {s["id"]: s for s in tasks["steps"]}
-    wired = []
-    for match in found:
-        sid, name = match.groups()
-        lines = [p for p in steps[sid]["contracts"]["provides"] if declared_name(p) == name]
-        word = re.compile(rf"(?<![\w.]){re.escape(name)}(?!\w)")
-        users = [s for s in tasks["steps"] if sid in s["depends_on"]
-                 and word.search(s["goal"] + "\n" + json.dumps(s["acceptance"], ensure_ascii=False))]
-        if not lines or not users:
-            return text, []
-        for user in users:
-            requires = user["contracts"].setdefault("requires", [])
-            requires.extend(line for line in lines if line not in requires)
-        wired.append({"step": sid, "name": name, "to": [u["id"] for u in users]})
-    return json.dumps(tasks, ensure_ascii=False, indent=2) + "\n", wired
-
-
-def proposal_problems(proposal: dict[str, str]) -> list[str]:
-    """この提案のおかしな点すべて。ランナーが判定するとおりに返す。
-
-    `plan apply`、`plan show`、やり直しのループで共有する。プランナーが直せと
-    言われるものが、それを拒んだはずのものとちょうど一致するようにだ。同じ規則を
-    2つ目に実装すると、1つ目からずれうる。
-
-    言語は計画そのものから取る。validate_plan が呼ぶ adopt_language を参照。
-    それはこの関数の仕事でも、呼び出し側の仕事でもない。3つの呼び出し側が
-    続けて忘れた。
-    """
-    existing = PLAN / "tasks.json"
-    if existing.exists():
-        old = json.loads(existing.read_text(encoding="utf-8"))
-    else:
-        # ディスクに計画が無ければ、これは bootstrap だ。P1〜P5 はどれも「変えては
-        # ならない」ものについてなので、比べる相手が無い。代わりに、最初の計画は
-        # そろっていなければならない。人間が合意した仕様の無いまま受け入れ条件
-        # だけで始まるプロジェクトも、ソルバーが拠る背景の無い計画で始まる
-        # プロジェクトも無い。
-        incomplete = sorted(set(PROPOSAL_FILES) - set(proposal))
-        if incomplete:
-            return [f"B1: a first plan must include {name}" for name in incomplete]
-        old = {"steps": []}
-
-    if "tasks.json" in proposal:
-        try:
-            new = json.loads(proposal["tasks.json"])
-        except json.JSONDecodeError as bad:
-            return [f"B2: tasks.json is not valid JSON: {bad}"]
-    else:
-        new = old
-
-    return check_proposal(old, new) + validate_plan(new)
-
-
-def plan_with_retry(brief_for, tag: str, keep: dict[str, str] | None = None) -> int:
-    """プランナーを呼び、書いたものを確かめ、違反を返す。
-
-    これのおかげで、人間が前もって環境を知っていなくても、プランナーが自分で
-    環境に合わせられる。規則を述べる唯一の正式なものは、すでにランナーが持って
-    いる。計画を拒むコードそのものだ。だから、ブリーフが規則を漏れなく説明した
-    ことに期待するのではなく、規則を走らせて、何が落ちたかを伝える。
-
-    プランナーはこれで新しい権限を得ない。リンタを走らせず、走らせることも
-    できない。結果を伝えられるだけだ。試行のあいだ、前のファイルは「そのまま
-    残す」。プランナーは禁止事項から新しい計画を作り直すのではなく、見える
-    計画を編集する。そのほうが安く、ある違反を別の違反と取り替えにくい。
-    """
-    limit = LIMITS["revisions"]
-    clear_proposal()
-    feedback = ""
-
-    for attempt in range(1, limit + 2):
-        call_planner(brief_for(feedback))
-        names = sorted(p.name for p in PLANNER_OUT.iterdir())
-        ledger(tag, attempt=attempt, wrote=names)
-        if not names:
-            print("the planner wrote no files", file=sys.stderr)
-            return 2
-
-        removed = prune_proposal()
-
-        # keep: プランナーが書かなかったファイルを補う控え。改訂のブリーフは
-        # CONTEXT.md と SYSTEM_SPEC.md を「変えるときだけ書け」と伝えている。
-        # ところが out/ は呼ぶ前に空にしてあり、未適用の計画は B1 で3ファイル
-        # すべてを要求される。補わないと、ブリーフに従ったプランナーが落ちる
-        # （run 8 の改訂で2回、プランナーの呼び出しを1回ずつ無駄にした）。
-        # エスカレーションには補わない。ESCALATE.md は他のファイルと並べられない。
-        if keep and ESCALATE_NAME not in names:
-            carried = sorted(n for n in keep if not (PLANNER_OUT / n).exists())
-            for name in carried:
-                path = PLANNER_OUT / name
-                path.write_text(keep[name], encoding="utf-8")
-                path.chmod(0o644)
-            if carried:
-                ledger("PLAN_CARRIED", attempt=attempt, files=carried)
-
-        proposal = read_proposal()
-
-        # エスカレーションは下書きではなく答えだ。確かめるものも直すものも無い。
-        # 宛先は人間で、`plan apply` がそれを表に出す。
-        if ESCALATE_NAME in proposal:
-            return 0
-
-        problems = proposal_problems(proposal)
-        # 紛れ込んだファイルは、すでに片付いている。prune_proposal が消し、
-        # read_proposal は許された3つの名前しか見ないので、それについての何も
-        # `plan apply` に届かない。そのうえで違反にすると、もう存在しない状態の
-        # ために試行を1回使う。run 7 は4回のうち1回をそれで失った。ほかは正しい
-        # 計画だった。だからこれは注記で、別の理由で落ちている試行のフィード
-        # バックに添えるだけで、それ自体を落ちる理由にはしない。紛れ込んだ
-        # ファイルが問題になる場合（綴りを誤った名前で計画を書いた場合）はやはり
-        # 落ちる。消すと必要なファイルが欠け、proposal_problems がそう言うからだ。
-        notes = [f"B3: {n} is not a filename a proposal may use; the "
-                 f"runner deleted it" for n in removed]
-        if removed:
-            ledger("PLAN_PRUNED", attempt=attempt, removed=removed)
-
-        # L11 だけなら、ランナーが requires を足して直せることがある。直した計画が
-        # 同じ検査を通ったときだけ採る。out/ のファイルはプランナーの uid のもので
-        # 上書きできないので、PLAN_CARRIED と同じく消してから書く。
-        if problems and "tasks.json" in proposal:
-            wired_text, wired = wire_unused_provides(problems, proposal["tasks.json"])
-            if wired and not proposal_problems({**proposal, "tasks.json": wired_text}):
-                path = PLANNER_OUT / "tasks.json"
-                path.unlink()
-                path.write_text(wired_text, encoding="utf-8")
-                path.chmod(0o644)
-                ledger("PLAN_WIRED", attempt=attempt, wired=wired)
-                problems = []
-
-        if not problems:
-            if attempt > 1:
-                print(f"the plan passed on attempt {attempt}")
-            return 0
-
-        ledger("PLAN_SELFCHECK", attempt=attempt, violations=problems)
-        if attempt > limit:
-            print(f"\nthe planner could not produce an acceptable plan in "
-                  f"{attempt} attempts; {PLANNER_OUT} holds the last one",
-                  file=sys.stderr)
-            for problem in problems:
-                print("  " + problem, file=sys.stderr)
-            return 2
-
-        feedback = "\n".join(notes + problems)
-
-    return 2   # 届かない。ループは必ず戻る
-
-
-def feedback_section(feedback: str) -> str:
-    if not feedback:
-        return ""
-    return f"""
-# Your previous attempt was rejected
-
-The files you wrote are still in the current directory. Read them and FIX them
-in place -- do not start over. The runner checked them and reported exactly
-this:
-
-{feedback}
-
-Every line above is a rule the runner enforces in code. There is no arguing
-with them and no partial credit: fix all of them, then stop.
-"""
-
-
-def stamp_language(name: str, framework: str | None = None) -> None:
-    """受け入れた提案に、ランナー自身の行為として言語と持ち込む先を書き込む。
-    持ち込む先は、渡されたときだけ書く。それより前の計画は言語の既定で読まれる。
-
-    プランナーはこれを書かない。solver_tiers を書かないのと同じ理由だ。この機械が
-    どの言語を持つかは箱の性質で、プロジェクトがどれを使うかは、誰かに計画を頼む
-    前に人間が決めることだ。どちらもプランナーが選ぶものではなく、選べる
-    プランナーは、入っていないツールチェーンを選ぶことがある。
-
-    リンタが通った後に書き込む。安全なのは、どの規則もこのキーを読まないから
-    だけだ。このキーは規則を表す語彙を選ぶもので、その選択はブリーフを組み
-    立てたときにすでに済んでいる。
-    """
-    path = PLANNER_OUT / "tasks.json"
-    try:
-        tasks = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return
-    if not isinstance(tasks, dict):
-        return
-    tasks["language"] = name
-    if framework:
-        tasks["framework"] = framework
-    body =(json.dumps(tasks, ensure_ascii=False, indent=2) + chr(10)).encode("utf-8")
-    # O_CREAT を付けずに書く。これは細かい話ではない。out/ はスティッキーで
-    # グループが書け、ファイルは `planner` のものだ。カーネルの
-    # fs.protected_regular（ここでは 2）は、まさにその形のディレクトリで、他人の
-    # 既存のファイルを O_CREAT で開くことを拒む。/tmp で、ほかの人が書こうと
-    # しているファイルを先に作らせないための保護だ。pathlib の write_text は "w"、
-    # つまり O_WRONLY|O_CREAT|O_TRUNC で開くので EACCES で拒まれ、同じプロセスが
-    # 同じファイルを普通の O_WRONLY|O_TRUNC で開くと通る。プランナーが書いた
-    # ファイルをここで書き直すものは、すべてこの方法で行う。
-    fd = os.open(path, os.O_WRONLY | os.O_TRUNC)
-    try:
-        os.write(fd, body)
-    finally:
-        os.close(fd)
-
-
-# --------------------------------------------------------------------------
-# クリティック
-# --------------------------------------------------------------------------
-#
-# 4つ目の役。あるのは理屈ではなく測った結果のためだ。run 7 は緑のステップ10と
-# 通ったテスト42で終わり、成果物は入力をまったく受け付けなかった。資源は 0.0
-# から始まり、生産は空の dict を足し、どちらの購入も 0 より高かった。どの関門も
-# 正しかった。どの条件も本当に何かを確かめていた。機械の中に、結果が良いかを
-# 問える位置にあるものが無かった。
-#
-# 関門が確かめるのは「作業の形」だ。テストを先に書いたか、スタブに対して正しい
-# 理由で落ちるか、ほかに何かを触ったか、通っていたものが落ちたか。どれも何を
-# 作るかには触れず、触れるべきでもない。だからどんな題材、どんな言語でも働く。
-# クリティックはもう半分だ。何かが終わったと決めることは決してなく、何かが
-# おかしいと言えるだけだ。
-#
-# モードを2つにするのは、1つの問いでは両方の種類の欠陥を見つけられないからだ。
-# run 7 の計画で測り、指摘は重ならなかった:
-#
-#   coverage  見つけたもの: リセットの機能に画面から届かない。起動のコマンドを
-#             確かめるものが無い。求められた発電機ごとの数値が、欠けているだけで
-#             なく反対の値で確かめられていて、正しい実装が条件に「落ちる」
-#   trace     見つけたもの: 初期状態が、どの操作でも動かない不動点。モジュール
-#             まるごとが最初から死んでいる。記述する関数が一度も呼ばれないから
-#             こそ成り立つ不変条件
-#
-# どちらも、もう片方の指摘を見つけなかった。だから、2つの節を持つ1つの
-# ブリーフではなく、別々のブリーフで別々に呼ぶ。1つの枠組みにすると片方が
-# 支配し、最初の試みはまさにそれで不動点を見逃した。
-
-CRITIQUE_MODES = ("coverage", "trace")
-
-
-def critic_environment(tasks: str) -> str:
-    """クリティックに見せる環境。既存の宣言は、計画が触れるものだけにする。
-
-    計画が読めなければ絞らない。読めない計画にも、全部を見せるのは損ではない。
-    """
-    try:
-        plan = json.loads(tasks)
-    except ValueError:
-        plan = None
-    return environment_facts(plan if isinstance(plan, dict) else None)
-
-
-def critic_material(tasks: str) -> str:
-    """どのモードのブリーフも、この同じ本文で始める。
-
-    ブリーフの大半は計画と既存の宣言で、モードが変わっても同じだ。モードは
-    続けて呼ぶので、先頭がそろっていれば、2つ目の呼び出しはこの部分を
-    プロンプトキャッシュから読む。役の説明と問いは、この後に置く。
-    """
-    return f"""Below are a plan for something that has not been built yet and
-facts about the project it will be built in. Your role and your task follow
-after them.
-
-# The plan
-
-{tasks}
-
-{critic_environment(tasks)}"""
-
-
-def brief_critique_coverage(requirements: str, tasks: str) -> str:
-    """この計画を完全に満たしたとき、人間が求めたものが手に入るか。"""
-    return f"""{critic_material(tasks)}
-
-# Your role
-
-You are the critic. Your only job is to answer one question about the work
-above.
-
-# The question
-
-A human wrote requirements for something they want. A planner turned those
-requirements into the plan above: a sequence of steps, each with acceptance
-criteria that a machine will check.
-
-**If every acceptance criterion in this plan passed, would the human's
-requirements be satisfied?**
-
-# The requirements, written by the human
-
-{requirements}
-
-# How to read the plan
-
-`steps` is a sequence. Each step has:
-
-- `goal` -- prose describing what the step builds
-- `contracts.provides` / `requires` / `invariants` -- the signatures and
-  properties this step hands to later steps
-- `acceptance` -- the criteria a machine will check, as {{case, given, then}}.
-  **These are the only things that will be verified.** `goal` and `invariants`
-  are prose; nothing checks them.
-- `files_write` -- the files this step creates. A file belongs to exactly one
-  step and is never edited by a later step.
-
-# What to look for
-
-Read the requirements as a person who will use the thing, not as someone
-checking boxes. Then work out what the plan actually produces, by reading the
-contracts and criteria as a whole system rather than step by step.
-
-A plan can be wrong in ways no single step is wrong in. Pay attention to what
-the steps produce TOGETHER, and to anything the requirements ask for that no
-criterion anywhere would detect the absence of.
-
-Watch for the sharper case as well: a criterion that does not merely omit
-something the requirements ask for, but asserts an exact result that a correct
-implementation would fail. A plan can test against its own requirements.
-
-{findings_contract()}"""
-
-
-def brief_critique_trace(tasks: str) -> str:
-    """初期状態から始めて、使う人は実際にどこまで届くか。
-
-    あえて要件を渡さない。run 7 の計画で、このモードは条件だけから行き詰まりを
-    導いた。つまり、欠けているものについて要件が何も言っていなくても、動かない
-    製品を捕まえられる。run 7 の要件は、初期状態に一言も触れていなかった。
-    """
-    return f"""{critic_material(tasks)}
-
-# Your role
-
-You are the tracer. You read the plan above and work out what a user of the
-finished thing would actually be able to do.
-
-# How to read it
-
-`steps` is a sequence. Each step has:
-
-- `contracts.provides` -- the functions and types this step creates
-- `contracts.requires` -- what it takes from earlier steps
-- `contracts.invariants` -- properties claimed in prose (nothing verifies these)
-- `acceptance` -- {{case, given, then}} triples. These are the only things a
-  machine will check, and they carry concrete values, so they are the most
-  reliable statement of what the code will actually do
-- `goal` -- prose
-- `files_write` -- the files this step owns
-
-# Your task
-
-Work out, from the contracts and the acceptance criteria:
-
-1. **The initial state.** What state does the artifact hold the first time a
-   user opens it, before anything has happened? Quote the criteria that fix it.
-
-2. **The action set.** What can a user of the finished artifact actually do?
-   Not what functions exist -- what a person operating the thing can invoke.
-   Reaching a function requires that something in the plan exposes it to them;
-   a function no exposed surface calls is not an action.
-
-3. **The reachable set.** Starting from the initial state and applying any
-   sequence of those actions, what states can be reached? Derive it, showing
-   the arithmetic where the criteria give you concrete numbers.
-
-Then say plainly:
-
-- Is any state reachable from the initial state at all, or is the initial state
-  fixed under every available action?
-- Are there states the artifact is evidently built to handle that no sequence
-  of user actions can ever reach? Name them and show why.
-
-  This question is about the artifact's OWN logic: a goal that can never be
-  met, a purchase that can never be afforded, a screen that can never be
-  shown. It is not about input that arrives from outside the user's actions --
-  saved data read back from storage, storage that was edited or corrupted, a
-  save written by an older version, a clock that moved, a file or response
-  from elsewhere. That input is real even though no click produces it, and a
-  test that feeds it in is checking a defence, not exercising dead code. Do
-  not report it.
-
-  That exemption covers the DEFENCE, not the thing being read. If the
-  artifact reads something back -- a save, a setting, a record -- check that
-  some step in the plan also writes it. Something the artifact reads that no
-  step ever writes, and that the plan does not say comes from elsewhere (a
-  file the user supplies, a response from a server), is a defect in the
-  artifact's own logic: the read path is reachable, and what it finds is
-  always nothing. Report that.
-
-  Code listed under "What the code already declares" is not such a thing,
-  whether it is shown line by line or only by its file. It
-  exists before the first step, so a step that calls it or reads what it
-  provides is using something that is already there. Do not report it as
-  something no step writes.
-
-Show your derivation with the actual numbers from the criteria, so that someone
-can check each step. Do not describe what the plan intends -- describe what it
-specifies. If your derivation contradicts what the prose in `goal` or
-`invariants` claims, trust the acceptance criteria and say that they disagree.
-
-{findings_contract()}"""
-
-
 def findings_contract() -> str:
     """クリティックが書くものと、書いてよい唯一のファイル名。
 
-    あえて、構造を持った枠の中に文章を入れる。ランナーは続けるかを決めるために
-    指摘を数える必要があり、プランナーは手を打つために指摘を読む必要がある。
-    数だけでは「計画が自分の要件に逆らって確かめている」を運べず、自由な文章は
-    数えられない。
+    あえて、構造を持った枠の中に文章を入れる。ダッシュボードは指摘を数えて並べ、
+    人は手を打つために指摘を読む。数だけでは「設計が仕様に逆らっている」を運べず、
+    自由な文章は数えられない。
     """
     return f"""# What to write
 
@@ -6819,20 +6704,20 @@ without reading.
       "findings": [
         {{
           "title": "one line, the claim itself",
-          "evidence": "which steps, contracts or criteria show it. Be specific
-                       enough that someone can check you. Quote the criteria.",
+          "evidence": "which modules, contracts or passages show it. Be specific
+                       enough that someone can check you. Quote them.",
           "machine_would_notice": false
         }}
       ]
     }}
 
-**Write `title` and `evidence` in Japanese.** A human reads the findings before
-the planner does, and may rewrite them. Quote criteria, names and code exactly
-as they appear in the plan, in their own language.
+**Write `title` and `evidence` in Japanese.** A human reads the findings and
+decides whether the planner writes the design again. Quote names and passages
+exactly as they appear in the design.
 
-`machine_would_notice` is false when every criterion would pass while the
-problem stood. Say so plainly when that is the case -- it is the difference
-between a plan that is incomplete and a plan that cannot be caught.
+`machine_would_notice` is false when no test written from the design would fail
+while the problem stood. Say so plainly when that is the case -- it is the
+difference between a design that is incomplete and one that cannot be caught.
 
 Order the findings by how badly they hurt the person who asked for this.
 
@@ -6849,31 +6734,14 @@ Output nothing but the file. Do not restate the findings in your final message.
 """
 
 
-def clear_critique() -> None:
-    """批評を頼む前に out/ を空にする。
-
-    clear_proposal と同じ理由だ。前の呼び出しの残りのファイルは、今回の答えと
-    して読まれる。「クリティックは何も見つけなかった」と「クリティックは走ら
-    なかった」は、決して同じに見えてはならない。
-    """
-    CRITIC_OUT.mkdir(parents=True, exist_ok=True)
-    for entry in CRITIC_OUT.iterdir():
-        if entry.is_dir() and not entry.is_symlink():
-            raise Halt("CRITIQUE",
-                       f"a directory is in the way in {CRITIC_OUT}: {entry.name}",
-                       "Remove it by hand; the runner will not recurse into a "
-                       "tree written by another uid.")
-        entry.unlink()
-
-
 def call_critic(brief: str, mode: str) -> str:
     """クリティックにブリーフを1つ渡す。
 
-    ブリーフが何を含み、何を含まないかに注意する。計画は運ぶ。計画の批評には
-    計画が要るからだ。テスト、台帳、何が通ったかについては何も運ばない。そして
-    クリティックはどのみちそれに届かない。tests/ と src/ は 2770 runner:solverw で、
-    クリティックはどちらのグループにもいない。これは飾りではなく測った結果だ。
-    すでに通ったものが見えるクリティックは、通ったと報告する。
+    ブリーフが何を含み、何を含まないかに注意する。仕様書と設計は運ぶ。設計の
+    批評には設計が要るからだ。受け入れ条件、テスト、台帳、何が通ったかについては
+    何も運ばない。そしてクリティックはどのみちそれに届かない。docs/ と ac/ は
+    0700 runner、tests/ と src/ は 2770 runner:solverw で、クリティックはどちらの
+    グループにもいない。すでに通ったものが見えるクリティックは、通ったと報告する。
     """
     CRITIC_BRIEF.mkdir(parents=True, exist_ok=True)
     brief_path = CRITIC_BRIEF / f"{mode}.md"
@@ -6953,122 +6821,6 @@ def render_findings(by_mode: dict[str, list[dict]]) -> str:
     return "\n".join(lines)
 
 
-def brief_plan_refine(requirements: str, tasks: str, findings: str,
-                      feedback: str = "") -> str:
-    """まだ適用していない自分の計画への批評を、プランナーに渡す。
-
-    `plan propose` とは違う状況なので、あちらのブリーフを使い回さず、違いを
-    ブリーフに書く。何も作られておらず、何も緑でないので、P5 は効かない。受け
-    入れ条件を含めて、この計画のどこでもまだ変えられる。これが `plan apply` の
-    前に行う理由のすべてだ。適用した後は、条件はループが測られる基準になり、
-    それを書き直すのは (b) で、人間のものになる。
-    """
-    return f"""You are the planner. A critic read the plan you wrote and found
-problems with it. Revise the plan so those problems are gone.
-
-You do not write code and you cannot reach the repository. You write files into
-the current directory and the runner decides whether to apply them.
-
-# The requirements, written by the human
-{requirements}
-
-# The plan you wrote
-{tasks}
-
-# What the critic found
-{findings}
-
-# What is different about this moment
-
-NOTHING HAS BEEN BUILT YET. This plan has not been applied, no step is green,
-and no test exists. So unlike a revision after a step has failed, **everything
-here is still yours to change** -- the steps, the contracts, and the acceptance
-criteria. This is the last point at which the criteria can change without a
-human deciding it, which is why the critique happens here.
-
-# The critic could be wrong
-
-It was shown the requirements and the plan, and nothing else. It has never seen
-the repository. If a finding is mistaken -- most likely because it assumed
-something must be built that the environment already provides -- then do not
-contort the plan to satisfy it. Leave that part alone and say why in the plan
-itself, where it will survive: put the reason in the `goal` of the step it
-concerns, in one sentence. A finding you silently ignore will simply be found
-again on the next pass.
-
-A human read these findings before you, and may have rewritten some. A finding
-marked REWRITTEN BY THE HUMAN is the human's word, not the critic's guess: it
-says what the human wants from the plan. Do not argue it away.
-
-# What you may write, into the current directory
-- `tasks.json`      the full revised plan, not a diff
-- `CONTEXT.md`      optional, only if the background the solver receives is what
-                    was wrong
-- `SYSTEM_SPEC.md`  optional, only if an agreed decision has to change
-- `{ESCALATE_NAME}`   instead of all of the above; see below
-
-Write no other file. A fourth filename is rejected without being read.
-
-# What is rejected mechanically
-- a plan that fails the linter (RUNNER_SPEC section 8)
-- lowering `expected_tests` or turning `review_gate` off
-- removing a step
-
-Fixing a finding by deleting the criterion that would have caught it is the one
-move that makes the plan worse while appearing to answer. If a requirement
-cannot be met, that is worth saying out loud rather than arranging for nobody
-to notice.
-
-If you conclude the requirements themselves are contradictory, or that what the
-critic wants cannot be done without a decision that is not yours, write a single
-file named `{ESCALATE_NAME}` saying so and write nothing else. That is a correct
-outcome and it is the only route to the human.
-
-{feedback_section(feedback)}
-Output nothing but the files. Do not restate the plan in your final message.
-"""
-
-
-def run_critique(modes: list[str], tasks: str) -> dict[str, list[dict]]:
-    """1つの計画の本文に対して、各モードを1回ずつ走らせる。"""
-    requirements = REQUIREMENTS.read_text(encoding="utf-8") \
-        if REQUIREMENTS.is_file() else ""
-    by_mode: dict[str, list[dict]] = {}
-    for mode in modes:
-        if mode == "coverage" and not requirements:
-            # 飛ばしたことを黙らない。飛ばしたモードは by_mode に入らないので、
-            # 呼び出し側から見ると「走って何も見つけなかった」と区別できない。
-            ledger("CRITIQUE_SKIPPED", mode=mode, reason=f"no requirements at {REQUIREMENTS}")
-            print(f"coverage skipped: no requirements at {REQUIREMENTS}",
-                  file=sys.stderr)
-            continue
-        brief = (brief_critique_coverage(requirements, tasks) if mode == "coverage"
-                 else brief_critique_trace(tasks))
-        ledger("CRITIQUE", mode=mode)
-        clear_critique()
-        call_critic(brief, mode)
-        findings = read_findings()
-        ledger("FINDINGS", mode=mode, count=len(findings),
-               titles=[str(f.get("title", ""))[:200] for f in findings])
-        by_mode[mode] = findings
-    return by_mode
-
-
-def no_critique_ran(modes: list[str]) -> int:
-    """頼んだモードが1つも走らなかったときの終わり方。
-
-    指摘ゼロとは別の結果として扱う。clean と表示すると、批評を1回も受けて
-    いない計画が、批評を通った計画と同じに見える。返す 1 は「ランナーが仕事を
-    できなかった」で、cmd_critique の 0（指摘なし）と 4（指摘あり）のどちらとも
-    重ならない。
-    """
-    ledger("CRITIQUE_NONE", requested=list(modes))
-    print(f"no critique ran (requested: {', '.join(modes)}). This is not a clean "
-          f"result: nothing looked at the plan.\nFor coverage, put the "
-          f"requirements at {REQUIREMENTS}.", file=sys.stderr)
-    return 1
-
-
 def text_sha256(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
@@ -7098,563 +6850,30 @@ def write_critique_for_human(round_no: int, by_mode: dict[str, list[dict]],
     os.replace(temporary, CRITIQUE_FOR_HUMAN)
 
 
-def settle_critique() -> None:
-    """人を待っている写しを、もう直せないものにする。中身は画面に残す。"""
-    try:
-        value = json.loads(CRITIQUE_FOR_HUMAN.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return
-    if isinstance(value, dict) and value.get("waiting") and isinstance(value.get("modes"), dict):
-        write_critique_for_human(int(value.get("round") or 0), value["modes"], waiting=False)
+def read_settings() -> dict:
+    """SETTINGS_FILE の走行の設定。無ければ空。
 
-
-def edited_findings(original: dict[str, list[dict]]) -> dict[str, list[dict]]:
-    """人が直した指摘を読む。書き換えてよいのは title と evidence だけ。
-
-    指摘を消すことも足すこともできない。数が合わない、読めない、題が空の写しは
-    Halt にする。人が直して `loop continue` を流し直せば、もう一度ここを通る。
-    書き換えた指摘には rewritten を付け、プランナーにそう伝える。
-    """
-    where = CRITIQUE_FOR_HUMAN
-    try:
-        value = json.loads(where.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as error:
-        raise Halt("CRITIQUE", f"{where} is not readable JSON: {error}")
-    modes = value.get("modes") if isinstance(value, dict) else None
-    if not isinstance(modes, dict) or sorted(modes) != sorted(original):
-        raise Halt("CRITIQUE", f"{where} does not hold the modes that were critiqued",
-                   f"expected: {', '.join(sorted(original))}")
-    edited: dict[str, list[dict]] = {}
-    for mode, before in original.items():
-        after = modes[mode]
-        if not isinstance(after, list) or len(after) != len(before):
-            raise Halt("CRITIQUE", f"{where}: {mode} has a different number of findings",
-                       "Only title and evidence may be rewritten; a finding cannot be "
-                       "added or removed.")
-        rows = []
-        for n, (old, new) in enumerate(zip(before, after), 1):
-            title = new.get("title") if isinstance(new, dict) else None
-            evidence = new.get("evidence") if isinstance(new, dict) else None
-            if not isinstance(title, str) or not title.strip() or not isinstance(evidence, str):
-                raise Halt("CRITIQUE", f"{where}: {mode} {n} needs a title and an evidence")
-            row = {**old, "title": title.strip(), "evidence": evidence.strip()}
-            if (row["title"], row["evidence"]) != (old["title"], old["evidence"]):
-                row["rewritten"] = True
-            rows.append(row)
-        edited[mode] = rows
-    return edited
-
-
-def revise_with_findings(requirements: str, tasks: str,
-                         by_mode: dict[str, list[dict]], round_no: int) -> int:
-    """指摘をプランナーに渡し、保留中の提案を改訂させる。0 なら改訂できた。"""
-    language = json.loads(tasks).get("language", "python")
-    framework = json.loads(tasks).get("framework")
-    report = render_findings(by_mode)
-    ledger("PLAN_REFINE", round=round_no, findings=sum(len(f) for f in by_mode.values()))
-    # 改訂前の提案を控える。plan_with_retry は最初に out/ を空にするので、
-    # 控えが無いと、改訂が失敗したときやエスカレーションしたときに、
-    # リンタを通っていた提案まで失われる。
-    draft = {name: text for name, text in read_proposal().items()
-             if name in PROPOSAL_FILES}
-    # tasks.json は補わない。プランナーが書かなければ、改訂が無いということだ。
-    code = plan_with_retry(
-        lambda feedback: brief_plan_refine(requirements, tasks, report, feedback),
-        "PLAN_REFINE_DRAFT",
-        keep={name: text for name, text in draft.items() if name != "tasks.json"})
-    if code != 0:
-        restore_proposal(draft)
-        ledger("REFINE_RESTORED", round=round_no, reason="revision failed",
-               files=sorted(draft))
-        print(f"the revision failed; the draft from before round {round_no} "
-              f"is back in {PLANNER_OUT}", file=sys.stderr)
-        return code
-    proposal = read_proposal()
-    if ESCALATE_NAME in proposal:
-        REFINE_ESCALATION.write_text(proposal[ESCALATE_NAME], encoding="utf-8")
-        restore_proposal(draft)
-        ledger("REFINE_RESTORED", round=round_no, reason="planner escalated",
-               files=sorted(draft))
-        print("The planner escalated to you rather than revising:\n")
-        print(proposal[ESCALATE_NAME])
-        print(f"\nthe draft from before round {round_no} is back in "
-              f"{PLANNER_OUT}, and the escalation is kept at "
-              f"{REFINE_ESCALATION}.\nRun `plan apply` to apply the draft as "
-              f"it is, or `plan bootstrap` to start over.", file=sys.stderr)
-        return 3
-    # プランナーはファイル全体を書き直すので、言語の印を付け直す。これは
-    # プランナーではなくランナーの印で、失った計画は黙って Python と読まれる。
-    stamp_language(language, framework)
-    return 0
-
-
-def cmd_plan_refine(modes: list[str], resume: bool = False) -> int:
-    """保留中の計画を批評し、指摘をプランナーに返し、それを繰り返す。上限の後も
-    指摘が残れば、人が直せる形で残して止まる。
-
-    これで外側の輪が閉じる。これが無いと批評は人が読んで手を打つ報告になり、
-    機械が扱うために作られたちょうどその場所で、人間が輪の中に残る。
-
-    「保留中の」提案に対して走り、`plan apply` の前で止まる。だから、これが何を
-    しても、何かを測った基準に触れることはない。
-
-    limits.critiques で改訂の上限を掛ける。上限は「もう少し良くできる」が永遠に
-    続くのを止める。改訂1回はプランナーの呼び出し1回で、TypeScript のブリーフでは
-    28分かかった。
-
-    上限の後も指摘が残って止まるときと、改訂が済まずに止まるときは、どのみち人が
-    `loop continue` を打つ。改訂が済まないのは、プランナーが判断を返したとき、
-    改訂に失敗したとき、改訂の途中で走行を止めたときだ。そこで人が指摘を読み、
-    title と evidence を書き換えられるようにする。
-    クリティックは計画と要件しか見ておらず、的を外すことがある。resume は人が
-    書き換えた指摘でプランナーに1回だけ改訂させ、批評はもう回さない。書き換えが
-    無ければ、何もせずに提案を残す。どちらも、その後は `plan apply` に進む。
-    """
-    pending = PLANNER_OUT / "tasks.json"
-    requirements = REQUIREMENTS.read_text(encoding="utf-8") \
-        if REQUIREMENTS.is_file() else ""
-    # 改訂の途中で止まると out/ は空のこともある。resume は控えから戻すので先に分ける。
-    if resume:
-        return resume_refine(requirements, pending)
-
-    if not pending.is_file():
-        print(f"no pending proposal at {pending}", file=sys.stderr)
-        print("run `plan bootstrap` first; refine works before `plan apply`, "
-              "while the criteria are still a draft", file=sys.stderr)
-        return 1
-
-    cap = LIMITS["critiques"]
-    for round_no in range(1, cap + 2):
-        tasks = pending.read_text(encoding="utf-8")
-        load_settings(json.loads(tasks))
-
-        by_mode = run_critique(modes, tasks)
-        if not by_mode:
-            return no_critique_ran(modes)
-        by_mode = plain_findings(by_mode)
-        total = sum(len(f) for f in by_mode.values())
-        print(f"\n=== critique {round_no} of at most {cap + 1} ===")
-        print(render_findings(by_mode))
-
-        if total == 0:
-            write_critique_for_human(round_no, by_mode, waiting=False)
-            ledger("CRITIQUE_CLEAN", round=round_no, modes=sorted(by_mode))
-            print("the critic found nothing left. That is not approval -- the "
-                  "gates and the human decide that.")
-            return 0
-
-        if round_no > cap:
-            wait_for_human(round_no, tasks, by_mode)
-            ledger("REFINE_CAP", round=round_no, findings=total)
-            print(f"\n{total} finding(s) still standing after {cap} revision(s). "
-                  f"The proposal is left as it is. Rewrite the title or the evidence "
-                  f"of any finding in {CRITIQUE_FOR_HUMAN} and run "
-                  f"`plan refine --resume` to have the planner revise once against "
-                  f"your wording, or apply the proposal as it is.", file=sys.stderr)
-            return 4
-
-        # 上限の前の回は、クリティックの指摘のまま、人を待たずに改訂させる。
-        # 控えは改訂を頼む前に書く。改訂が済まずに止まれば、上限の後と同じく、人が
-        # 指摘を書き換えて `loop continue` で1回だけ改訂させられる。走行を止められると
-        # 改訂の後の処理は走らないので、後から書くのでは間に合わない。
-        wait_for_human(round_no, tasks, by_mode, revising=True)
-        code = revise_with_findings(requirements, tasks, by_mode, round_no)
-        if code != 0:
-            return code
-        REFINE_STATE.unlink()
-        write_critique_for_human(round_no, by_mode, waiting=False)
-
-    return 4   # 届かない。ループは必ず戻る
-
-
-def wait_for_human(round_no: int, tasks: str, by_mode: dict[str, list[dict]],
-                   revising: bool = False) -> None:
-    """批評した提案と指摘を控え、人が直せる写しを書く。resume_refine がこれを読む。
-
-    revising は、これから改訂させる印。改訂の途中で走行が止まると、out/ は空か
-    書きかけのまま残る。resume_refine は、そのときは控えた提案に戻してから進む。
-    """
-    draft = {name: text for name, text in read_proposal().items() if name in PROPOSAL_FILES}
-    REFINE_STATE.parent.mkdir(parents=True, exist_ok=True)
-    REFINE_STATE.write_text(json.dumps(
-        {"round": round_no, "tasks_sha256": text_sha256(tasks), "findings": by_mode,
-         "revising": revising, "draft": draft},
-        ensure_ascii=False), encoding="utf-8")
-    write_critique_for_human(round_no, by_mode, waiting=True)
-
-
-def resume_refine(requirements: str, pending: Path) -> int:
-    """人を待っている指摘を、人が書き換えたものに替えて、1回だけ改訂させる。
-
-    批評はもう回さない。人が読んだ指摘に答えた改訂を、
-    人の読んでいない指摘でまた曲げさせない。書き換えが1つも無ければ改訂もしない。
-    どちらも 0 で戻り、`loop continue` は提案を適用する。
+    知らないキーは拒む。黙って無視される設定になるからだ。
     """
     try:
-        state = json.loads(REFINE_STATE.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        print("no critique is waiting for you; nothing to resume")
-        return 0
-    if state.get("revising"):
-        # 改訂を頼んだまま止まった。out/ は空か書きかけなので、批評した提案に戻す。
-        restore_proposal(state["draft"])
-        ledger("REFINE_RESTORED", round=state["round"], reason="revision did not finish",
-               files=sorted(state["draft"]))
-    tasks = pending.read_text(encoding="utf-8")
-    if text_sha256(tasks) != state.get("tasks_sha256"):
-        raise Halt("CRITIQUE", "the pending proposal changed after it was critiqued",
-                   f"Remove {REFINE_STATE} to apply the proposal as it is now.")
-    edited = edited_findings(state["findings"])
-    # 読めた時点で控えを消す。改訂が失敗しても、次の `loop continue` は
-    # 同じ指摘で改訂し直さず、下書きを適用する。
-    REFINE_STATE.unlink()
-    settle_critique()
-    rewritten = [f"{mode} {n}" for mode, rows in edited.items()
-                 for n, row in enumerate(rows, 1) if row.get("rewritten")]
-    ledger("FINDINGS_EDITED", round=state["round"], rewritten=rewritten)
-    if not rewritten:
-        print("no finding was rewritten; the proposal is left as it is")
-        return 0
-    load_settings(json.loads(tasks))
-    return revise_with_findings(requirements, tasks, edited, state["round"])
-
-
-def cmd_critique(modes: list[str]) -> int:
-    """ディスクにある計画について、各モードでクリティックに訊き、報告する。
-
-    何も見つからなければ 0、何か見つかれば 4 を返す。1 や 2 にはしない。それらは
-    すでに「ランナーが仕事をできなかった」を意味し、完璧に動いて問題を見つけた
-    批評は、失敗した批評とは別の結果だ。`run --all` はそれらを見分ける必要がある。
-    """
-    # 保留中の提案を先に見る。その順番が要点だ。批評が最も価値を持つのは
-    # `plan apply` の「前」、条件がまだ下書きのうちだ。適用した後は、条件はループが
-    # 測られる基準になり、それを変えるのは (b) で、人間のものになる。適用済みの
-    # 計画だけを読むと、この動詞はちょうど1歩遅れて届く。改訂を見直せるよう、
-    # 保留中が無ければ適用済みの計画に戻る。
-    pending = PLANNER_OUT / "tasks.json"
-    applied = PLAN / "tasks.json"
-    tasks_path = pending if pending.is_file() else applied
-    if not tasks_path.is_file():
-        print(f"no plan to critique: neither {pending} nor {applied}",
-              file=sys.stderr)
-        return 1
-    print(f"critiquing {'the pending proposal' if tasks_path == pending else 'the applied plan'}"
-          f" ({tasks_path})")
-    tasks = tasks_path.read_text(encoding="utf-8")
-    load_settings(json.loads(tasks))
-
-    requirements = REQUIREMENTS.read_text(encoding="utf-8") \
-        if REQUIREMENTS.is_file() else ""
-    if not requirements:
-        print(f"no requirements at {REQUIREMENTS}; coverage needs them",
-              file=sys.stderr)
-
-    by_mode = run_critique(modes, tasks)
-    if not by_mode:
-        return no_critique_ran(modes)
-    total = sum(len(f) for f in by_mode.values())
-    print(render_findings(by_mode))
-    if total == 0:
-        ledger("CRITIQUE_CLEAN", modes=sorted(by_mode))
-        print("the critic found nothing. That is not approval -- the gates and "
-              "the human decide that.")
-        return 0
-    print(f"{total} finding(s). Nothing is green or not green because of this; "
-          f"decide what to do with them.")
-    return 4
-
-
-def archive_plan() -> str | None:
-    """今の計画を plan/archive/<番号>/ へ移してコミットする。移せなければ理由を返す。
-
-    同じリポジトリで2つ目の要件を走らせるための経路だ。新しい計画のステップ id は
-    前の計画と重なる（どちらも S1 から始まる）。台帳が残ると、前の計画の GREEN を
-    新しい S1 の緑と読む。だから台帳ごと移し、新しい台帳は空から始める。前の計画が
-    書いたコードとテストは HEAD に残り、次の計画からは既存のものとして見える。
-
-    途中まで緑の計画は移さない。緑のステップのコードは、残りのステップを前提に
-    書かれている。続けるか捨てるかは人が決める。緑のステップが1つも無い計画は
-    移してよい。コードを何も残していない。
-    """
+        text = SETTINGS_FILE.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return {}
     try:
-        tasks = json.loads((PLAN / "tasks.json").read_text(encoding="utf-8"))
-        ids = {s["id"] for s in tasks["steps"]}
-    except (OSError, ValueError, KeyError, TypeError) as bad:
-        return f"refusing: the current plan cannot be read ({bad})"
-    done = green_steps()
-    if done and ids - done:
-        return (f"refusing: {', '.join(sorted(done))} already green but "
-                f"{', '.join(sorted(ids - done))} not; a bootstrap replaces the plan, "
-                f"which would orphan them. Finish the plan with `run --all` first")
-    dirty = touched_paths()
-    if dirty:
-        return ("refusing: the working tree is dirty; `reset <step>` first\n"
-                + "\n".join(sorted(dirty)))
-
-    numbers = [int(p.name) for p in PLAN_ARCHIVE.glob("*") if p.name.isdigit()] \
-        if PLAN_ARCHIVE.is_dir() else []
-    dest = PLAN_ARCHIVE / f"{max(numbers, default=0) + 1:03d}"
-    dest.mkdir(parents=True)
-    for path in (*PROPOSAL_FILES.values(), LEDGER, ESCALATION, PLANNER_ESCALATION):
-        if path.exists():
-            path.rename(dest / path.name)
-    # 契約と凍結のマニフェストはステップ id で引く。前の計画のものが残ると、
-    # 新しい計画の同じ id のステップに前の契約が渡る。
-    for name in ("contracts", "freeze"):
-        shutil.rmtree(STATE / name, ignore_errors=True)
-    REFINE_ESCALATION.unlink(missing_ok=True)
-
-    where = dest.relative_to(PROJECT).as_posix()
-    ledger("PLAN_ARCHIVE", to=where, steps=sorted(done))
-    plan = PLAN.relative_to(PROJECT).as_posix()
-    run(["git", "add", "-A", "--", plan], check=True)
-    run(["git", "commit", "-q", "-m", f"plan: archive the previous plan to {where}",
-         "--", plan], check=True)
-    publish("the archived plan")
-    return None
-
-
-def cmd_plan_bootstrap(source: str | None, language: str = "python",
-                       framework: str | None = None) -> int:
-    """人間が書いた要件のファイルから、最初の計画をプランナーに頼む。
-
-    計画が生まれる唯一の経路で、あえてほかのプランナー呼び出しと同じ形にして
-    ある。ブリーフを入れ、提案が出て、ランナーが決める。ここでの人間の権限は
-    要件のファイルで、plan/ を直接書く力でも、ランナーの仕組みを知る義務でも
-    ない。要件は作るものについて述べる。この機械が受け入れる計画を作るのは
-    プランナーの仕事で、やり直しのループがそれを願望ではなく事実にしている。
-    """
-    path = Path(source) if source else REQUIREMENTS
-    if not path.is_file():
-        print(f"no requirements at {path}", file=sys.stderr)
-        print("write them there, or pass --from <path>", file=sys.stderr)
-        return 1
-
-    # bootstrap は計画全体を置き換える。前の計画は台帳ごと plan/archive/ へ移し、
-    # 計画の無い状態から起こす。提案の検査（B1）も、最初のステップの前の
-    # スイートの確かめも、計画が無いことを前提にしている。
-    if (PLAN / "tasks.json").exists():
-        refused = archive_plan()
-        if refused:
-            print(refused, file=sys.stderr)
-            return 1
-    # 前の計画への批評は、これから書く計画とは関係が無い。
-    REFINE_STATE.unlink(missing_ok=True)
-    CRITIQUE_FOR_HUMAN.unlink(missing_ok=True)
-
-    # ブリーフを組み立てる後ではなく前に設定する。environment_facts はテストの
-    # コマンドとツールキットを報告し、配置の段落はソースファイルがそもそもどんな
-    # ものかをプランナーに伝える。違う言語向けに書いたブリーフからは、どの
-    # ステップも誤った計画が出てくる。
-    # 持ち込む先も同じだ。指定が無ければ言語の既定になり、計画にはその名前を刻む。
-    load_settings({"language": language, "framework": framework})
-
-    requirements = path.read_text(encoding="utf-8")
-    ledger("PLAN_BOOTSTRAP", source=str(path), language=language,
-           framework=LANGUAGE["framework"])
-    code = plan_with_retry(
-        lambda feedback: brief_plan_bootstrap(requirements, feedback),
-        "PLAN_BOOTSTRAP_DRAFT")
-    if code == 0 and ESCALATE_NAME not in read_proposal():
-        stamp_language(language, LANGUAGE["framework"])
-    return code
-
-
-def cmd_plan_propose(step_id: str | None) -> int:
-    if not ESCALATION.exists():
-        print(f"nothing to revise: {ESCALATION} does not exist", file=sys.stderr)
-        return 1
-    load_settings(json.loads((PLAN / "tasks.json").read_text(encoding="utf-8")))
-    NOW["step"] = step_id
-    step = None
-    if step_id:
-        step, _ = load_plan(step_id)
-    escalation = ESCALATION.read_text(encoding="utf-8")
-    ledger("PLAN_PROPOSE", step=step_id or "-")
-    return plan_with_retry(
-        lambda feedback: brief_plan_revise(step, escalation, feedback),
-        "PLAN_PROPOSE_DRAFT")
-
-
-def cmd_plan_show() -> int:
-    proposal = read_proposal()
-    for name in sorted(proposal):
-        body = proposal[name]
-        print(f"--- {name} ({len(body.splitlines())} lines) ---")
-        print(body)
-    if ESCALATE_NAME in proposal:
-        return 0
-    problems = proposal_problems(proposal)
-    print("--- would it be accepted? ---")
-    for problem in problems:
-        print("  " + problem)
-    print("  yes" if not problems else f"  no: {len(problems)} violation(s)")
-    return 0
-
-
-def cmd_plan_apply() -> int:
-    """提案を確かめてから適用する。拒んだときは out/ をそのまま残し、人間が
-    拒まれたものを読めるようにする。"""
-    proposal = read_proposal()
-
-    if ESCALATE_NAME in proposal:
-        # ランナーのエスカレーションは、意図して作った経路で人間に届く。
-        # plan/ESCALATION.md はコミットされ、送られ、ホストに引かれ、
-        # ダッシュボードに出る。プランナーのエスカレーションにはその経路が無い。
-        # planner/out/ はリポジトリの外なので、このコマンドを走らせた端末に出る
-        # だけで、ほかのどこにも残らない。1つの端末にしか見えない人間宛ての問いは、
-        # 人間宛てになっていない。だからここで plan/ に写してコミットする。経路を
-        # 走らせて見つけた。プランナーは正しく断り、その答えが見えなかった。
-        PLANNER_ESCALATION.write_text(proposal[ESCALATE_NAME], encoding="utf-8")
-        PLANNER_ESCALATION.chmod(0o644)
-        ledger("PLAN_ESCALATE", note="the planner declined; this is case (b) or (c)")
-        relative = PLANNER_ESCALATION.relative_to(PROJECT).as_posix()
-        run(["git", "add", "--", relative], check=True)
-        if run(["git", "diff", "--cached", "--quiet", "--", relative]).returncode:
-            run(["git", "commit", "-q", "-m", "plan: the planner escalated to the human",
-                 "--", relative], check=True)
-            publish("the planner's escalation")
-        print("The planner escalated to you rather than proposing a change:\n")
-        print(proposal[ESCALATE_NAME])
-        return 3
-
-    problems = proposal_problems(proposal)
-    if problems:
-        for problem in problems:
-            print(problem, file=sys.stderr)
-        ledger("PLAN_REJECT", files=sorted(proposal), violations=problems)
-        print(f"\nproposal rejected: {len(problems)} violation(s); "
-              f"{PLANNER_OUT} left as it is", file=sys.stderr)
-        return 2
-
-    applied = []
-    for name, dest in PROPOSAL_FILES.items():
-        if name not in proposal:
-            continue
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_text(proposal[name], encoding="utf-8")
-        dest.chmod(0o644)
-        applied.append(str(dest.relative_to(PROJECT)))
-
-    # エスカレーションには答えたので、それは消す。これで状態がひと目で読め、
-    # スクリプトから安全に動かせる。ESCALATION.md があるのは未解決の
-    # エスカレーションがあるときだけで、`plan propose` はそれが無いと走らない。
-    # 残すと、2回目の propose が答え済みの問いに答えてしまう。
-    escalation_tracked = bool(
-        run(["git", "ls-files", "--", str(ESCALATION.relative_to(PROJECT))]).stdout.strip())
-    ESCALATION.unlink(missing_ok=True)
-
-    # 適用される計画は、プランナーが訊いたことへの答えなので、その問いも消す。
-    # 理由は同じで、ダッシュボードはこのファイルがあることを「誰かがあなたを
-    # 待っている」と読む。
-    planner_escalation_tracked = bool(
-        run(["git", "ls-files", "--",
-             str(PLANNER_ESCALATION.relative_to(PROJECT))]).stdout.strip())
-    PLANNER_ESCALATION.unlink(missing_ok=True)
-    # 人の答えも、適用された計画に入った。次のエスカレーションには渡さない。
-    HUMAN_ANSWER.unlink(missing_ok=True)
-
-    ledger("PLAN_APPLY", files=applied)
-    # 人を待っていた批評は、適用した計画には効かない。直せる印を外す。
-    REFINE_STATE.unlink(missing_ok=True)
-    settle_critique()
-
-    # 計画だけをコミットし、ほかは何も含めない。提案はふつう、止まったステップの
-    # 変更が作業ツリーに残ったまま届く。それを同じコミットに入れると、捨てた試行を
-    # 計画の変更の一部として記録してしまう。
-    paths = applied + [str(LEDGER.relative_to(PROJECT))]
-    if escalation_tracked:
-        paths.append(str(ESCALATION.relative_to(PROJECT)))
-    if planner_escalation_tracked:
-        paths.append(str(PLANNER_ESCALATION.relative_to(PROJECT)))
-    # `git commit -- <paths>` は追跡中のパスしか入れないので、3つのファイルが
-    # すべて新しい最初の計画では何もコミットせず 1 で終わる。先に明示して add
-    # する。（最初の bootstrap まで気づかなかった。見本のプロジェクトでは、これらの
-    # ファイルが常に存在していたからだ。）
-    run(["git", "add", "--"] + paths, check=True)
-    run(["git", "commit", "-q", "-m", "plan: apply planner proposal", "--"] + paths,
-        check=True)
-    publish("the plan")
-    for entry in PLANNER_OUT.iterdir():
-        entry.unlink()
-    print("applied: " + ", ".join(applied))
-    return 0
-
-
-def cmd_plan_amend(step_id: str) -> int:
-    """人が書き換えた計画を取り込み、そのステップを最後の緑からやり直せるようにする。
-
-    受け入れ条件の書き換え (b) と上流からの作り直し (c) は人の権限で、プランナーの
-    経路（P1、P2）では拒まれる。人は plan/ に書けないので、`loop plan amend` が
-    human/in に置いた tasks.json を読む。リンタは同じものを通す。
-
-    計画だけをコミットしてから reset する。順を逆にすると、`git reset --hard` が
-    コミットしていない計画を捨てる（RUNNER_SPEC 6-2）。拒んだときは何も変えず、
-    置かれた計画を残す。
-    """
-    try:
-        tasks = json.loads(AMENDED_PLAN.read_text(encoding="utf-8"))
-    except OSError:
-        print(f"nothing to amend: {AMENDED_PLAN} does not exist", file=sys.stderr)
-        return 1
-    except json.JSONDecodeError as e:
-        print(f"{AMENDED_PLAN} is not JSON: {e}", file=sys.stderr)
-        return 2
-    if not isinstance(tasks, dict):
-        print(f"{AMENDED_PLAN} is not a plan", file=sys.stderr)
-        return 2
-    steps = {s.get("id"): s for s in tasks.get("steps") or [] if isinstance(s, dict)}
-    problems = [] if step_id in steps else [f"no step {step_id} in the amended plan"]
-    try:
-        load_settings(tasks)
-    except SystemExit as e:
-        problems.append(str(e))
-    problems += validate_plan(tasks) if not problems else []
-    if problems:
-        for problem in problems:
-            print(problem, file=sys.stderr)
-        ledger("PLAN_AMEND_REJECT", step=step_id, violations=problems)
-        print(f"\namendment rejected: {len(problems)} violation(s); "
-              f"{AMENDED_PLAN} left as it is", file=sys.stderr)
-        return 2
-
-    # 緑のステップを書き換えても、台帳の GREEN は残り、走り直さない。それは (c) で、
-    # 捨てる緑まで戻すのは人の仕事だ。拒まずに、何が走り直さないかを伝える。
-    before = {s["id"]: s for s in
-              json.loads((PLAN / "tasks.json").read_text(encoding="utf-8"))["steps"]}
-    stale = sorted(sid for sid in green_steps() & set(steps)
-                   if sid != step_id and canon(steps[sid]) != canon(before.get(sid)))
-
-    tasks_path = PLAN / "tasks.json"
-    tasks_path.write_text(AMENDED_PLAN.read_text(encoding="utf-8"), encoding="utf-8")
-    tasks_path.chmod(0o644)
-    paths = [tasks_path, LEDGER]
-    # 計画を直したことが、どちらのエスカレーションへの答えにもなる。
-    for answered in (ESCALATION, PLANNER_ESCALATION):
-        if run(["git", "ls-files", "--", str(answered.relative_to(PROJECT))]).stdout.strip():
-            paths.append(answered)
-        answered.unlink(missing_ok=True)
-    HUMAN_ANSWER.unlink(missing_ok=True)
-    AMENDED_PLAN.unlink(missing_ok=True)
-
-    ledger("PLAN_AMEND", step=step_id, **({"green_changed": stale} if stale else {}))
-    relative = [str(p.relative_to(PROJECT)) for p in paths]
-    run(["git", "add", "--"] + relative, check=True)
-    run(["git", "commit", "-q", "-m", f"plan: the human amended step {step_id}", "--"]
-        + relative, check=True)
-    cmd_reset(step_id)
-    publish("the amended plan")
-    if stale:
-        print(f"warning: green step(s) {', '.join(stale)} changed but stay green; "
-              "they do not run again", file=sys.stderr)
-    print(f"amended: step {step_id} runs again from the last green")
-    return 0
-
+        value = json.loads(text)
+    except json.JSONDecodeError as bad:
+        raise SystemExit(f"{SETTINGS_FILE}: not JSON: {bad}")
+    if not isinstance(value, dict):
+        raise SystemExit(f"{SETTINGS_FILE}: must be a JSON object")
+    unknown = sorted(set(value) - SETTINGS_KEYS)
+    if unknown:
+        raise SystemExit(f"{SETTINGS_FILE}: unknown keys {unknown}; "
+                         f"allowed are {sorted(SETTINGS_KEYS)}")
+    return value
 
 
 def load_settings(tasks: dict) -> None:
-    """計画が上限を上げ下げできるようにする。対象は存在するキーだけで、ほかは
-    無視しない。知らないキーは、黙って無視される設定になるからだ。"""
+    """上限、やり直しの方針、ソルバーの段、言語を当てる。対象は存在するキーだけ。"""
     TIMEOUTS.update({k: int(v) for k, v in (tasks.get("timeouts") or {}).items()
                      if k in TIMEOUTS})
     LIMITS.update({k: int(v) for k, v in (tasks.get("limits") or {}).items()
@@ -7714,7 +6933,7 @@ def publish(what: str) -> None:
     branch = run(["git", "push", "--quiet", "origin", "HEAD"])
     if branch.returncode != 0:
         failures.append((branch.stdout + branch.stderr).strip()[-400:])
-    # タグは動く。ステップを reset して走らせ直すと、`git tag -f step-<id>` が
+    # タグは動く。モジュールを reset して走らせ直すと、`git tag -f module-<id>` が
     # 指す先を変える。だからタグだけは強制して送る。
     tags = run(["git", "push", "--quiet", "--force", "origin", "--tags"])
     if tags.returncode != 0:
@@ -7730,19 +6949,22 @@ def publish(what: str) -> None:
         print("  " + line.replace("\n", "\n  "), file=sys.stderr)
 
 
-def complete_green(step_id: str, goal: str, attempts: int) -> None:
+def complete_green(step_id: str, goal: str, attempts: int, design: str = "") -> None:
     """GREEN の証拠を、それが述べるコードと一緒にコミットする。
 
     台帳の事実は、その結果を記録する実装と同じコミットに入れる。GREEN を
-    ステップのコミットの後に追記すると、その記録は次のステップのコミットに
-    入る。最後のステップには次が無いので、ホストの写しは常に1ステップ遅れて
-    見える。
+    モジュールのコミットの後に追記すると、その記録は次のモジュールのコミットに
+    入る。最後のモジュールには次が無いので、ホストの写しは常に1つ遅れて見える。
+
+    `design` は緑になったときの設計のハッシュ。設計が変わったモジュールを、
+    中段の出口で見分けるのに使う（green_designs）。テストは .gitignore で外して
+    あるので、`git add -A` はコードと台帳だけを入れる。
     """
-    ledger("GREEN", step=step_id, attempts=attempts)
+    ledger("GREEN", step=step_id, attempts=attempts, design=design)
     run(["git", "add", "-A"], check=True)
-    run(["git", "commit", "-q", "-m", f"{step_id}: {goal[:60]}"], check=True)
-    run(["git", "tag", "-f", f"step-{step_id}"], check=True)
-    publish(f"step {step_id}")
+    run(["git", "commit", "-q", "-m", f"{step_id}: green"], check=True)
+    run(["git", "tag", "-f", f"module-{safe_id(step_id)}"], check=True)
+    publish(f"module {step_id}")
 
 
 def has_all_green(lines: list[str], plan_digest: str) -> bool:
@@ -7756,19 +6978,6 @@ def has_all_green(lines: list[str], plan_digest: str) -> bool:
     return False
 
 
-def completion_recorded(plan_digest: str) -> bool:
-    """この計画の ALL_GREEN がコミットに届いているか。
-
-    あえて「ファイルに記録があるか」を訊かない。記録を書くこととコミットする
-    ことは2つの手順で、その間で失敗すると取り返せなくなる。台帳は ALL_GREEN と
-    言うので、後の走行はすべて早く戻り、その事実をホストの写しに運ぶコミットは
-    いつまでも作られない。complete_run が防ぐための欠陥そのものだ。だから問いは
-    git が持っているかで、答えは git から読む。
-    """
-    shown = run(["git", "show", f"HEAD:{LEDGER.relative_to(PROJECT).as_posix()}"])
-    return shown.returncode == 0 and has_all_green(shown.stdout.splitlines(), plan_digest)
-
-
 def completion_written(plan_digest: str) -> bool:
     """コミットされたかに関係なく、作業中のファイルに記録があるか。"""
     try:
@@ -7778,31 +6987,27 @@ def completion_written(plan_digest: str) -> bool:
 
 
 def complete_run(done: set[str], tasks: dict) -> None:
-    """完了を bare リポジトリに、したがって GUI に見えるようにする。"""
-    plan_digest = hashlib.sha256(
-        json.dumps(tasks, ensure_ascii=False, sort_keys=True).encode("utf-8")
-    ).hexdigest()
-    if completion_recorded(plan_digest):
-        return
-    # git に記録が無い。この走行がいま終わったか、前の走行が記録を書いてから
-    # コミットの前に失敗したかのどちらかだ。後者なら記録はすでにファイルにあり、
-    # もう一度追記すると、走行が2回完了したことになる。
-    if not completion_written(plan_digest):
-        ledger("ALL_GREEN", steps=sorted(done), plan_sha256=plan_digest)
-    ledger_path = LEDGER.relative_to(PROJECT).as_posix()
-    run(["git", "add", "--", ledger_path], check=True)
-    run(["git", "commit", "-q", "-m", "run: all steps green", "--", ledger_path],
-        check=True)
-    publish("run completion")
+    """完了を bare リポジトリに、したがって GUI に見えるようにし、最終確認の段へ移す。
+
+    記録を書くこととコミットすることは2つの手順で、その間で失敗しうる。だから
+    作業中のファイルに記録があれば書き足さず、コミットだけをやり直す。
+    """
+    digest = str(tasks.get("digest") or hashlib.sha256(
+        json.dumps(tasks, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest())
+    if not completion_written(digest):
+        ledger("ALL_GREEN", steps=sorted(done), plan_sha256=digest)
+    if read_stage().get("stage") != "review":
+        write_stage(stage="review")
+    commit_paths([LEDGER, STAGE_FILE], "run: all modules green", "run completion")
 
 
 def check_baseline() -> None:
-    """最初のステップの前に、リポジトリにすでにあるテストが緑であること。
+    """最初のモジュールの前に、リポジトリにすでにあるテストが緑であること。
 
     VERIFY はスイート全体の緑を求める。取り込んだ時点で落ちているテストや、
-    スキップされるテストがあると、どのステップも緑にならない。それは実装の失敗に
-    見え、ソルバーは試行を使い切り、エスカレーションはプランナーに届く。どちらも
-    直せない。直せるのは人だけなので、エスカレーションせずに止める。
+    スキップされるテストがあると、どのモジュールも緑にならない。それは実装の失敗に
+    見え、ソルバーは試行を使い切る。設計を直しても直らない。直せるのは人だけなので、
+    中段に戻さずに止める。
 
     テストのファイルが無ければ何もしない。新しいプロジェクトはいつもそうだ。
     """
@@ -7819,27 +7024,33 @@ def check_baseline() -> None:
         detail.append("skipped:\n  " + "\n  ".join(baseline.skipped_names))
     raise Halt(
         "PLAN_LOAD",
-        f"the tests already in the repository are not green before the first step "
+        f"the tests already in the repository are not green before the first module "
         f"({baseline.failures} failed, {baseline.errors} errored, {baseline.skipped} "
-        f"skipped); every step is checked against the whole suite, so none could "
+        f"skipped); every module is checked against the whole suite, so none could "
         f"go green. Fix or remove them, commit, and run again",
         ("\n".join(detail) or ANSI.sub("", baseline.output))[-4000:])
 
 
-def run_step(step_id: str, unvalidated: bool = False) -> int:
+def own_test_keys(step: dict) -> set[str]:
+    """モジュール自身のテストのファイルを、テストランナーが報告する綴りすべてで。
+
+    2つのテストランナーはレポートでファイルを違う形で呼ぶ。pytest はドット区切りの
+    モジュールのパス（tests.test_models）、vitest は渡したままのパス
+    （tests/engine.test.ts）だ。C# の classname は「名前空間.クラス」で、ファイルの
+    パスを持たない。クラスの名前はファイル名と同じ決まりなので、ファイル名で突き
+    合わせる（test_owner）。C++ はスイートの名前で突き合わせる。
+    """
+    return {Path(p).with_suffix("").as_posix().replace("/", ".")
+            for p in step["files_test"]} | set(step["files_test"]) \
+        | set(csharp_test_classes(step["files_test"])) \
+        | set(cpp_test_suites(step["files_test"]))
+
+
+def run_step(step_id: str) -> int:
+    """モジュールを1つ、TEST_WRITE から GREEN まで回す。止まったら中段に戻す。"""
     NOW["step"], NOW["attempt"] = step_id, None
-    tasks = json.loads((PLAN / "tasks.json").read_text(encoding="utf-8"))
-    load_settings(tasks)
-    problems = validate_plan(tasks)
-    if problems:
-        if not unvalidated:
-            raise Halt("PLAN_LOAD", f"plan has {len(problems)} lint violation(s)",
-                       "\n".join(problems))
-        # リンタを飛ばすことは許すが、決して黙っては飛ばさない。リンタに落ちた
-        # 計画から出た緑は、人間のレビューなしで出た緑と同じ理由で、台帳にそう
-        # 書かなければならない。
-        ledger("PLAN_LINT", skipped=True, violations=problems,
-               note="ran with --unvalidated; these violations were not fixed")
+    tasks = json.loads(TASKS.read_text(encoding="utf-8"))
+    load_settings({**tasks, **read_settings()})
 
     step, context = load_plan(step_id)
     ledger("PLAN_LOAD", step=step_id, files_write=step["files_write"], files_test=step["files_test"])
@@ -7847,9 +7058,11 @@ def run_step(step_id: str, unvalidated: bool = False) -> int:
     if touched_paths():
         raise Halt("PLAN_LOAD", "the working tree is dirty; refusing to start",
                    "\n".join(sorted(touched_paths())))
+    TESTS_BEFORE.clear()
+    TESTS_BEFORE.update(tests_snapshot())
 
-    # try の外で確かめる。落ちているのはこの計画の前からあるテストで、プランナーに
-    # エスカレーションしても直せない。
+    # try の外で確かめる。落ちているのはこの設計の前からあるテストで、設計を
+    # 直しても直らない。
     if not green_steps():
         check_baseline()
 
@@ -7859,16 +7072,15 @@ def run_step(step_id: str, unvalidated: bool = False) -> int:
         # --- TEST_WRITE -------------------------------------------------
         #
         # ここでやり直すのは、テストファイルがコンパイルできなかったときだけだ。
-        # それはソルバーの誤りで、ほかの誰にも直せない。プランナーは構文エラーを
-        # 直せず、エスカレーションすれば、それを言われるために28分の呼び出しを
-        # 使う。run 8 の S1 は2回これをやった。どちらも条件から単一引用符の
+        # それはソルバーの誤りで、ほかの誰にも直せない。設計を直しても構文エラーは
+        # 直らない。run 8 の S1 は2回これをやった。どちらも条件から単一引用符の
         # テスト名にアポストロフィを写したもので、2回目はブリーフがまさにそれを
         # 警告していた。ソルバーが無視できる指示は、コンパイラ自身の言葉を渡す
         # やり直しより価値が低い。
         #
         # もう1つ、ランナーが書いたスタブに対してテストが自分の誤りで落ちたときも
-        # やり直す（crashed_tests）。スタブは契約から機械的に書いたもので、プランナー
-        # が goal をどう締めても、goal はテストの書き手に届かない。
+        # やり直す（crashed_tests）。スタブは契約から機械的に書いたもので、落ちたのは
+        # テストの側だ。
         #
         # ほかの理由ではやり直さない。意図したことだ。落ちるテストや、スタブに
         # 対して通るテストは、頼んだ内容の問題で、もう一度頼んでも同じ誤解を引き
@@ -7876,8 +7088,8 @@ def run_step(step_id: str, unvalidated: bool = False) -> int:
         broken = crashed = ""
         for write_attempt in range(1, LIMITS["test_writes"] + 1):
             set_writable(tests=True, src=False)
-            # files_test のうち HEAD にあるものは、計画より前からあるテストで、この
-            # ステップが丸ごと書き直す。L17 があるので、ほかのステップのテストではない。
+            # files_test のうち HEAD にあるものは、設計より前からあるテストで、この
+            # モジュールが丸ごと書き直す。テストのファイル名はモジュールごとに違う。
             replaced = sorted(head_sources(step["files_test"]))
             if replaced and write_attempt == 1:
                 ledger("TESTS_REPLACED", step=step_id, files=replaced)
@@ -7920,7 +7132,7 @@ def run_step(step_id: str, unvalidated: bool = False) -> int:
                 break
             if crashed:
                 # 最後の試行なら、ファイルを残したまま RED_GATE に渡す。R5 で止まり、
-                # 落ちたテストはエスカレーションに載る。
+                # 落ちたテストは FAILURE.md に載る。
                 if write_attempt == LIMITS["test_writes"]:
                     break
                 ledger("TEST_WRITE", step=step_id, ok=False, attempt=write_attempt,
@@ -7955,8 +7167,8 @@ def run_step(step_id: str, unvalidated: bool = False) -> int:
         # R1 より先に R2 を見る。順番に意味がある。テストファイルがコンパイル
         # できないとき、件数が合わないのは何も走らなかった「から」だ。
         # 「collected 1, expected 12」と言うと、原因を隠して症状だけを述べる
-        # ことになる。計画の誤りに見え、構文エラーを直せないプランナーに
-        # エスカレーションされる。
+        # ことになる。設計の誤りに見え、構文エラーを直せないプランナーに
+        # 差し戻される。
         if red.errors:                                                     # R2
             raise Halt("RED_GATE", f"R2: {red.errors} test(s) errored instead of failing",
                        (chr(10).join(red.failure_details)
@@ -7982,14 +7194,10 @@ def run_step(step_id: str, unvalidated: bool = False) -> int:
                         + chr(10).join(crashes)).strip()[:4000])
         ledger("RED_GATE", step=step_id, tests=red.tests, failures=red.failures, ok=True)
 
-        # --- REVIEW_GATE ------------------------------------------------
-        ledger("REVIEW_GATE", step=step_id, skipped=True,
-               note="not implemented in v1; this green was not human-reviewed")
-
         # --- FREEZE -----------------------------------------------------
         manifest = freeze_tests()
         (STATE / "freeze").mkdir(parents=True, exist_ok=True)
-        (STATE / "freeze" / f"{step_id}.json").write_text(
+        (STATE / "freeze" / f"{safe_id(step_id)}.json").write_text(
             json.dumps(manifest, indent=2), encoding="utf-8")
         ledger("FREEZE", step=step_id, files=len(manifest))
 
@@ -8000,21 +7208,9 @@ def run_step(step_id: str, unvalidated: bool = False) -> int:
         retry_mode = step.get("retry", POLICY["retry"])
         schedule = attempt_schedule(step)
 
-        # このステップ自身のテストファイルを、両方の綴りで持つ。2つのテスト
-        # ランナーはレポートでファイルを違う形で呼ぶ。pytest はドット区切りの
-        # モジュールのパス（tests.test_models）、vitest は渡したままのパス
-        # （tests/engine.test.ts）だ。ドットの形だけにすると、TypeScript では
-        # ステップ「自身の」落ちたテストが一致せず、すべてソルバーに回帰として
-        # 伝わる。「このステップの前に通っていたテストがいま落ちている」と、
-        # 何も通っていなかった最初のステップで言われる。
-        #
-        # C# の classname は「名前空間.クラス」で、ファイルのパスを持たない。
-        # クラスの名前はファイル名と同じ決まりなので、ファイル名で突き合わせる
-        # （test_owner）。
-        own_tests = {Path(p).with_suffix("").as_posix().replace("/", ".")
-                     for p in step["files_test"]} | set(step["files_test"]) \
-            | set(csharp_test_classes(step["files_test"])) \
-            | set(cpp_test_suites(step["files_test"]))
+        # このモジュール自身のテストファイル。ドットの形だけにすると、TypeScript
+        # では自身の落ちたテストが一致せず、すべてソルバーに回帰として伝わる。
+        own_tests = own_test_keys(step)
 
         timeouts = 0
         while attempt < len(schedule):
@@ -8043,8 +7239,8 @@ def run_step(step_id: str, unvalidated: bool = False) -> int:
                 call_solver("IMPL", brief_impl(step, context, tests_text, last_failure),
                             backend=backend)
             except SolverTimeout:
-                # 試行を1回使っただけで、ステップは止めない。残りの試行があれば
-                # 次へ進み、使い切れば下の else がいつもどおりエスカレーションする。
+                # 試行を1回使っただけで、モジュールは止めない。残りの試行があれば
+                # 次へ進み、使い切れば下の else がいつもどおり中段に戻す。
                 last_failure = absorb_timeout(step, attempt, backend, manifest,
                                               last_failure)
                 timeouts += 1
@@ -8113,205 +7309,120 @@ def run_step(step_id: str, unvalidated: bool = False) -> int:
             reason = (f"still failing after {attempt} attempts"
                       + (f" across {tried}" if len(SOLVER_TIERS) > 1 else ""))
             if timeouts:
-                # プランナーに届く理由に残す。全部が時間切れなら、実装が難しいの
-                # ではなく、ステップが大きすぎるか、条件が満たせないことを疑う。
+                # 人に届く理由に残す。全部が時間切れなら、実装が難しいのではなく、
+                # モジュールが大きすぎるか、条件が満たせないことを疑う。
                 reason += f"; {timeouts} of them ran out of time"
             if broke:
-                # 理由の中で別に名指しする。これは ESCALATION.md を通って
-                # プランナーに届き、「このステップは前のステップを壊さずには
-                # 作れない」は「このステップはまだできていない」とは別の問題だ
-                # からだ。2組の受け入れ条件の矛盾かもしれず、それはソルバーが
-                # 解くものではない。
+                # 理由の中で別に名指しする。これは FAILURE.md を通って人に届き、
+                # 「このモジュールは前のモジュールを壊さずには作れない」は
+                # 「このモジュールはまだできていない」とは別の問題だからだ。2組の
+                # 受け入れ条件の矛盾かもしれず、それはソルバーが解くものではない。
                 reason += "; and it now breaks " + ", ".join(broke)
             raise Halt("IMPL", reason, last_run.output[-4000:] if last_run else "")
 
         # --- GREEN ------------------------------------------------------
         contracts_dir = STATE / "contracts"
         contracts_dir.mkdir(parents=True, exist_ok=True)
-        (contracts_dir / f"{step_id}.json").write_text(
+        (contracts_dir / f"{safe_id(step_id)}.json").write_text(
             json.dumps(step["contracts"], ensure_ascii=False, indent=2), encoding="utf-8")
 
-        complete_green(step_id, step["goal"], attempt)
-        print(f"\nstep {step_id}: GREEN in {attempt} attempt(s)")
+        complete_green(step_id, step["goal"], attempt, step.get("design", ""))
+        print(f"\nmodule {step_id}: GREEN in {attempt} attempt(s)")
         return 0
 
     except Halt as halt:
-        # テストやビルドの出力に、箱が書き込みを拒んだ跡があれば、計画の問題ではない。
+        # テストやビルドの出力に、箱が書き込みを拒んだ跡があれば、設計の問題ではない。
         check_infra(halt.phase, f"{halt.reason}\n{halt.detail}")
-        escalate(step, halt, attempt, last_run)
+        fail_module(step, halt, attempt, last_run)
         return 2
 
 
 # --------------------------------------------------------------------------
-# 外側のループ（RUNNER_SPEC 9 章、`run --all`）
+# 外側のループ（RUNNER_SPEC 8-1、`run --all`）
 # --------------------------------------------------------------------------
 
 
 # 外側のループを止めるもの。どれもリポジトリか台帳についての客観的な事実で、
-# うまくいっているかについての判断は1つも無い。BOOTSTRAP 1-6: 止まる条件は
-# 前もって固定する。「迷ったら訊く」は訊く頻度をモデルに委ね、習慣ですべてを
-# 承認するところで終わるからだ。
-ALL_GREEN = "every step in the plan is green"
-CAP_REACHED = "the escalation cap for this step is spent (RUNNER_SPEC 6-2)"
-PLAN_REFUSED = "the planner's proposal was refused"
-PLANNER_ASKED = "the planner handed the decision to you"
+# うまくいっているかについての判断は1つも無い。止まる条件は前もって固定する。
+# 「迷ったら訊く」は訊く頻度をモデルに委ね、習慣ですべてを承認するところで終わる。
 BUDGET_SPENT = "the wall-clock budget is spent"
 INFRA_REFUSED = "the sandbox refused a write"
 
 
-def cmd_run_all(unvalidated: bool = False, budget_minutes: int = 0) -> int:
-    """上の一覧のどれかが止めるまで、計画の順にステップを走らせる。
+def cmd_run_all(budget_minutes: int = 0) -> int:
+    """依存の順に、緑でないモジュールを走らせる。
 
-    ループはこうだ。ステップを走らせる。緑なら次へ進む。エスカレーションしたら、
-    プランナーに1回答えさせてやり直す。上限を超えてエスカレーションしたら止まる。
-
-    提案が妥当かはここでは何も決めない。決めるのは `plan apply` で、機械的に
-    決め、ここはその終了コードを読むだけだ。この分離があるから、外側のループを
-    人の目なしで走らせてよいことになる。
+    緑なら次へ進む。止まったら run_step が中段に戻しているので、そこで終わる。
+    直すモジュールを選ぶのは人だ。全部が緑なら、最終確認の段へ移す。
     """
+    stage = read_stage()
+    refused = in_stage(stage, "downstream")
+    if refused:
+        return refuse(refused)
     deadline = time.monotonic() + budget_minutes * 60 if budget_minutes else None
-
-    def out_of_budget() -> bool:
-        return deadline is not None and time.monotonic() > deadline
 
     def stop(reason: str, code: int) -> int:
         ledger("RUN_ALL_STOP", reason=reason)
         print(f"\nstopped: {reason}", file=sys.stderr)
         return code
 
-    # 設定を告げる前に、計画の設定を読み込む。ここで組み込みの既定を報告し、
-    # 下のループが計画の値で走ると、台帳が実際に起きたことと食い違う。
-    load_settings(json.loads((PLAN / "tasks.json").read_text(encoding="utf-8")))
-    ledger("RUN_ALL_START", budget_minutes=budget_minutes or "none",
-           escalation_cap=LIMITS["escalations"])
-
-    def revise(step_id: str) -> int | None:
-        """プランナーに答えさせ、適用してやり直せる木にする。止めるなら終了コード。"""
-        if cmd_plan_propose(step_id) != 0:
-            return stop(f"the planner produced nothing for {step_id}", 2)
-        applied = cmd_plan_apply()
-        if applied == 3:
-            return stop(f"{PLANNER_ASKED} on {step_id}", 3)
-        if applied != 0:
-            return stop(f"{PLAN_REFUSED} for {step_id}; {PLANNER_OUT} has it", 2)
-        # やり直す前に最後の緑へ戻す。次の試行が、落ちたファイルを継がずに
-        # きれいな木から始まるようにだ。改訂した計画はこれで消えない。
-        # `plan apply` がコミットしたので、HEAD の一部になっている。
-        cmd_reset(step_id)
-        return None
-
-    # 止まったまま人が答えたエスカレーションには、ステップを走らせ直す前に
-    # プランナーを通して答える。上限を使い切っていても通す。上限が止めるのは
-    # プランナーだけの判断で、これは人の判断だ。
-    waiting = escalated_step()
-    if waiting and HUMAN_ANSWER.exists():
-        code = revise(waiting)
-        if code is not None:
-            return code
+    tasks = json.loads(TASKS.read_text(encoding="utf-8"))
+    load_settings({**tasks, **read_settings()})
+    ledger("RUN_ALL_START", budget_minutes=budget_minutes or "none")
 
     while True:
-        # 毎周、計画を読み直す。前の周で適用された提案が、これから走るステップを
-        # 書き換え、その後にステップを足しているかもしれない。
-        tasks = json.loads((PLAN / "tasks.json").read_text(encoding="utf-8"))
-        load_settings(tasks)
-        problems = validate_plan(tasks)
-        if problems and not unvalidated:
-            raise Halt("PLAN_LOAD", f"plan has {len(problems)} lint violation(s)",
-                       "\n".join(problems))
-
         done = green_steps()
         remaining = [s for s in tasks["steps"] if s["id"] not in done]
         if not remaining:
             complete_run(done, tasks)
-            print(f"\nall {len(done)} step(s) green")
+            print(f"\nall {len(done)} module(s) green")
             return 0
 
         step_id = remaining[0]["id"]
-        if out_of_budget():
-            return stop(f"{BUDGET_SPENT}; {len(remaining)} step(s) left, next is {step_id}", 2)
+        if deadline is not None and time.monotonic() > deadline:
+            return stop(f"{BUDGET_SPENT}; {len(remaining)} module(s) left, next is {step_id}", 2)
 
         print(f"\n=== {step_id} ({len(done)} done, {len(remaining)} to go) ===")
         try:
-            if run_step(step_id, unvalidated=unvalidated) == 0:
+            if run_step(step_id) == 0:
                 continue
         except InfraBroken as broken:
             print(f"INFRA [{broken.phase}] {broken.evidence}", file=sys.stderr)
-            return stop(f"{INFRA_REFUSED} in {step_id}; nothing was escalated", 6)
-
-        # ステップがエスカレーションした。run_step はすでに ESCALATION.md を書いた。
-        spent = escalation_count(step_id)
-        if spent > LIMITS["escalations"]:
-            return stop(f"{CAP_REACHED}: {step_id} escalated {spent} time(s); "
-                        f"read {ESCALATION}", 2)
-        if out_of_budget():
-            return stop(f"{BUDGET_SPENT}; {step_id} is escalated and unanswered", 2)
-
-        code = revise(step_id)
-        if code is not None:
-            return code
-
-
-def cmd_validate() -> int:
-    tasks = json.loads((PLAN / "tasks.json").read_text(encoding="utf-8"))
-    problems = validate_plan(tasks)
-    for problem in problems:
-        print(problem)
-    print(f"\n{len(problems)} violation(s)" if problems else "plan is valid")
-    return 1 if problems else 0
+            return stop(f"{INFRA_REFUSED} in {step_id}; the design was not sent back", 6)
+        return stop(f"{step_id} failed and is back in the midstream; read {FAILURE}", 2)
 
 
 def cmd_reset(step_id: str) -> int:
-    """止まったステップを走らせ直せるよう、木を最後の緑に戻す。
+    """止まったモジュールを走らせ直せるよう、木を最後の緑に戻す。
 
-    RED_GATE で止まったステップは、tests/ を凍結したまま、作業ツリーに変更を
-    残し、次の試行は始まるのを拒む。手で戻すには chmod、git reset、git clean を
-    正しい順に行う必要がある。間違えやすく、しかも前の試行のファイルを黙って次に
-    持ち込む形で間違える。
+    止まったモジュールは、tests/ を凍結したまま、作業ツリーに変更を残し、次の試行は
+    始まるのを拒む。手で戻すには chmod、git reset、git clean を正しい順に行う必要が
+    ある。間違えやすく、しかも前の試行のファイルを黙って次に持ち込む形で間違える。
 
     順番に意味がある。chmod の前に引き取る（ランナーは所有しないものを chmod
     できない）。git の前に chmod する（FREEZE は tests/ を読み取り専用にし、git は
-    書けないディレクトリの中のファイルを消せない）。
+    書けないディレクトリの中のファイルを消せない）。テストのコードはコミットしない
+    ので、git では消えない。緑でないモジュールのテストは、名指しして消す。
 
     柵のディレクトリは最後に作り直す。取り込んだブランチでは、柵に追跡された
     ファイルが1つも無いことがある。そのとき `git clean` はソルバーの書いた
-    ファイルごと柵を消し、次のステップは柵が無いまま始まろうとして落ちる。
-    取り込んだ Unity のプロジェクトで、テストの柵がこれで消えた。
+    ファイルごと柵を消し、次のモジュールは柵が無いまま始まろうとして落ちる。
+
+    台帳は git の管理下にある（GREEN がコミットする）ので、`reset --hard` は
+    台帳を最後の緑まで戻し、捨てようとしている試行の記録を一緒に消す。だから
+    読んでおいて書き戻す。
     """
-    for fence in (TESTS, SRC):
-        fence.mkdir(parents=True, exist_ok=True)
-    adopt(TESTS, SRC)
-    set_writable(tests=True, src=True)
-
-    # 台帳は git の管理下にある（GREEN がコミットする）ので、`reset --hard` は
-    # 台帳を最後の緑まで戻し、捨てようとしている試行の記録を、理由を書いた
-    # ESCALATED も含めて一緒に消す。失敗の記録だけを失う追記専用の台帳は、
-    # 無いより悪い。
-    kept = LEDGER.read_bytes() if LEDGER.exists() else b""
-
-    run(["git", "reset", "--hard", "HEAD"], check=True)
-    run(["git", "clean", "-fdq"], check=True)   # -x は付けない。.venv と .runner は残す
-    for fence in (TESTS, SRC):
-        fence.mkdir(parents=True, exist_ok=True)
-    set_writable(tests=True, src=True)
-
-    if kept:
-        LEDGER.write_bytes(kept)
-
-    manifest = STATE / "freeze" / f"{step_id}.json"
-    manifest.unlink(missing_ok=True)
-    ESCALATION.unlink(missing_ok=True)
-
-    ledger("RESET", step=step_id, note="tree restored to HEAD; freeze manifest and "
-                                       "ESCALATION.md discarded")
-    print(f"step {step_id}: reset to {run(['git', 'log', '--oneline', '-1']).stdout.strip()}")
+    clean_tree()
+    ledger("RESET", step=step_id, note="tree restored to HEAD; the tests and the freeze "
+                                       "manifest of every module that is not green discarded")
+    print(f"module {step_id}: reset to {run(['git', 'log', '--oneline', '-1']).stdout.strip()}")
     return 0
 
 
-# solver が読めてはならないディレクトリ。計画（全ステップの受け入れ条件、仕様、
-# 台帳）、凍結のマニフェストと契約、git の履歴。BOOTSTRAP 1-5（solver は
-# 1ステップ分の情報を受け取り、それ以上は受け取らない）は、この3つのモードに
-# ついての主張だ。
-PRIVATE_DIRS = (PLAN, STATE, PROJECT / ".git")
+# solver が読めてはならないディレクトリ。設計と受け入れ条件、台帳、凍結の
+# マニフェストと契約、git の履歴。solver は1モジュール分の情報をブリーフで受け取り、
+# それ以上は受け取らない。それは、このモードについての主張だ。
+PRIVATE_DIRS = (PLAN, STATE, DOCS, AC, PROJECT / ".git")
 
 
 def fence_is_open() -> bool:
@@ -8349,6 +7460,20 @@ def fence_is_open() -> bool:
     return True
 
 
+def ensure_private_dirs() -> None:
+    """非公開のディレクトリのうち、まだ無いものを 0700 で作る。
+
+    docs/ と ac/ は最初の段で初めて要る。umask 002 のまま mkdir すると 0775 に
+    なり、次の走行を fence_is_open が拒む。
+    """
+    if not PROJECT.is_dir():
+        return
+    for path in (PLAN, DOCS, AC):
+        if not path.exists():
+            path.mkdir(mode=0o700)
+            path.chmod(0o700)
+
+
 def main() -> int:
     # 柵の中に runner が作るディレクトリを、グループ solverw で書けるようにする。
     # 走行の systemd-run も dash の sudo も umask を 022 にし、git が作り直した
@@ -8356,69 +7481,54 @@ def main() -> int:
     os.umask(0o002)
     parser = argparse.ArgumentParser(description="loop runner v1")
     sub = parser.add_subparsers(dest="cmd", required=True)
-    sub.add_parser("validate", help="lint plan/tasks.json (RUNNER_SPEC section 8)")
-    run_cmd = sub.add_parser("run", help="run one step, or the whole plan with --all")
-    run_cmd.add_argument("step_id", nargs="?",
-                         help="the step to run; omit it and pass --all instead")
+
+    # 上流。仕様書を取り込み、基本設計を書かせ、人が承認する。
+    spec_cmd = sub.add_parser("spec", help="the specification the human wrote")
+    spec_sub = spec_cmd.add_subparsers(dest="sub_cmd", required=True)
+    spec_sub.add_parser("import", help=f"copy {HUMAN_SPEC} into docs/spec/ and commit it; "
+                                       f"the first import starts the upstream stage")
+    basic_cmd = sub.add_parser("basic", help="the basic design (upstream)")
+    basic_sub = basic_cmd.add_subparsers(dest="sub_cmd", required=True)
+    draft_cmd = basic_sub.add_parser(
+        "draft", help=f"have the planner write docs/basic/ from the specification, "
+                      f"taking the human's comment in {HUMAN_COMMENT} into account")
+    draft_cmd.add_argument("--language", default=None, choices=sorted(LANGUAGES),
+                           help="the language the code is written in; required the "
+                                "first time, and fixed after that")
+    draft_cmd.add_argument("--framework", default=None,
+                           choices=sorted({name for names in FRAMEWORKS.values()
+                                           for name in names}),
+                           help="where the code is taken to (unity, dxlib, ...); it must "
+                                "belong to --language (default: the language's own)")
+    basic_sub.add_parser("approve", help="approve the basic design and move to the midstream")
+
+    # 中段。詳細設計を書かせ、クリティックに1回読ませ、人が承認する。
+    modules_cmd = sub.add_parser("modules", help="the module design (midstream)")
+    modules_sub = modules_cmd.add_subparsers(dest="sub_cmd", required=True)
+    modules_sub.add_parser(
+        "draft", help="have the planner write docs/modules/ and ac/, check the "
+                      "interfaces, and have the critic read the design once")
+    modules_sub.add_parser("critique", help="have the critic read the current design once")
+    modules_sub.add_parser("approve", help="approve the module design and move downstream")
+    reopen_cmd = sub.add_parser(
+        "reopen", help="send modules back to the midstream; only their design may change")
+    reopen_cmd.add_argument("modules", nargs="+", metavar="MODULE",
+                            help="the module, as its path under src without the extension")
+    sub.add_parser("check", help="check the design on disk without calling anyone")
+    sub.add_parser("status", help="print the stage and the state of every module")
+
+    # 下流。
+    run_cmd = sub.add_parser("run", help="build one module, or every module with --all")
+    run_cmd.add_argument("step_id", nargs="?", metavar="MODULE",
+                         help="the module to build; omit it and pass --all instead")
     run_cmd.add_argument("--all", action="store_true",
-                         help="run every step that is not green yet, answering "
-                              "escalations through the planner until one of the "
-                              "stopping conditions is met")
+                         help="build every module that is not green yet, in dependency "
+                              "order, until one fails or all are green")
     run_cmd.add_argument("--budget", type=int, default=0, metavar="MINUTES",
-                         help="with --all: stop between steps once this much wall "
+                         help="with --all: stop between modules once this much wall "
                               "clock has passed (default: no limit)")
-    run_cmd.add_argument("--unvalidated", action="store_true",
-                         help="run despite lint violations; they are written to the ledger")
-    reset_cmd = sub.add_parser("reset", help="discard a halted step and return to the last green")
-    reset_cmd.add_argument("step_id")
-
-    # プランナーの経路。1つではなく、あえて3つの動詞に分ける。`propose` は
-    # お金を使い、`apply` はループが測られる基準を変える。提案が入る前に読みたい
-    # 人間は、そのどちらも起こさずに読めなければならない。
-    plan_cmd = sub.add_parser("plan", help="the planner channel")
-    plan_sub = plan_cmd.add_subparsers(dest="plan_cmd", required=True)
-    boot_cmd = plan_sub.add_parser(
-        "bootstrap", help="ask the planner for a first plan, from the requirements")
-    boot_cmd.add_argument("--from", dest="source", default=None, metavar="PATH",
-                          help=f"the requirements file (default: {REQUIREMENTS})")
-    boot_cmd.add_argument("--language", default="python", choices=sorted(LANGUAGES),
-                          help="which toolchain the plan is written for; the "
-                               "runner stamps it into the plan (default: python)")
-    boot_cmd.add_argument("--framework", default=None,
-                          choices=sorted({name for names in FRAMEWORKS.values()
-                                          for name in names}),
-                          help="where the code is taken to (unity, dxlib, ...); it must "
-                               "belong to --language (default: the language's own)")
-    propose_cmd = plan_sub.add_parser(
-        "propose", help="ask the planner to revise the plan in answer to ESCALATION.md")
-    propose_cmd.add_argument("--step", default=None,
-                             help="the step that halted; named in the brief")
-    plan_sub.add_parser("show", help="print the pending proposal without applying it")
-    plan_sub.add_parser("apply", help="check the pending proposal and apply it if it passes")
-    amend_cmd = plan_sub.add_parser(
-        "amend", help=f"take the plan the human rewrote ({AMENDED_PLAN}), commit it, "
-                      "and reset the step so it runs again")
-    amend_cmd.add_argument("step_id", help="the step the amendment is for")
-
-    # クリティック。`plan apply` の一手順ではなく別の動詞にする。プランナーの
-    # 経路を3つの動詞にしたのと同じ理由で、お金を使い、意見に払う前に計画を
-    # 読みたい人間は、読めなければならない。
-    critique_cmd = sub.add_parser(
-        "critique", help="ask the critic what is wrong with the plan on disk")
-    critique_cmd.add_argument("--mode", action="append", choices=list(CRITIQUE_MODES),
-                              help="repeatable; default is every mode, because "
-                                   "the two find disjoint kinds of defect")
-
-    refine_cmd = plan_sub.add_parser(
-        "refine", help="critique the pending proposal, hand the findings back to "
-                       "the planner, and repeat until it is clean or capped")
-    refine_cmd.add_argument("--mode", action="append", choices=list(CRITIQUE_MODES),
-                            help="repeatable; default is every mode")
-    refine_cmd.add_argument("--resume", action="store_true",
-                            help=f"after the cap: have the planner revise once against "
-                                 f"the findings the human rewrote in {CRITIQUE_FOR_HUMAN}, "
-                                 f"without another critique; does nothing when no "
-                                 f"finding was rewritten")
+    reset_cmd = sub.add_parser("reset", help="discard a halted module and return to the last green")
+    reset_cmd.add_argument("step_id", metavar="MODULE")
 
     args = parser.parse_args()
 
@@ -8428,70 +7538,73 @@ def main() -> int:
 
     if fence_is_open():
         return 1
+    ensure_private_dirs()
 
     # どのコマンドの中の作業かを、いまの作業の説明に使う。終わるときは、どの
     # 経路で終わっても「何もしていない」に戻す。
-    NOW["command"] = " ".join(v for v in (args.cmd, getattr(args, "plan_cmd", None),
+    NOW["command"] = " ".join(v for v in (args.cmd, getattr(args, "sub_cmd", None),
                                           "--all" if getattr(args, "all", False) else None)
                               if v)
     atexit.register(report_now, None)
 
     try:
-        if args.cmd == "validate":
-            return cmd_validate()
+        if args.cmd == "spec":
+            return cmd_spec_import()
+        if args.cmd == "basic":
+            if args.sub_cmd == "draft":
+                return cmd_basic_draft(args.language, args.framework)
+            return cmd_basic_approve()
+        if args.cmd == "modules":
+            if args.sub_cmd == "draft":
+                return cmd_modules_draft()
+            if args.sub_cmd == "critique":
+                return cmd_modules_critique()
+            return cmd_modules_approve()
+        if args.cmd == "reopen":
+            return cmd_reopen(args.modules)
+        if args.cmd == "check":
+            return cmd_check()
+        if args.cmd == "status":
+            return cmd_status()
         if args.cmd == "reset":
             return cmd_reset(args.step_id)
-        if args.cmd == "plan":
-            if args.plan_cmd == "bootstrap":
-                return cmd_plan_bootstrap(args.source, args.language, args.framework)
-            if args.plan_cmd == "propose":
-                return cmd_plan_propose(args.step)
-            if args.plan_cmd == "refine":
-                return cmd_plan_refine(args.mode or list(CRITIQUE_MODES), resume=args.resume)
-            if args.plan_cmd == "show":
-                return cmd_plan_show()
-            if args.plan_cmd == "amend":
-                return cmd_plan_amend(args.step_id)
-            return cmd_plan_apply()
-        if args.cmd == "critique":
-            return cmd_critique(args.mode or list(CRITIQUE_MODES))
         if args.all:
             if args.step_id:
-                print("run takes a step id or --all, not both", file=sys.stderr)
+                print("run takes a module or --all, not both", file=sys.stderr)
                 return 1
-            return cmd_run_all(unvalidated=args.unvalidated,
-                               budget_minutes=args.budget)
+            return cmd_run_all(budget_minutes=args.budget)
         if not args.step_id:
-            print("run needs a step id, or --all", file=sys.stderr)
+            print("run needs a module, or --all", file=sys.stderr)
             return 1
-        return run_step(args.step_id, unvalidated=args.unvalidated)
+        refused = in_stage(read_stage(), "downstream")
+        if refused:
+            return refuse(refused)
+        return run_step(args.step_id)
     except Halt as halt:
         print(f"HALT [{halt.phase}] {halt.reason}\n{halt.detail}", file=sys.stderr)
         return 2
     except QuotaExhausted as quota:
-        # エスカレーションはしていない。計画にもソルバーにも落ち度は無く、
-        # 枠が戻れば同じところからやり直せる。
+        # 設計にもソルバーにも落ち度は無く、枠が戻れば同じところからやり直せる。
         waited = QUOTA["waits"] * QUOTA["wait_seconds"] // 60
         print(f"QUOTA [{quota.phase}] {quota.who} is still out of quota ({quota.kind}) "
-              f"after waiting {waited} minutes. Nothing was escalated.\n"
-              f"When the limit has reset: if a step was in progress, run "
-              f"`reset <step-id>` first, then run the same command again.",
+              f"after waiting {waited} minutes. The design was not sent back.\n"
+              f"When the limit has reset: if a module was in progress, run "
+              f"`reset <module>` first, then run the same command again.",
               file=sys.stderr)
         return 5
     except InfraBroken as broken:
-        # エスカレーションはしていない。ソルバーにも計画にも直せず、上限を使わせない。
-        print(f"INFRA [{broken.phase}] the sandbox refused a write. Nothing was escalated.\n"
-              f"  {broken.evidence}\n"
-              f"Fix the modes, then run `reset <step-id>` and the same command again.",
+        # ソルバーにも設計にも直せないので、中段に戻さない。
+        print(f"INFRA [{broken.phase}] the sandbox refused a write. The design was not "
+              f"sent back.\n  {broken.evidence}\n"
+              f"Fix the modes, then run `reset <module>` and the same command again.",
               file=sys.stderr)
         return 6
     except FileNotFoundError as missing:
-        # ほぼ必ず、まだ計画の無い新しいプロジェクトだ。tasks.json についての
-        # トレースバックを出さず、そう言う。
+        # ほぼ必ず、下流の計画がまだ無い。トレースバックを出さず、そう言う。
         print(f"missing: {missing.filename}", file=sys.stderr)
         if str(missing.filename or "").endswith("tasks.json"):
-            print(f"there is no plan yet. Write the requirements to "
-                  f"{REQUIREMENTS} and run: plan bootstrap", file=sys.stderr)
+            print("there is no approved module design yet. Run: modules approve",
+                  file=sys.stderr)
         return 1
 
 

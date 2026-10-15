@@ -6,7 +6,7 @@
 # マウントしても、DrvFs は 40-perms.sh が頼る所有者とモードビットを表せず、
 # テストの凍結を強制できなくなる。
 #
-#   /srv/loop/repo.git   bare リポジトリ。ランナーが GREEN と plan apply の
+#   /srv/loop/repo.git   bare リポジトリ。ランナーが段のコマンドと GREEN の
 #                        あとに push し、ホストが `runner` として SSH で引く。
 #                        loop-project.sh で管理する箱では、今のプロジェクトの
 #                        /srv/loop/projects/<名前>/repo.git を指すリンク。
@@ -14,8 +14,8 @@
 #                        ブランチをチェックアウトする
 #   /srv/loop/brief      runner がステップごとのブリーフを書き、solver が読む。
 #                        runner から solver への唯一の経路で、これが
-#                        RUNNER_SPEC 5 を守っている。solver は plan/ を読まず、
-#                        したがって tasks.json を見ることがない。
+#                        RUNNER_SPEC 5 を守っている。solver は plan/、docs/、
+#                        ac/ を読まず、設計の全体も受け入れ条件も見ることがない。
 set -euo pipefail
 . "$(dirname "$0")/layout.sh"
 
@@ -79,9 +79,14 @@ sudo -u runner install -d -m 755 \
 # 流して 40-perms.sh を流さず、10ステップのあいだ受け入れ条件が全部 solver から
 # 読める状態で走った。40-perms.sh もこれらを設定し、権限が違えば loop.py は
 # 起動を拒む。3つのうち毎回必ず走るのはランナーだけだからだ。
+#
+# docs/ は設計仕様書、ac/ は受け入れ条件。どちらも solver に見せない。設計の
+# 要る部分は runner がブリーフに入れて渡す。
 sudo -u runner install -d -m 700 \
   /srv/loop/project/plan \
-  /srv/loop/project/.runner
+  /srv/loop/project/.runner \
+  /srv/loop/project/docs \
+  /srv/loop/project/ac
 
 # 根の conftest.py は2つの仕事をし、pytest が自動で読み込む。
 #
@@ -92,8 +97,8 @@ sudo -u runner install -d -m 700 \
 #   2. src/ も載せる。これで標準的な src レイアウトが使える。コードは
 #      src/yourpkg/ に置き、テストは `src.` を付けずに `from yourpkg...` と
 #      import する。src/ は書き込みの柵が開け閉めできる2つのディレクトリの
-#      1つ（リンタ規則 L12）なので、コードはどのみちそこに置く。これは
-#      import の見た目を崩さないためだけのもの。
+#      1つで、モジュールはどのみちそこに置く。これは import の見た目を崩さない
+#      ためだけのもの。
 #
 # 無いときだけでなく毎回書く。空のファイルだと、2つ目の仕事が黙って
 # 抜け落ちるからだ。
@@ -116,11 +121,15 @@ PYEOF
 
 # 作業ツリーに置くが、コミットしないもの。無いと `git status` がこれらを紛れ込んだ
 # ファイルとして報告し、最初の走行が dirty で止まる。
-IGNORED=(.venv/ .runner/ __pycache__/ '*.pyc')
+#
+# テストと受け入れ条件もコミットしない。テストは作業ツリーに残して VERIFY の
+# 回帰検知に使い、受け入れ条件は runner だけが読む。取り込んだリポジトリで
+# すでに追跡されているテストは、追跡されたまま残る。
+IGNORED=(.venv/ .runner/ __pycache__/ '*.pyc' "/$LAYOUT_TESTS/" /ac/)
 
 if ! sudo -u runner git rev-parse HEAD >/dev/null 2>&1; then
   # 空のリポジトリ。ホストがクローンできるよう、最初のコミットを置く。
-  sudo -u runner touch "$LAYOUT_SRC/.gitkeep" "$LAYOUT_TESTS/.gitkeep" plan/.gitkeep
+  sudo -u runner touch "$LAYOUT_SRC/.gitkeep" plan/.gitkeep
   printf '%s\n' "${IGNORED[@]}" | sudo -u runner tee .gitignore >/dev/null
   sudo -u runner git add -A
   sudo -u runner git commit -q -m "chore: initial skeleton"

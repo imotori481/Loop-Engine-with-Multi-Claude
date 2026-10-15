@@ -34,33 +34,33 @@ class Request(unittest.TestCase):
             self.parse(request)
 
     def test_actions_without_values_pass_as_one_line(self):
-        for action in ("settings", "continue", "stop"):
+        for action in ("settings", "design", "continue", "stop", "approve"):
             self.assertEqual(self.parse({"action": action}), [action])
 
-    def test_the_requirements_go_to_a_file_and_never_into_a_line(self):
-        text = "# 要件\n$(rm -rf /)\n"
-        self.assertEqual(self.parse({"action": "go", "requirements": text, "language": "csharp"}),
+    def test_the_specification_goes_to_a_file_and_never_into_a_line(self):
+        text = "# 仕様書\n$(rm -rf /)\n"
+        self.assertEqual(self.parse({"action": "go", "spec": text, "language": "csharp"}),
                          ["go", "csharp", "unity"])
-        self.assertEqual((self.work / "requirements.md").read_text(encoding="utf-8"), text)
+        self.assertEqual((self.work / "spec.md").read_text(encoding="utf-8"), text)
 
     def test_a_framework_left_empty_becomes_the_language_s_own(self):
         # ダッシュボードは選ばれていない持ち込む先を空で送る。loop には名前で渡す。
-        self.assertEqual(self.parse({"action": "go", "requirements": "x", "language": "cpp",
+        self.assertEqual(self.parse({"action": "go", "spec": "x", "language": "cpp",
                                      "framework": ""}), ["go", "cpp", "dxlib"])
-        self.assertEqual(self.parse({"action": "go", "requirements": "x",
+        self.assertEqual(self.parse({"action": "go", "spec": "x",
                                      "language": "typescript", "framework": "dom"}),
                          ["go", "typescript", "dom"])
 
     def test_a_framework_must_belong_to_the_language(self):
-        self.refused({"action": "go", "requirements": "x", "language": "csharp",
+        self.refused({"action": "go", "spec": "x", "language": "csharp",
                       "framework": "dom"})
-        self.refused({"action": "go", "requirements": "x", "language": "csharp",
+        self.refused({"action": "go", "spec": "x", "language": "csharp",
                       "framework": "unity\n--from /etc/shadow"})
 
-    def test_a_run_needs_a_known_language_and_some_requirements(self):
-        self.refused({"action": "go", "requirements": "x", "language": "cobol"})
-        self.refused({"action": "go", "requirements": "  \n", "language": "python"})
-        self.refused({"action": "go", "requirements": "x" * (loop_dash.MAX_REQUIREMENTS + 1),
+    def test_a_run_needs_a_known_language_and_a_specification(self):
+        self.refused({"action": "go", "spec": "x", "language": "cobol"})
+        self.refused({"action": "go", "spec": "  \n", "language": "python"})
+        self.refused({"action": "go", "spec": "x" * (loop_dash.MAX_SPEC + 1),
                       "language": "python"})
 
     def test_a_project_name_follows_the_rule_of_loop_project(self):
@@ -102,21 +102,34 @@ class Request(unittest.TestCase):
             self.refused({"action": "init", "project": "game", "branch": "main",
                           "src": src, "tests": tests})
 
-    def test_a_reset_passes_only_a_step_id_that_is_safe_as_a_file_name(self):
-        self.assertEqual(self.parse({"action": "reset", "step": "S12"}), ["reset", "S12"])
-        for step in ("", "-x", "../S1", "S1/x", "a b", "a\nb", "$(id)", None, 12):
-            self.refused({"action": "reset", "step": step})
+    BAD_MODULES = ("", "-x", "../game", "/game", "game/", "a//b", "a b", "a\nb", "$(id)",
+                   "game/board.py", None, 12)
 
-    def test_an_answer_goes_to_a_file_and_never_into_a_line(self):
-        text = "S2 の時間の条件を外す\n$(rm -rf /)"
-        self.assertEqual(self.parse({"action": "answer", "text": text}), ["answer"])
-        self.assertEqual((self.work / "answer.md").read_text(encoding="utf-8"), text + "\n")
-        for text in ("", "  \n", None, 5, "x" * (loop_dash.MAX_ANSWER + 1)):
-            self.refused({"action": "answer", "text": text})
+    def test_a_reset_passes_only_a_module_id(self):
+        self.assertEqual(self.parse({"action": "reset", "module": "game/board"}),
+                         ["reset", "game/board"])
+        for module in self.BAD_MODULES:
+            self.refused({"action": "reset", "module": module})
+
+    def test_a_reopen_passes_each_module_on_its_own_line(self):
+        self.assertEqual(self.parse({"action": "reopen", "modules": ["game/board", "ui/menu"]}),
+                         ["reopen", "game/board", "ui/menu"])
+        for module in self.BAD_MODULES:
+            self.refused({"action": "reopen", "modules": ["game/board", module]})
+        for modules in ([], None, "game/board"):
+            self.refused({"action": "reopen", "modules": modules})
+
+    def test_a_comment_goes_to_a_file_and_never_into_a_line(self):
+        text = "モジュールを分けすぎている\n$(rm -rf /)"
+        self.assertEqual(self.parse({"action": "reject", "text": text}), ["reject"])
+        self.assertEqual((self.work / "comment.md").read_text(encoding="utf-8"), text + "\n")
+        for text in ("", "  \n", None, 5, "x" * (loop_dash.MAX_COMMENT + 1)):
+            self.refused({"action": "reject", "text": text})
 
     def test_anything_else_is_refused(self):
         self.refused([])
         self.refused({"action": "raw"})
+        self.refused({"action": "answer", "text": "x"})
         self.refused({})
 
 
@@ -172,6 +185,44 @@ class RoleSettings(unittest.TestCase):
         self.assertEqual(self.read("solver"), before)
         self.assertEqual(sorted(p.name for p in self.etc.iterdir()),
                          ["critic.env", "planner.env", "solver.env"])
+
+
+
+class Design(unittest.TestCase):
+    """人がせきで読むもの。読むだけで、何も書かない。"""
+
+    def setUp(self) -> None:
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.root = Path(temp.name)
+
+    def write(self, rel, text):
+        path = self.root / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+
+    def test_the_design_is_read_by_module_id(self):
+        self.write("plan/stage.json", '{"stage": "midstream", "open": null}')
+        self.write("docs/basic/design.md", "## 概要\n目的")
+        self.write("docs/modules/game/board.md", "## 振る舞い\n盤")
+        self.write("ac/game/board.json", '{"criteria": []}')
+        self.write("plan/FAILURE.md", "止まった")
+        value = loop_dash.design(str(self.root))
+        self.assertEqual(value["stage"]["stage"], "midstream")
+        self.assertEqual(value["basic"], {"design": "## 概要\n目的"})
+        self.assertEqual(value["modules"], {"game/board": "## 振る舞い\n盤"})
+        self.assertEqual(value["ac"], {"game/board": {"criteria": []}})
+        self.assertEqual(value["failure"], "止まった")
+        self.assertIsNone(value["interface"])
+
+    def test_nothing_there_is_an_empty_design(self):
+        value = loop_dash.design(str(self.root))
+        self.assertEqual((value["stage"], value["modules"], value["ac"], value["failure"]),
+                         ({}, {}, {}, None))
+
+    def test_criteria_that_are_not_json_come_back_as_text(self):
+        self.write("ac/a.json", "{broken")
+        self.assertEqual(loop_dash.design(str(self.root))["ac"], {"a": "{broken"})
 
 
 if __name__ == "__main__":

@@ -25,17 +25,18 @@ install -o root -g root -m 755 bin/solver-claude /srv/loop/bin/solver-claude
 install -o root -g root -m 755 bin/smoke-solver /srv/loop/bin/smoke-solver
 install -o root -g root -m 755 bin/smoke-pytest /srv/loop/bin/smoke-pytest
 install -o root -g root -m 755 bin/smoke-planner /srv/loop/bin/smoke-planner
-install -o root -g root -m 755 bin/smoke-plan    /srv/loop/bin/smoke-plan
+# 旧い計画の流れを試していたもの。置いてある箱から外す。
+rm -f /srv/loop/bin/smoke-plan
 install -o root -g root -m 755 bin/smoke-critic  /srv/loop/bin/smoke-critic
 
 # planner の経路。solver の経路とはあえて分ける。
 #
-#   brief/  runner が書き、planner が読む。planner は plan/ にまったく届かない
-#           （0700 runner）ので、知ってよいことはすべてここに届く。
-#   out/    planner が「提案」を書き、runner が読む。planner は tasks.json を
-#           書かない。runner は何が変わったかを確かめてから提案を適用する。
-#           ワークスペースの根と同じ理由でスティッキーにする。グループの書き込み
-#           だけだと、planner が runner 所有のファイルを消せてしまう。
+#   brief/  runner が書き、planner が読む。planner は plan/、docs/、ac/ に
+#           まったく届かない（0700 runner）ので、知ってよいことはすべてここに届く。
+#   out/    runner が今の設計を写して置き、planner が書き直す。runner は検査を
+#           通したものだけを docs/ と ac/ に戻す。ワークスペースの根と同じ理由で
+#           スティッキーにする。グループの書き込みだけだと、planner が runner の
+#           置いた部分のディレクトリを消せてしまう。
 install -d -o root  -g root     -m 755  /srv/loop/planner
 install -d -o runner -g plannerw -m 2750 /srv/loop/planner/brief
 install -d -o runner -g plannerw -m 3770 /srv/loop/planner/out
@@ -51,9 +52,9 @@ install -d -o runner -g criticw -m 3770 /srv/loop/critic/out
 # 決める。スティッキーにする理由も同じ。runner がディレクトリを所有するので、
 # 使い終えた入力を片付けられ、自分が置いていない入力に不意を突かれることもない。
 #
-# solver と planner からは読めない。要件はシステム全体を述べており、それを
-# solver に渡すとブリーフの横に2つ目の入力経路ができる（SYSTEM_SPEC.md が
-# plan/ の下にあるのと同じ理由）。
+# solver と planner からは読めない。仕様書はシステム全体を述べており、それを
+# solver に渡すとブリーフの横に2つ目の入力経路ができる（設計が docs/ の下に
+# あるのと同じ理由）。planner には、ランナーがブリーフに載せて渡す。
 install -d -o root   -g root   -m 755  /srv/loop/human
 install -d -o runner -g humanw -m 3770 /srv/loop/human/in
 

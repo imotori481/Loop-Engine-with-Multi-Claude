@@ -52,10 +52,11 @@ chmod 3770 "$P"      # setgid + sticky + rwxrwx---
 # ここで規則として書く。
 find "$P" -maxdepth 1 -type f -user runner -exec chgrp runner {} + -exec chmod 644 {} +
 
-# runner だけのもの: git の履歴、計画、凍結のマニフェスト。solver は tasks.json
-# を読めてはならず（RUNNER_SPEC 5）、どのファイルのハッシュを取っているかも
-# 知ってはならない。
-chmod 700 "$P/.git" "$P/plan" "$P/.runner"
+# runner だけのもの: git の履歴、段と台帳、凍結のマニフェスト、設計仕様書、
+# 受け入れ条件。solver は設計の全体も受け入れ条件も読めてはならず
+# （RUNNER_SPEC 5）、どのファイルのハッシュを取っているかも知ってはならない。
+install -d -o runner -g runner -m 700 "$P/docs" "$P/ac"
+chmod 700 "$P/.git" "$P/plan" "$P/.runner" "$P/docs" "$P/ac"
 
 # solver が書ける場所。setgid にして、solver が作ったファイルがグループ solverw を
 # 保ち、runner が扱えるようにする。
@@ -67,6 +68,32 @@ chmod -R go-w "$P/.venv"
 
 chown runner:solverw /srv/loop/brief
 chmod 2750 /srv/loop/brief   # setgid: ブリーフはグループ solverw にならなければならない
+
+# planner は src/ を読めるが、書けない。既存のコードの形を読んで設計に使う。
+# グループでは渡せない。solverw に入れると src/ と tests/ に書けてしまい、
+# 根の 3770 の `other` を開けると、箱のすべてのアカウントに tests/ が見える。
+# だから planner にだけ ACL で渡す。
+#
+#   根から src/ までの道   --x。通るだけで、並べられない。tests/ にも plan/ にも届かない
+#   src/ の下              r-x。default も付け、ソルバーが後から作るファイルにも継がせる
+#
+# ランナーが src/ を chmod すると ACL のマスクが変わる。柵を閉じた 2755 でも
+# マスクは r-x なので、planner の読み取りは残る。
+if ! command -v setfacl >/dev/null 2>&1; then
+  apt-get install -y -q acl >/dev/null
+fi
+if id -u planner >/dev/null 2>&1; then
+  dir="$P"
+  setfacl -m u:planner:--x "$dir"
+  rest="$LAYOUT_SRC"
+  while [ "${rest%%/*}" != "$rest" ]; do
+    dir="$dir/${rest%%/*}"
+    rest="${rest#*/}"
+    setfacl -m u:planner:--x "$dir"
+  done
+  setfacl -R -m u:planner:rX "$SRC"
+  find "$SRC" -type d -exec setfacl -d -m u:planner:rX {} +
+fi
 
 # ---- 検査。solver の視点で確かめる ------------------------------------
 fail=0
@@ -107,18 +134,30 @@ fi
 chk_cannot ls /srv/loop/logs
 chk_cannot ls /home/runner
 
-# solverw にいないアカウントは、コードにまったく届いてはならない。planner は
-# 基準を書くので、それを満たすコードを見てはならない（BOOTSTRAP 1-1）。critic は、
-# 見れば判定の拠り所にしてしまうテストを見てはならない。
+# solverw にいないアカウントは、テストに届いてはならない。planner は基準を
+# 書くので、それを満たすテストを見てはならない。critic は、見れば判定の拠り所に
+# してしまうテストを見てはならない。critic はコードも読まない。
 for stranger in planner critic; do
   id -u "$stranger" >/dev/null 2>&1 || continue
-  for target in "$P" "$SRC" "$TESTS"; do
+  targets=("$P" "$TESTS" "$P/plan" "$P/docs" "$P/ac" "$P/.runner")
+  [ "$stranger" = critic ] && targets+=("$SRC")
+  for target in "${targets[@]}"; do
     if sudo -u "$stranger" ls "$target" >/dev/null 2>&1; then
       echo "FAIL: $stranger should NOT be able to: ls $target"
       fail=1
     fi
   done
 done
+
+# planner は src/ を読めるが、書けない。
+if id -u planner >/dev/null 2>&1; then
+  if ! sudo -u planner ls "$SRC" >/dev/null 2>&1; then
+    echo "FAIL: planner should be able to: ls $SRC"; fail=1
+  fi
+  if sudo -u planner test -w "$SRC" 2>/dev/null; then
+    echo "FAIL: planner should NOT be able to: test -w $SRC"; fail=1
+  fi
+fi
 # 保守ユーザーのホームには、人間の ssh 鍵とエージェント CLI の資格情報がある。
 # solver が届けば、git の経路とログインを渡すことになる。
 chk_cannot ls "/home/$ADMIN_USER"

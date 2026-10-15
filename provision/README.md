@@ -21,7 +21,7 @@ RUNNER_SPEC.md の実行環境（§1）を再現するための手順とスク�
 | Windows ドライブ | **マウントしない**（`automount enabled=false`） |
 | Windows 実行ファイル | **起動不可**（`interop enabled=false`） |
 | WSLg | **無効**（`.wslconfig` `guiApplications=false`。§3-8） |
-| このリポジトリ | 箱の中の `/opt/loop-engine` にクローンする。スクリプトはそこから実行する |
+| このリポジトリ | 箱の中の `/opt/swa` にクローンする。スクリプトはそこから実行する |
 
 アカウント:
 
@@ -30,8 +30,8 @@ RUNNER_SPEC.md の実行環境（§1）を再現するための手順とスク�
 | 保守ユーザー（既定ユーザー） | 1000 | あり | 鍵のみ | プロビジョニングと保守。VS Code Remote-SSH はここに繋ぐ |
 | `runner` | 1001 | **なし** | 鍵のみ | ループの実行主体。ホストからの git pull を受ける |
 | `solver` | 1002 | **なし** | **不可**（`AllowUsers` に載せない + `DenyUsers`） | 実装を書く Claude Code。ファイルの読み書きだけを許す |
-| `planner` | 1003 | **なし** | **不可** | 受け入れ基準を書く Claude Code。コードには触れない（BOOTSTRAP 1-1） |
-| `critic` | 1004 | **なし** | **不可** | 計画の欠陥を指摘する Claude Code。**計画もテストも読めない** |
+| `planner` | 1003 | **なし** | **不可** | 設計と受け入れ条件を書く Claude Code。コードは読めるが書けない。テストは読めない（BOOTSTRAP 1-1） |
+| `critic` | 1004 | **なし** | **不可** | 詳細設計の欠陥を指摘する Claude Code。**受け入れ条件もコードもテストも読めない** |
 
 保守ユーザーは、ディストロを作るときに決めた既定ユーザーをそのまま使う。
 **名前はこのリポジトリでは決め打ちにしていない。** スクリプトは `ADMIN_USER` で受け取り、
@@ -40,7 +40,7 @@ RUNNER_SPEC.md の実行環境（§1）を再現するための手順とスク�
 
 `critic` の uid が分かれている理由は、他の3人とは毛色が違う。solver と planner は
 「書けるものを制限する」ための分離だが、critic は**読めるものを制限する**ための分離で、
-役の価値そのものがそこにある ── 計画を読める critic は「全基準を満たしている」と答え、
+役の価値そのものがそこにある ── 受け入れ条件を読める critic は「全条件を満たしている」と答え、
 テストを読める critic は「テストは通る」と答える。どちらも真で、どちらも無価値。
 
 ホスト側の付属物（詳細と再作成手順は `host/README.md`）:
@@ -207,12 +207,12 @@ Claude Code は apt のパッケージではない。`apt install claude` は通
 interop を切ると Windows 側の `npm`/`node` が PATH から消えるので、
 ディストロ内にシステムワイドで入れる必要がある。
 
-Codex CLI（`@openai/codex`）は、計画の `solver_tiers` に `codex` を挙げるときだけ入れる。
+Codex CLI（`@openai/codex`）は、`/srv/loop/settings.json` の `solver_tiers` に `codex` を挙げるときだけ入れる。
 
 ### 2-6. このリポジトリをクローンする（箱）
 
 ```bash
-sudo git clone -b develop <このリポジトリの https URL> /opt/loop-engine
+sudo git clone -b develop <このリポジトリの https URL> /opt/swa
 ```
 
 箱には GitHub の鍵を置かないので、https で取る。改行コードは `.gitattributes` で LF に
@@ -220,7 +220,7 @@ sudo git clone -b develop <このリポジトリの https URL> /opt/loop-engine
 取り込む（§2-10）。それより前は pull で取り込む:
 
 ```bash
-sudo git -C /opt/loop-engine pull
+sudo git -C /opt/swa pull
 ```
 
 ### 2-7. runner の公開鍵を流し込む（PowerShell）
@@ -241,7 +241,7 @@ Get-Content "$env:USERPROFILE\.ssh\loop-runner.pub" |
 ### 2-8. プロビジョニング（箱）
 
 ```bash
-cd /tmp && sudo ADMIN_USER=<保守ユーザー> bash /opt/loop-engine/provision/provision.sh
+cd /tmp && sudo ADMIN_USER=<保守ユーザー> bash /opt/swa/provision/provision.sh
 ```
 
 `cd /tmp` は省かない（§3-14）。何度流しても同じ状態になるので、スクリプトを
@@ -266,8 +266,8 @@ sudo -u runner /srv/loop/bin/smoke-dom
 働いている関門と見分けがつかない。
 
 `35-node.sh` は最後に `smoke-page` を流す。開発サーバ（Vite）で `index.html` を開いたとき、
-`src/main.ts` の `start` まで届くことを確かめる。計画には開発サーバの応答を確かめる
-条件を書かせないので、要件の「開発サーバで開ける」はここで確かめる。
+`src/main.ts` の `start` まで届くことを確かめる。受け入れ条件には開発サーバの応答を確かめる
+条件を書かせないので、仕様書の「開発サーバで開ける」はここで確かめる。
 
 ```bash
 sudo -u runner /srv/loop/bin/smoke-page
@@ -277,7 +277,7 @@ Vite はインラインのモジュールスクリプトを `/index.html?html-pr
 変換後の HTML には `/src/main.ts` が現れない。だから見るのは HTML ではなく、切り出された
 モジュールの中身だ。キャッシュは作業場所に書き、凍結したツールチェーンには書かない。
 
-`36-dotnet.sh` は C# の計画のための .NET を用意する。
+`36-dotnet.sh` は C# のプロジェクトのための .NET を用意する。
 
 | もの | 場所 | 持ち主 |
 |---|---|---|
@@ -304,7 +304,7 @@ Vite はインラインのモジュールスクリプトを `/index.html?html-pr
 sudo -u runner -H /srv/loop/bin/smoke-dotnet
 ```
 
-`37-cpp.sh` は C++ の計画のための g++、make、CMake、GoogleTest を用意する。
+`37-cpp.sh` は C++ のプロジェクトのための g++、make、CMake、GoogleTest を用意する。
 
 | もの | 場所 | 持ち主 |
 |---|---|---|
@@ -312,7 +312,7 @@ sudo -u runner -H /srv/loop/bin/smoke-dotnet
 | ランナーが書く CMakeLists.txt とビルドの出力 | `/srv/loop/cpp/build` | runner、700 |
 
 - 箱でビルドするのは標準の C++17 だけ。DXライブラリや Windows の API は入れない
-- 標準でもリポジトリのものでもないヘッダ（`DxLib.h`、`windows.h` など）を include するファイルは、ランナーがビルドから外す。外したファイルは計画づくりのブリーフに並ぶ
+- 標準でもリポジトリのものでもないヘッダ（`DxLib.h`、`windows.h` など）を include するファイルは、ランナーがビルドから外す。外したファイルはプランナーのブリーフに並ぶ
 - CMakeLists.txt はプロジェクトの根に置かない。取り込んだプロジェクトのビルドの設定とぶつかる
 - `build` はコンパイルしたコードとテストを持つので、planner と critic から見えてはならない（BOOTSTRAP 1-1）
 
@@ -336,7 +336,7 @@ sudo -u runner -H /srv/loop/bin/probe-unity
 
 全文は `/srv/loop/logs/probe-unity-<日時>.log` に残る。
 
-Promete に持ち込む計画では、`probe-promete` でヘッドレスのテストに何ができるかを測る。これも測定で、結果が悪くても落ちない。
+Promete に持ち込むプロジェクトでは、`probe-promete` でヘッドレスのテストに何ができるかを測る。これも測定で、結果が悪くても落ちない。
 
 ```bash
 sudo -u runner -H /srv/loop/bin/probe-promete
@@ -406,54 +406,57 @@ sudo -u runner /srv/loop/bin/smoke-critic
 ホストからは `host\loop.cmd` で同じコマンドを呼べる（`host/README.md`）。
 
 ```bash
-loop go <要件>.md                     # 言語は --language typescript / csharp / cpp、持ち込む先は --framework
-loop status                          # 走っているか、人への問い、台帳の末尾
+loop go <仕様書>.md...               # 言語は --language typescript / csharp / cpp、持ち込む先は --framework
+loop approve                         # 今の段の設計を承認し、次の段へ流す
+loop reject <コメント>               # コメントを付けて、今の段の設計を書き直させる
+loop reopen <モジュール>...          # 詳細設計を直すモジュールを選び、中段に戻す
+loop status                          # 走っているか、段とモジュールの状態、FAILURE.md、台帳の末尾
 loop now                             # いまの作業を JSON で出す（ダッシュボードが読む）
 loop log                             # 走行ログを追う。Ctrl-C で抜けても走行は続く
 loop continue                        # 止まったところから続ける
 loop stop                            # 走行を止める
 loop findings                        # クリティックの指摘を出す
-loop findings set                    # 指摘1件を書き換える。標準入力に JSON を渡す
 loop update                          # このリポジトリを pull し、プロビジョニングを流し直す
 ```
 
 `loop update` は、走行中とプロジェクトの切り替え中は断る。pull は fast-forward だけを受ける。
-`provision.sh` は全ステップが通ると、そのコミットを `/etc/loop/provisioned` に書く。`loop update` は
+`provision.sh` は全スクリプトが通ると、そのコミットを `/etc/loop/provisioned` に書く。`loop update` は
 pull の後のコミットがこれと同じならプロビジョニングを飛ばす。`--force` を付けると必ず流す。
 
-`loop go` は要件を `/srv/loop/human/in/REQUIREMENTS.md` に置き、次を順に裏で流す。
+流れは3段で、段は `plan/stage.json` にある（RUNNER_SPEC §3）。各コマンドが裏で流す `loop.py` の
+動詞は次のとおり。
 
-1. `plan bootstrap`
-2. `plan refine`（critic の指摘をプランナーへ戻す）
-3. `plan apply`
-4. `run --all`
+| コマンド | 段 | 流すもの | 止まるところ |
+|---|---|---|---|
+| `loop go` | 始まる前、上流 | `spec import`、`basic draft` | 基本設計を書いたところ |
+| `loop approve` | 上流 | `basic approve`、`modules draft`（続けて `modules critique`） | 詳細設計を書き、クリティックが読んだところ |
+| `loop approve` | 中段 | `modules approve`、`run --all` | 全モジュールが緑か、モジュールが止まって中段に戻ったところ |
+| `loop reject` | 上流 | `basic draft` | 基本設計を書き直したところ |
+| `loop reject` | 中段 | `modules draft`（続けて `modules critique`） | 詳細設計を書き直し、クリティックが読んだところ |
+| `loop continue` | 下流 | `run --all` | 上と同じ |
+| `loop continue` | 中段 | `modules critique` | クリティックが読んだところ |
 
-前の要件の計画が全部緑なら、`plan bootstrap` がそれを台帳ごと `plan/archive/<番号>/` へ移してから
-次の計画を起こす。前の計画のコードとテストは、次の計画から既存のものとして見える。
-途中まで緑の計画があるときは移さずに止まる。先に `loop continue` で終える。
+`loop go` は仕様書を `/srv/loop/human/in/spec/` に置く。上流が終わった後は断る。仕様書を
+差し替えて作り直すなら、新しいプロジェクトで始める。`loop reject` はコメントを
+`/srv/loop/human/in/COMMENT.md` に置く。プランナーは次の書き直しでそれを読み、書いた設計が
+検査を通ると消える。`loop reopen` は前面で流れ、裏には回さない。
 
-次の場合は、適用や実行に進まずに止まる。何を読めばよいかはログの最後の行と `loop status` に出る。
+止まった場面と次の手は、ログの最後の行と `loop status` に出る。
 
 | 止まる場面 | 次の手 |
 |---|---|
-| 途中まで緑の計画がある | `loop continue` で終えてから `loop go` |
-| プランナーが計画を書かずにエスカレーションした | 書かれた問いを読み、要件を直して `loop go` |
-| `plan refine` のあとも critic の指摘が残った | 指摘を読み、的外れなものを書き換えてから `loop continue`。そのまま適用するなら何も書き換えずに `loop continue` |
-| `plan apply` が提案を拒んだ | 違反を読み、要件を直して `loop go` |
-| `run --all` が止まった | `loop status` のエスカレーションを読む |
-| 利用枠が尽きた | 枠が戻ってから `loop continue`。途中のステップがあれば先に `loop raw reset <ステップ>` |
+| 基本設計を書いた | `docs/basic/` を読み、`loop approve` か `loop reject <コメント>` |
+| 詳細設計を書き、クリティックが読んだ | `loop findings` と `docs/modules/` を読み、`loop approve` か `loop reject <コメント>` |
+| プランナーが検査を通る設計を書けなかった | ログの判定を読み、コメントを付けて `loop reject <コメント>` |
+| モジュールが下流で止まり、中段に戻った | `plan/FAILURE.md` を読み、`loop reopen <モジュール>...` のあと `loop reject <コメント>` か `loop approve` |
+| 全モジュールが緑になった | 写しを引いて動かす。直すなら `loop reopen <モジュール>...` |
+| 利用枠が尽きた | 枠が戻ってから `loop continue`。途中のモジュールがあれば先に `loop raw reset <モジュール>` |
 
-`loop continue` は、適用待ちの提案があれば `plan refine --resume` と `plan apply` を流してから
-`run --all` を流す。提案が無ければ `run --all` だけを流す。`--resume` は、人が書き換えた指摘が
-あれば、プランナーに1回だけ改訂させる。クリティックはもう呼ばない。書き換えが無ければ何もしない。
+クリティックの指摘は `/srv/loop/human/in/CRITIQUE.json` にあり、`loop findings` で読む。`title` と
+`evidence` は日本語。指摘はプランナーに戻らない。書き直させたいことは `loop reject` のコメントに書く。
 
-クリティックの指摘は `/srv/loop/human/in/CRITIQUE.json` にある。`title` と `evidence` は日本語で、
-書き換えられるのは、上限の後も指摘が残って止まっているか、改訂が済まずに止まっているあいだだけだ。改訂が済まないのは、プランナーが判断を返したとき、改訂に失敗したとき、改訂の途中で走行を止めたときだ。ダッシュボードからも直せる。
-端末では `loop findings` で番号を見て、`loop findings set` に1件ずつ渡す。番号は0から数える。
-
-```bash
-echo '{"mode": "trace", "index": 0, "title": "<題>", "evidence": "<根拠>"}' | loop findings set
-```
+走行の設定は `/srv/loop/settings.json` に置く（RUNNER_SPEC §7-5）。root 所有で、ランナーは読むだけ。
+無ければ既定で走る。
 
 ダッシュボードとホストの `loop-import` は、走行の開始と停止、続行、プロジェクトの切り替えと受け皿づくり
 （`loop project init`）、役のモデルの変更を、SSH で
@@ -473,9 +476,9 @@ echo '{"mode": "trace", "index": 0, "title": "<題>", "evidence": "<根拠>"}' |
 `loop.py` の動詞を直接使うときは `loop raw` を使う。runner として前面で動く。
 
 ```bash
-loop raw validate
-loop raw plan show
-loop raw reset <ステップ>
+loop raw status
+loop raw check
+loop raw reset <モジュール>
 ```
 
 ### 2-11. プロジェクトを切り替える（箱）
@@ -501,7 +504,7 @@ loop project unity-refs <名前> <tar>            # Unity の参照アセンブ�
 （`--tests`）で、既定は `src` と `tests`。Unity のプロジェクトのようにコードを別の場所に置く
 リポジトリでは、作業ツリーの根からの相対パスで指定する。
 
-- 使える文字は英数字と `.` `_` `-` `/` だけ。`..` と、`plan` `.git` `.runner` `.venv` `node_modules` の下は使えない
+- 使える文字は英数字と `.` `_` `-` `/` だけ。`..` と、`plan` `docs` `ac` `.git` `.runner` `.venv` `node_modules` の下は使えない
 - 一方がもう一方を含んではならない
 - 規則は `runner/loop.py` の `layout_problems` にしか書かない。`loop-project.sh` とプロビジョニングも、それを import して確かめる
 
@@ -511,7 +514,7 @@ loop project unity-refs <名前> <tar>            # Unity の参照アセンブ�
 `loop project` は `loop-project.sh` を root で流す。`loop` がまだ無い箱では、直接流す。
 
 ```bash
-cd /tmp && sudo ADMIN_USER=<保守ユーザー> bash /opt/loop-engine/provision/loop-project.sh <引数>
+cd /tmp && sudo ADMIN_USER=<保守ユーザー> bash /opt/swa/provision/loop-project.sh <引数>
 ```
 
 置き場は次のとおり。
@@ -531,7 +534,7 @@ cd /tmp && sudo ADMIN_USER=<保守ユーザー> bash /opt/loop-engine/provision/
 `use` は次の順で動く。
 
 1. runner の `loop.py` と、solver・planner・critic のプロセスが無いことを確かめる。あれば止まる
-2. 今のプロジェクトの作業場所を `parked/` に `mv` で退避する。対象は `project`、`human/in`、`planner/out`、`planner/brief`、`critic/out`、`critic/brief`、`brief`。`plan apply` を待つ提案と要件も一緒に動く
+2. 今のプロジェクトの作業場所を `parked/` に `mv` で退避する。対象は `project`、`human/in`、`planner/out`、`planner/brief`、`critic/out`、`critic/brief`、`brief`。仕様書、コメント、クリティックの指摘の写しも一緒に動く
 3. `/srv/loop/repo.git` と `/srv/loop/layout.json` を切り替え先に向け直す
 4. 切り替え先に退避分があれば戻し、`40-perms.sh` で権限を確かめる。無ければ `provision.sh` で作る。作業ツリーは bare の HEAD が指すブランチになる
 
@@ -602,7 +605,7 @@ WSL2 は約60秒アイドルすると **VM ごと停止する**。sshd も一緒
 keepalive プロセスは `wsl --shutdown` で `STATUS_CONTROL_C_EXIT` で落ちる。
 タスクには `RestartCount 3` を付けてあるので**1分後に自力で戻る**が、
 待たずに戻すなら明示的に再実行する。**走行中は `wsl --shutdown` を使わない**
-（VM が落ちれば走行中のステップは死ぬ）:
+（VM が落ちれば走行中のモジュールは死ぬ）:
 
 ```powershell
 schtasks /run /tn "WSL-keepalive-Ubuntu-24-04"
@@ -815,18 +818,19 @@ fatal: failed to stat '/home/<保守ユーザー>': Permission denied
 **逆向きは塞がらない** ── sticky の削除条件は「ファイルの所有者**または**
 ディレクトリの所有者」なので、runner は planner が書いたファイルを消せる。
 
-これは事故ではなく必要な性質。`plan propose` は前回の提案を消してから
-プランナーを呼ぶ（残っていると、書かれなかった古い提案が今回の提案として
-適用されてしまう）。root を使わずにそれができるのはこの規則のおかげ。
+これは事故ではなく必要な性質。ランナーはプランナーを呼ぶ前に out/ を空にし、今の設計を
+写して置く（残っていると、書かれなかった古いファイルが今回の設計として読まれてしまう）。
+root を使わずにそれができるのはこの規則のおかげ。
 
-**ディレクトリを書かれた場合は別。**`out/` に planner 所有のディレクトリがあると、
-中身を消す権限は runner に無い。`clear_proposal()` は再帰せず、人間に投げて止まる。
+**planner が作ったディレクトリの中身は別。** 中身を消すには、そのディレクトリへの
+書き込み権限が要る。`planner-run` は `umask 002` で動き、planner が作るディレクトリを
+グループ `plannerw` に書けるようにする。消せなければ `clear_planner_out()` は人間に投げて止まる。
 
 ### 3-17. `git reset --hard` は台帳も巻き戻す
 
 `plan/ledger.jsonl` は GREEN のときに `git add -A` で commit されるため git 管理下にある。
 `reset` の `git reset --hard HEAD` は台帳を**最後の緑まで戻し**、
-破棄しようとしている試行の記録（ESCALATED を含む）を消してしまう。
+破棄しようとしている試行の記録（FAILED を含む）を消してしまう。
 
 → `cmd_reset` は reset の前に台帳を読み、後で書き戻す。
 追記専用の台帳が、よりによって失敗の記録だけを失うのは無いより悪い。
@@ -840,7 +844,7 @@ Debian 系では tkinter が標準で入らない。`python3-tk` が無いと `i
 
 **それでもランナーは Tk の画面を検証できない。** `DISPLAY` は無いので、確かめられるのは
 GUI プログラムの**ロジック**だけ。画面を持つ題材は TypeScript（happy-dom）で書くか、
-テスト可能なコアと `Tk` に触る薄い殻を別のステップに割る。
+テスト可能なコアと `Tk` に触る薄い殻を別のモジュールに割る。
 画面そのものの確認はホスト側の人間がやる（`host/dashboard` の予定レビュー）。
 
 ### 3-19. setgid のルートは、runner が作ったファイルまで solver に書かせる
@@ -990,6 +994,8 @@ VirtualBox 構成の手順は `c4374f4` から拾える。
 
 ## 更新履歴
 
+- 2026/10/15: 箱の中のクローンの場所を `/opt/swa` に変更
+- 2026/10/14: §2-10 の走らせ方を3段（上流、中段、下流）の `loop go`、`approve`、`reject`、`reopen` に変更
 - 2026/10/08: §2-11 に `loop project remove` を追加
 - 2026/10/08: Promete のために .NET 10 SDK と Promete 2.1.0 を §2-8 の凍結に足し、`smoke-dotnet` を2つの組み合わせにし、`probe-promete` を追加
 - 2026/09/28: 3役の起動でツールとシステムプロンプトを絞ることと、その確かめ方を §2-9 に追加

@@ -3,12 +3,12 @@
 #
 #     sudo -u runner /srv/loop/bin/smoke-planner
 #
-# 後半のほうが大事だ。動くプランナーは簡単に作れる。要点は、計画を直接書けず、
-# 計画を満たすべきコードにも触れられないプランナーであること（BOOTSTRAP 1-1）。
-# それを約束ではなく、ファイルシステムの事実として確かめる。
+# 後半のほうが大事だ。動くプランナーは簡単に作れる。要点は、設計を直接書けず、
+# 既存のコードは読めても書けず、テストには届かないプランナーであること
+# （BOOTSTRAP 1-1）。それを約束ではなく、ファイルシステムの事実として確かめる。
 #
-# 計画の何を変えてよいかは別の問いで、smoke-plan が `loop.py plan apply` の
-# 検査として確かめる。
+# 設計の何を変えてよいかは別の問いで、loop.py の検査（check_modules_out）が
+# 受け持つ。
 set -euo pipefail
 
 [ "$(id -un)" = "runner" ] || { echo "run as runner: sudo -u runner $0" >&2; exit 1; }
@@ -62,16 +62,17 @@ fi
 # なので、sudo はそのコマンドを拒み、その失敗はファイルを拒まれたのとまったく
 # 同じに見える。柵が全開でも、そうした検査はすべて「通る」。代わりにモードを
 # 見る。runner はそのすべてを stat できる。
-# plan/ の 0700 が買うのは、プランナーが tasks.json を「書けない」ことだ。受け入れ
-# 条件をプランナーから隠すためではない。プランナーは条件の書き手で、改訂を頼む
-# ときランナーは計画全体をブリーフで渡す。BOOTSTRAP 1-1 の分離は、条件を書く
-# アカウントとコードを書くアカウントのあいだにあり、それが次の2つの検査だ。
-planmode="$(stat -c '%U:%G %a' /srv/loop/project/plan)"
-if [ "$planmode" = "runner:runner 700" ]; then
-  note "ok: plan/ is runner:runner 700 -- every change goes through the runner"
-else
-  bad "plan/ is '$planmode', expected 'runner:runner 700'"
-fi
+# docs/ と ac/ の 0700 が買うのは、プランナーが設計を「直接書けない」ことだ。
+# 設計をプランナーから隠すためではない。プランナーは設計の書き手で、ランナーは
+# 今の設計を out/ に写して渡す。書いたものは検査を通ってから戻る。
+for d in plan docs ac; do
+  mode="$(stat -c '%U:%G %a' "/srv/loop/project/$d")"
+  if [ "$mode" = "runner:runner 700" ]; then
+    note "ok: $d/ is runner:runner 700 -- every change goes through the runner"
+  else
+    bad "$d/ is '$mode', expected 'runner:runner 700'"
+  fi
+done
 
 # 柵の場所。規則は loop.py の LAYOUT にしか書かないので、そこから読む。
 read -r LAYOUT_SRC LAYOUT_TESTS <<<"$(python3 -B -c "import sys; sys.path.insert(0, '/srv/loop/runner'); import loop; print(loop.LAYOUT['src'], loop.LAYOUT['tests'])")"
@@ -80,9 +81,23 @@ for d in "$LAYOUT_SRC" "$LAYOUT_TESTS"; do
   grp="$(stat -c '%G' "/srv/loop/project/$d")"
   case "$planner_groups" in
     *" $grp "*) bad "planner is in group $grp, which owns $d/ -- it could write there" ;;
-    *)          note "ok: planner is not in $grp, so $d/ is closed to it" ;;
+    *)          note "ok: planner is not in $grp, so it cannot write $d/" ;;
   esac
 done
+
+# 既存のコードは ACL で読める。書き込みのビットは持たない（40-perms.sh）。
+# テストには ACL が無く、グループにもいないので届かない。
+src_acl="$(getfacl -p --omit-header "/srv/loop/project/$LAYOUT_SRC" 2>/dev/null \
+  | grep '^user:planner:' || true)"
+case "$src_acl" in
+  user:planner:r-x*) note "ok: planner reads $LAYOUT_SRC/ through its ACL, and cannot write it" ;;
+  *)                 bad "the ACL of $LAYOUT_SRC/ for planner is '$src_acl', expected 'user:planner:r-x'" ;;
+esac
+if getfacl -p --omit-header "/srv/loop/project/$LAYOUT_TESTS" 2>/dev/null | grep -q '^user:planner:'; then
+  bad "$LAYOUT_TESTS/ has an ACL entry for planner -- it must never see the tests"
+else
+  note "ok: $LAYOUT_TESTS/ has no ACL entry for planner"
+fi
 
 homemode="$(stat -c '%U %a' /home/planner)"
 if [ "$homemode" = "planner 700" ]; then

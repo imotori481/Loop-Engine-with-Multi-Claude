@@ -3,12 +3,12 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Loop Engine</title>
+  <title>Sleep Walking Alternator</title>
   <link rel="stylesheet" href="/style.css">
 </head>
 <body>
   <main>
-    <header><p class="eyebrow">OPERATOR CONSOLE</p><h1>Loop Engine</h1><p id="project"></p></header>
+    <header><p class="eyebrow">OPERATOR CONSOLE</p><h1>Sleep Walking Alternator</h1><p id="project"></p></header>
     <section class="summary">
       <article><span>状態</span><strong id="phase">読み込み中</strong></article>
       <article><span>Green</span><strong id="progress">—</strong></article>
@@ -29,14 +29,14 @@
         <article id="run" class="panel" role="tabpanel">
           <p id="run-state" class="why">読み込み中</p>
           <div id="start-form" class="form local-only">
-            <label><span>要件</span><input id="requirements" type="file" accept=".md,.markdown,.txt"></label>
+            <label><span>仕様書</span><input id="spec" type="file" accept=".md,.markdown,.txt"></label>
             <label><span>言語</span><select id="language"></select></label>
             <label><span>持ち込む先</span><select id="framework"></select></label>
             <button id="start-run">開始（loop go）</button>
           </div>
           <div class="actions"><button id="continue-run" class="quiet">続ける（loop continue）</button><button id="stop-run" class="danger">停止（loop stop）</button></div>
-          <p class="why">途中で切れたステップは、続ける前に最後の緑まで戻す。そのステップのコミットしていない作業は消える。</p>
-          <div class="actions"><select id="reset-step" aria-label="やり直すステップ"></select><button id="reset-run" class="quiet">やり直す（loop raw reset）</button></div>
+          <p class="why">途中で切れたモジュールは、続ける前に最後のコミットまで戻す。そのモジュールのコミットしていない作業は消える。</p>
+          <div class="actions"><select id="reset-step" aria-label="やり直すモジュール"></select><button id="reset-run" class="quiet">やり直す（loop raw reset）</button></div>
         </article>
         <article id="projects-panel" class="panel" role="tabpanel" hidden>
           <div class="table-wrap flat"><table><thead><tr><th>名前</th><th>状態</th><th>ブランチ</th><th></th></tr></thead><tbody id="projects"></tbody></table></div>
@@ -48,9 +48,12 @@
           <datalist id="model-options"></datalist>
         </article>
         <article id="pull-panel" class="panel" role="tabpanel" hidden>
-          <p class="why">loop-pull で、ホストの写しを箱の先まで進める。予定レビューと台帳の欄は写しを読む。</p>
+          <p class="why">loop-pull で、ホストの写しを箱の先まで進める。最終確認と台帳の欄は写しを読む。</p>
           <div class="actions"><span id="pull-state"></span><button id="pull">写しを更新（loop-pull）</button></div>
           <pre id="pull-log" hidden></pre>
+          <p class="why">下書きの PR は、写しで最後に緑になったモジュールまでを &lt;branch&gt;-draft から親ブランチへ出す（loop-pr と同じ）。先に写しを更新する。最終確認を承認すると、開いている下書きが正式な PR になる。</p>
+          <div class="actions"><span id="draft-state"></span><button id="draft-pr" class="quiet">下書きの PR を出す（loop-pr）</button></div>
+          <div id="draft-result" class="live" hidden></div>
         </article>
         <article id="import-panel" class="panel" role="tabpanel" hidden>
           <p class="why">既存リポジトリのブランチを、箱の新しいプロジェクトにする（loop-import と同じ）。ホストにクローンし、箱にプロジェクトを作ってブランチを push し、そこへ切り替える。</p>
@@ -70,16 +73,17 @@
       </div>
     </section>
     <section><div class="section-title"><h2>いまの作業</h2><span id="live-updated"></span></div><article id="live" class="live"><p class="why">読み込み中</p></article></section>
+    <section><div class="section-title"><h2>設計</h2><span id="design-stage"></span></div><article id="design" class="stack"><p class="why">読み込み中</p></article></section>
     <section><div class="section-title"><h2>クリティックの指摘</h2><span id="critique-at"></span></div><article id="critique"><p class="why">読み込み中</p></article></section>
-    <section><h2>ステップ</h2><div class="table-wrap"><table><thead><tr><th>ID</th><th>状態</th><th>内容</th></tr></thead><tbody id="steps"></tbody></table></div></section>
+    <section><h2>モジュール</h2><div class="table-wrap"><table><thead><tr><th>ID</th><th>状態</th></tr></thead><tbody id="steps"></tbody></table></div></section>
     <section><div class="section-title"><h2>人間の対応待ち</h2><button id="refresh">更新</button></div><div id="pending" class="stack"></div></section>
     <section id="pull-request-section" hidden><h2>プルリクエスト</h2><article id="pull-request" class="live"></article></section>
     <section><h2>成果物</h2><div id="launchers" class="actions"></div></section>
     <section><div class="section-title"><h2>役割ごとの消費</h2><div class="controls"><div id="token-legend" class="legend"></div><div id="role-metric" class="toggle"><button data-value="tokens" aria-pressed="true">トークン</button><button data-value="usd" aria-pressed="false">USD</button></div></div></div><article class="chart"><div id="token-chart" class="plot"></div><details><summary>表で見る</summary><div class="table-wrap"><table><thead><tr><th>回</th><th>写し</th><th>開始</th><th>結果</th><th>プランナー</th><th>クリティック</th><th>ソルバー</th></tr></thead><tbody id="token-table"></tbody></table></div></details></article></section>
     <section><div class="section-title"><h2>トークンの種類ごとの消費</h2><div class="controls"><div id="kind-legend" class="legend blocks"></div><div id="kind-role" class="toggle"><button data-value="all" aria-pressed="true">全体</button><button data-value="planner" aria-pressed="false">プランナー</button><button data-value="critic" aria-pressed="false">クリティック</button><button data-value="solver" aria-pressed="false">ソルバー</button></div></div></div><article class="chart"><div id="kind-chart" class="plot"></div><details><summary>表で見る</summary><div class="table-wrap"><table><thead><tr><th>回</th><th>写し</th><th>開始</th><th>キャッシュ読み取り</th><th>キャッシュ書き込み</th><th>入力</th><th>出力</th></tr></thead><tbody id="kind-table"></tbody></table></div></details></article></section>
-    <section><h2>最近の台帳</h2><div class="table-wrap"><table><thead><tr><th>時刻</th><th>イベント</th><th>ステップ</th></tr></thead><tbody id="events"></tbody></table></div></section>
+    <section><h2>最近の台帳</h2><div class="table-wrap"><table><thead><tr><th>時刻</th><th>イベント</th><th>モジュール</th></tr></thead><tbody id="events"></tbody></table></div></section>
   </main>
-  <template id="request-template"><article class="request"><div><span class="badge"></span><h3></h3></div><pre></pre><textarea maxlength="4000" placeholder="確認結果やプランナーへの回答を記録"></textarea><div class="request-actions"></div></article></template>
+  <template id="request-template"><article class="request"><div><span class="badge"></span><h3></h3></div><pre></pre><textarea maxlength="4000" placeholder="確認結果を記録"></textarea><div class="request-actions"></div></article></template>
   <script src="/app.js"></script>
 </body>
 </html>

@@ -16,12 +16,13 @@
 | 状態 | 作業内容 | 目的 | 実装方法 | 操作ファイル |
 |---|---|---|---|---|
 | 一部完了 | C# のブリーフにライブラリとして組むことを書く | プランナーが、ランナーのビルドでは通らない入口の条件を書かない | プランナーとソルバーのブリーフに、コードは OutputType の無いライブラリ（LoopCode）として組まれ、`Assembly.EntryPoint` は常に null で、入口はテストで確かめられないことを書く | `runner/loop.py`、`runner/tests/test_promete.py` |
-| 一部完了 | Promete の窓と入力をブリーフに正しく書く | ソルバーが窓の大きさを窓に渡し、入力を推測で読まない | Promete の `layout_note` から「`IWindow` を使うな」を外し、窓の大きさは `App.Window.Size` で決めること、マウスのボタンは `mouse[MouseButtonType.Left].IsButtonDown` で読むことを書く。ソルバーのブリーフに、ライブラリのメンバーを反射で探さないこと、分からないメンバーは参照で引くか止まることを書く | `runner/loop.py`、`runner/tests/test_promete.py` |
-| 一部完了 | 人の判断を計画に届ける | (b) と (c) の判断を、`plan/tasks.json` の手編集なしで計画に入れる | `loop plan amend <ステップ>` を足す。人が書き換えた計画をリンタに通し、計画だけをコミットしてから、そのステップを reset する。ダッシュボードのプランナーへの回答は箱に送り、次の `plan propose` のブリーフに人の判断として渡す | `runner/loop.py`、`provision/bin/loop`、`provision/loop_dash.py`、`host/loop.cmd`、`host/dashboard/server.py`、`host/dashboard/live.py`、`docs/RUNNER_SPEC.md` |
-| 一部完了 | 形だけの条件をリンタで落とす | スタブでも通る条件を、RED_GATE の R4 ではなく計画の段階で拒む | HANDOFF の L16 の候補を実装する。`given` が反射（`typeof(`、reflection）で、`then` が型の名前、基底型、メソッドの有無、const の値しか主張しない条件を落とす | `runner/loop.py`、`runner/tests/test_linter.py` |
-| 一部完了 | 基盤の故障をエスカレーションに数えない | 権限の故障や人による計画の書き換えで、ステップのエスカレーションの上限を使い切らない | solver の返答と止まった理由から、EACCES のような solver の責任でない停止を見分け、ESCALATED とは別の出来事として記録して走行を止める。`plan amend` で計画を直したステップは回数を数え直す。先に RUNNER_SPEC 6-2 の上限の定義を直す | `runner/loop.py`、`docs/RUNNER_SPEC.md` |
+| 一部完了 | Promete の窓、描画、入力をブリーフに正しく書く | ソルバーが窓の大きさを窓に渡し、矩形を正しい大きさで描き、入力を推測で読まない | Promete の `layout_note` に、窓はコンストラクタで受け取る `Promete.Backends.IGameView` の `Size` と `Title` で決め、旧形式の `App.Window` と `IWindow` を使わないこと、`Shape.CreateRect` の後ろ2つの引数は右下の座標であること、マウスのボタンは `mouse[MouseButtonType.Left].IsButtonDown` で読むことを書く。ソルバーのブリーフに、ライブラリのメンバーを反射で探さないこと、分からないメンバーは参照で引くか止まることを書く | `runner/loop.py`、`runner/tests/test_promete.py` |
+| 一部完了 | 設計を3段でせき止める | 人が上流で基本設計、中段で詳細設計と受け入れ条件を承認してから実装させ、下流で詰まったモジュールは設計に戻して直す | 段を `plan/stage.json` に置き、`spec import`、`basic draft/approve`、`modules draft/critique/approve`、`reopen` を足す。設計は `docs/`、受け入れ条件は `ac/` に置き、インターフェースチェックを通してから下流の計画を機械で作る。下流で止まったモジュールは `plan/FAILURE.md` を書いて中段に戻す。計画の提案と適用、批評の改訂、エスカレーション、リンタを外す。プランナーに `src/` を ACL で読ませ、走行の設定を `/srv/loop/settings.json` に移す。箱で1本流して確かめる | `runner/loop.py`、`runner/tests/`、`provision/`、`host/loop.cmd`、`docs/`、`README.md` |
+| 一部完了 | 基盤の故障で止める | 権限の故障を、設計の誤りとして中段に戻さない | solver の返答と止まった理由から EACCES のような solver の責任でない停止を見分け、`INFRA_FAILURE` を書いて段を変えずに止める。箱で権限を壊して確かめる | `runner/loop.py`、`provision/bin/loop` |
+| 一部完了 | ダッシュボードを3段に合わせる | 人が各段のせきで、設計を読んで承認と差し戻しを画面から行う | 段と、モジュールごとの状態を出す。上流で基本設計、中段で詳細設計、モジュールの依存関係の図、クリティックの指摘、インターフェースチェックの結果、`"entry": true` の行を見せ、承認とコメント付きの差し戻しを置く。下流で止まったら `FAILURE.md` を見せ、直すモジュールを選んで中段に戻す。`ac/` の受け入れ条件をモジュールごとに出す。上流と中段の承認と差し戻しはどこからでも許し、最終確認の承認はローカルだけにする。エスカレーションへの回答の操作を外し、走行の開始の要求のキーを `spec` にする。箱で1本流して確かめる | `host/dashboard/`、`provision/loop_dash.py`、`provision/bin/loop` |
+| 一部完了 | 下書きのプルリクエストを設計から組む | 写しの HEAD から下書きを出し、最終確認の承認で正式なプルリクエストにする | 本文の緑のモジュールと残りのモジュールを、`plan/tasks.json` ではなく台帳と `docs/modules/` から並べる。PR のブランチから `docs/spec/`、`docs/basic/`、`docs/modules/` を外す。写しの HEAD と箱の最新の緑がずれていれば印を付ける。最終確認の承認は、承認した状態を下書きのブランチに push し、新しい PR を作らずに下書きを正式にする。実物の GitHub で下書きから正式にするまでを1回流して確かめる | `host/dashboard/pullrequest.py`、`host/loop-pr.cmd`、`host/dashboard/README.md` |
 | 未着手 | Promete の組み合わせを箱で確かめる | .NET 10 と Promete 2.1.0 の凍結が通ることと、ヘッドレスのテストで何が動くかを実測し、ブリーフの事実を実測に合わせる | `loop update` で `36-dotnet.sh` を流し、`smoke-dotnet` の2つの組み合わせが通ることを見る。`probe-promete` を流し、結果で `promete_facts` の動くものと使えないものを書き直す。シーンをテストから読むのに `UseScenesFrom` が要るなら、それを `layout_note` に書く | `runner/loop.py`、`provision/bin/probe-promete` |
-| 一部完了 | Promete のプロジェクトの入口を扱う | 取り込んだ Promete のプロジェクトの `Program.cs`（トップレベル文）は、ライブラリとしてコンパイルできない | トップレベル文を持つファイルを C++ の `cpp_sources` と同じくビルドから外し、外したファイルをブリーフに並べる。人の手で直す入口として扱う | `runner/loop.py`、`runner/tests/test_promete.py` |
+| 一部完了 | Promete のプロジェクトの入口を扱う | 取り込んだ Promete のプロジェクトの `Program.cs`（トップレベル文）は、ライブラリとしてコンパイルできない | トップレベル文を持つファイルを C++ の `cpp_sources` と同じくビルドから外し、外したファイルをブリーフに並べる。走行がシーンかシーンの受け取るプラグインを足すときは、入口を1つのモジュールにし、テンプレのシーンを消して走行の最初のシーンを起動し、プラグインを `.Use<T>()` で登録させる。人が走行の後に入口を確かめる | `runner/loop.py`、`runner/tests/test_promete.py` |
 | 一部完了 | ライブラリの参照を箱に置く | プランナーとソルバーが、持ち込む先のライブラリの関数を推測ではなく実物から知る | `/srv/loop/refs/<持ち込む先>/` を読み取り専用で置く。Promete はフィードの `Promete.xml` から型とメンバーと要約の索引を作り、公式プラグインの `references/` を 2.1.0 のコミットで取る。プランナーのブリーフには型の一覧だけを入れ、ソルバーには置き場を教えて Grep と Read で引かせる。DXライブラリは人の手元の `DxLib.h` を送る形にし、早見表を残すか決める | `provision/36-dotnet.sh`、`provision/loop_refs.py`、`provision/bin/solver-claude`、`provision/bin/loop`、`host/loop.cmd`、`runner/loop.py`、`provision/40-perms.sh` |
 
 ### 着手前に決めること
@@ -34,6 +35,8 @@
 
 ## 更新履歴
 
+- 2026/10/15: Promete の実走で、`App.Window` の旧形式の警告、テンプレの `Program.cs` が自作のシーンを起動せず `Mouse` も登録しないこと、`Shape.CreateRect` に幅と高さを渡して描画が崩れることを見つけた。窓と描画をブリーフに正しく書く作業と、入口の作業を変更
+- 2026/10/14: 設計を3段でせき止める作業を一部完了で追加し、人の判断を計画に届ける作業と形だけの条件をリンタで落とす作業をそれに置き換え。基盤の故障の作業を段を変えずに止める形に変更。ダッシュボードを3段に合わせる作業と、下書きのプルリクエストを設計から組む作業を追加。ダッシュボードは箱での確認を除いて一部完了に変更。下書きのプルリクエストは実物の GitHub での確認を除いて一部完了に変更
 - 2026/10/12: 箱で確かめる作業を除く7つの作業を一部完了に変更。ライブラリの参照は、Promete の XML ドキュメントの索引と、人が `loop refs dxlib` で送る `DxLib.h` の索引まで。DXライブラリの早見表は残す。公式プラグインの `references/` は残す
 - 2026/10/11: Promete に持ち込んだプロダクトを人が確かめ、マウスのボタンを反射で推測して読めていなかったことと、ブリーフが `App.Window` を禁じて窓の大きさが渡っていなかったことを見つけた。Promete の窓と入力をブリーフに正しく書く作業を追加
 - 2026/10/10: C# のブリーフにライブラリとして組むことを書く、人の判断を計画に届ける、形だけの条件をリンタで落とす、基盤の故障をエスカレーションに数えない作業を追加

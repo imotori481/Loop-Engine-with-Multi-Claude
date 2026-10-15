@@ -3,8 +3,8 @@
 environment_facts は書き写さずに集める。書き写した事実は古くなり、集めた事実は
 古くならないからだ。それが最も効くのは画面だ。「窓が開く」のような条件は
 TclError を投げるテストになる。それは正直な赤で、RED_GATE を通り、どの実装も
-緑にできない。ステップはすべての段の試行を使い、エスカレーションまで使い、
-その原因はソルバーにもプランナーにも見えるところに無い。
+緑にできない。モジュールはすべての試行を使い、中段に差し戻され、その原因は
+ソルバーにもプランナーにも見えるところに無い。
 
     python3 -m unittest discover -s runner/tests
 """
@@ -233,7 +233,7 @@ class WhatTheCodeAlreadyDeclares(unittest.TestCase):
         ])
 
     def test_python_class_lines_declare_the_class_name(self):
-        # 次の作業で、L3 はこの行を declared_name で読む。
+        # インターフェースチェックの「存在」は、この行を declared_name で読む。
         line = loop.python_declarations(PYTHON_MODULE, "m")[2]
         self.assertEqual(loop.declared_name(line), "GameState")
 
@@ -313,21 +313,19 @@ class WhatTheCodeAlreadyDeclares(unittest.TestCase):
         facts = self.facts(["def f(x: int) -> int -- defined in pkg.mod"])
         self.assertIn("# What the code already declares", facts)
         self.assertIn("    def f(x: int) -> int -- defined in pkg.mod", facts)
-        self.assertIn("bodies are left out on purpose", facts)
-        # requires にどう書くかと、書き換えるステップがあるときの依存も伝える。
-        self.assertIn("puts that line in `contracts.requires`", facts)
-        self.assertIn("depends on that step instead", facts)
+        # requires にどう書くかも伝える。
+        self.assertIn("writes a requires line for it", facts)
 
     def test_the_planner_is_told_criteria_about_unchanged_code_stop_at_r4(self):
         # スタブが替えるのは provides の名前だけで、ほかの宣言は本物のまま動く。
         # 書き換えない関数で満たされる条件は、スタブに対して通って R4 で止まる。
         facts = self.facts(["def f(x: int) -> int -- defined in pkg.mod"])
         self.assertIn("keeps its real, working code", facts)
-        self.assertIn("RED_GATE stops the step (R4)", facts)
-        self.assertIn("calls a name this step provides", facts)
+        self.assertIn("RED_GATE stops the\nmodule (R4)", facts)
+        self.assertIn("calls a name the module provides", facts)
         # 変えない振る舞いは、条件ではなく既存のテストが守る。
         self.assertIn("Do not write criteria to show that the rest still works", facts)
-        self.assertIn("The tests already in\nthe repository run on every step", facts)
+        self.assertIn("The tests already in\nthe repository run on every module", facts)
 
     def test_a_new_project_is_not_told_about_code_it_does_not_have(self):
         self.assertNotIn("What the code already declares", self.facts([]))
@@ -498,8 +496,8 @@ class TheSolverBriefsShareTheirOpening(unittest.TestCase):
 
 
 class TestsAlreadyInTheRepository(unittest.TestCase):
-    """要件が振る舞いを変えると、それを確かめる既存のテストはどんな実装でも落ちる。
-    そのファイルは、振る舞いを変えるステップが files_test に挙げて差し替える。
+    """仕様が振る舞いを変えると、それを確かめる既存のテストはどんな実装でも落ちる。
+    プランナーはその名前を知り、基本設計で人に伝える。
     """
 
     FILES = {
@@ -516,33 +514,21 @@ class TestsAlreadyInTheRepository(unittest.TestCase):
             return SimpleNamespace(returncode=0, stdout=self.FILES[path], stderr="")
         raise AssertionError(argv)
 
-    def text(self, plan):
+    def text(self):
         with patch("loop.run", side_effect=self.run_git), \
              patch.dict(loop.LANGUAGE, loop.LANGUAGES["python"], clear=True):
-            return loop.existing_tests_text(plan)
+            return loop.existing_tests_text()
 
     def test_the_planner_sees_each_file_with_its_test_names(self):
-        text = self.text(None)
+        text = self.text()
         self.assertIn("    tests/test_board.py\n        test_score_counts_rows\n"
                       "        test_async_load", text)
         self.assertNotIn("__init__", text)
-        self.assertIn("REPLACES the whole file", text)
-        self.assertIn("(L17)", text)
+        self.assertIn("Say so in the basic design", text)
 
-    def test_the_critic_sees_only_the_files_the_plan_replaces(self):
-        keeps = {"steps": [{"files_test": ["tests/test_new.py"]}]}
-        replaces = {"steps": [{"files_test": ["tests/test_board.py"]}]}
-        self.assertEqual(self.text(keeps), "")
-        self.assertIn("Test files this plan replaces", self.text(replaces))
-
-    def test_the_revision_is_not_offered_the_tests_of_a_green_step(self):
-        tasks = ('{"steps": [{"id": "S1", "files_test": ["tests/test_board.py"]}]}')
-        with patch("loop.run", side_effect=self.run_git), \
-             patch.dict(loop.LANGUAGE, loop.LANGUAGES["python"], clear=True):
-            self.assertEqual(loop.preplan_tests_section(tasks, ["S1"]), "")
-            offered = loop.preplan_tests_section(tasks, [])
-        self.assertIn("tests/test_board.py", offered)
-        self.assertIn("do not replace the file", offered)
+    def test_without_tests_there_is_nothing_to_say(self):
+        self.FILES = {"tests/__init__.py": ""}
+        self.assertEqual(self.text(), "")
 
 
 class TestNamesByLanguage(unittest.TestCase):

@@ -9,10 +9,11 @@
 # Runas (planner) に限る。横への移動で、昇格ではない。
 #
 # プランナーが何に触れてよいかは、このスクリプトではなくファイルシステムが
-# 決める。`plan/` は 0700 runner なので、プランナーは tasks.json を読むことも
-# 書くこともできない。/srv/loop/planner/out に「提案」を書き、ランナーは何が
-# 変わったかを確かめてから適用する。だから「プランナーは受け入れ条件を緩めては
-# ならない」は、誰かが守る必要のある規則ではない。
+# 決める。`docs/` と `ac/` は 0700 runner なので、プランナーは設計を直接書けない。
+# ランナーが今の設計を /srv/loop/planner/out に写して置き、プランナーはそれを
+# 書き直す。ランナーは検査を通したものだけを docs/ と ac/ に戻す。差し戻しで
+# 指定外のモジュールが変わっていれば、それも拒む。src/ は ACL で読めるが、
+# 書けない（40-perms.sh）。
 set -euo pipefail
 
 BRIEF="${1:?usage: planner-run <brief-file> [seconds]}"
@@ -44,7 +45,7 @@ unset ANTHROPIC_API_KEY_CONSOLE
 
 # モデルと effort。planner.env の LOOP_MODEL を --model で、LOOP_EFFORT を
 # --effort で渡す。空ならアカウントの既定。effort の値が間違っていたら、claude を
-# 呼ぶ前に止める。claude 側で落ちると、ランナーはそれをエスカレーションと扱う。
+# 呼ぶ前に止める。claude 側で落ちると、ランナーはそれを設計の失敗と扱う。
 role_args=()
 if [ -n "${LOOP_MODEL:-}" ]; then
   role_args+=(--model "$LOOP_MODEL")
@@ -65,13 +66,18 @@ HOME="$(mktemp -d)"
 export HOME
 trap 'rm -rf "$HOME"' EXIT
 
+# 書いたファイルをグループ plannerw で書けるようにする。ランナーは次の呼び出しの
+# 前に out/ を空にする。プランナーが作ったディレクトリが 755 だと、その中を
+# ランナーが消せない。
+umask 002
+
 cd "$OUT"
 
 # 既定のシステムプロンプトとツールの定義は、1ターンごとに約1.7万トークンになる。
 # 役に要るのは、ブリーフが唯一の入力であることと、作業ディレクトリの場所だけ。
 # ブリーフは「the current directory」に書かせるので、その絶対パスをここで渡す。
 # ツールは絶対パスを取る。
-SYSTEM_PROMPT="You are the planner in an automated build loop. The user message is your brief and your only input. Your working directory is $OUT; a relative path in the brief is relative to it. Use the Read, Write and Edit tools with absolute paths. Write only the files the brief asks for. No one will answer questions, so do not ask any. When done, reply as the brief says."
+SYSTEM_PROMPT="You are the planner in an automated build loop. The user message is your brief and your only input. Your working directory is $OUT; a relative path in the brief is relative to it. Use the Read, Write and Edit tools with absolute paths, and Grep and Glob to read the code the brief points you to. Write only the files the brief asks for. No one will answer questions, so do not ask any. When done, reply as the brief says."
 
 # --safe-mode           CLAUDE.md、スキル、プラグイン、フック、MCP サーバ、
 #                        独自コマンドをすべて切る。認証、モデル、組み込みの
@@ -83,9 +89,9 @@ SYSTEM_PROMPT="You are the planner in an automated build loop. The user message 
 #                        続きになることはない。
 # --output-format json   結果の文と消費量を1つの JSON で返す。ランナーが
 #                        消費量を台帳に残し、結果の文だけを取り出す。
-# --allowedTools         標準入力でブリーフを読み、ここに提案を1つ書く。
+# --allowedTools         out/ の設計を読み書きし、既存のコードを読む。
 #                        ほかに前もって許すものは無い。
-# --tools                使えるツールそのものを同じ3つに絞る。--allowedTools は
+# --tools                使えるツールそのものを同じ5つに絞る。--allowedTools は
 #                        許可だけで、ほかのツールの定義は文脈に残る。
 # --system-prompt        既定のシステムプロンプトを上の短いものに置き換える。
 #
@@ -98,8 +104,8 @@ timeout --kill-after=30 "$LIMIT" claude -p \
   --safe-mode \
   --setting-sources "" \
   --no-session-persistence \
-  --allowedTools "Read Write Edit" \
-  --tools "Read,Write,Edit" \
+  --allowedTools "Read Write Edit Grep Glob" \
+  --tools "Read,Write,Edit,Grep,Glob" \
   --system-prompt "$SYSTEM_PROMPT" \
   < "$BRIEF"
 rc=$?

@@ -57,7 +57,7 @@ class RewriteAFinding(unittest.TestCase):
         self.write({**SHOWN, "waiting": False})
         code, err = self.set(mode="coverage", index=0, title="x", evidence="y")
         self.assertEqual(code, 1)
-        self.assertIn("待っていない", err)
+        self.assertIn("loop reject", err)
         self.assertEqual(self.stored()["modes"]["coverage"][0]["title"], "条件が要件に逆らう")
 
     def test_a_finding_that_is_not_there_is_refused(self):
