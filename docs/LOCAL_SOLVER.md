@@ -78,10 +78,10 @@ sudo install -o root -g llm -m 0440 <model>.gguf /srv/loop/models/model.gguf
 ### 1-3. 配る
 
 ```bash
-cd /tmp && sudo bash /opt/loop-engine/provision/70-local-solver.sh
+cd /tmp && sudo bash /opt/swa/provision/70-local-solver.sh
 ```
 
-`/opt/loop-engine` は箱の中のこのリポジトリのクローン（`provision/README.md` §2-6）。
+`/opt/swa` は箱の中のこのリポジトリのクローン（`provision/README.md` §2-6）。
 
 uid `llm` の作成、`/srv/loop/models` の権限、3本のスクリプトの設置まで。
 **sudoers は変更しない** — `solver-run` が持つ Runas(solver) の1つの許可で足りる。
@@ -252,5 +252,6 @@ R1（収集数の不一致）／R4（スタブで通る）／R5（赤が本物�
 
 ## 更新履歴
 
+- 2026/10/15: 箱の中のクローンの場所を `/opt/swa` に変更
 - 2026/10/14: ソルバー段の設定の置き場を `/srv/loop/settings.json` に、詰まったときの扱いをモジュールの停止と中段への差し戻しに変更
 - 2026/09/26: 既定のソルバー段を `claude` とし、`solver_tiers` を必ず書く手順に変更。配布と走行ログの場所を箱のクローン構成に合わせて変更

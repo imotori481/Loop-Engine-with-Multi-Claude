@@ -1,4 +1,4 @@
-"""Loop Engine の運用者向けダッシュボードの HTTP サーバ。
+"""Sleep Walking Alternator の運用者向けダッシュボードの HTTP サーバ。
 
 listen するのは常にループバックだけ。スマホから届かせるには、前に
 `tailscale serve` を置く。これが tailnet から 127.0.0.1 へ中継する。だから
@@ -289,7 +289,7 @@ def handler_for(state: DashboardState, launchers: Launchers, reach: Reach, token
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Loop Engine operator dashboard")
+    parser = argparse.ArgumentParser(description="Sleep Walking Alternator operator dashboard")
     parser.add_argument("--project", type=Path, required=True,
                         help="host-side project mirror containing plan/ledger.jsonl")
     parser.add_argument("--mirrors", type=Path, default=None,

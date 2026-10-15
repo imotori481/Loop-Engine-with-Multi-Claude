@@ -2,7 +2,7 @@
 # 箱に複数のプロジェクトを置き、1つずつ切り替えて使う。root で流す。
 # 普段は `loop project <コマンド>` で呼ぶ。`loop` がまだ無い箱では直接流す:
 #
-#   cd /tmp && sudo ADMIN_USER=<保守ユーザー> bash /opt/loop-engine/provision/loop-project.sh <コマンド>
+#   cd /tmp && sudo ADMIN_USER=<保守ユーザー> bash /opt/swa/provision/loop-project.sh <コマンド>
 #
 # コマンドは usage() を参照。
 #

@@ -71,7 +71,7 @@ def github_repo(url: str) -> str:
 
 
 def pr_body(branch: str, modules: list[str], note: str) -> str:
-    lines = ["Loop Engine が全モジュールを緑にし、人が成果物を動かして承認した。", "",
+    lines = ["SWA が全モジュールを緑にし、人が成果物を動かして承認した。", "",
              f"- モジュール: {', '.join(modules) or '-'}",
              f"- 作業ブランチ: `{branch}` から、設計と箱の環境のファイルを除いた版"]
     if note.strip():
@@ -81,7 +81,7 @@ def pr_body(branch: str, modules: list[str], note: str) -> str:
 
 def draft_body(branch: str, green: list[str], remaining: list[str],
                behind: bool | None = False) -> str:
-    lines = ["Loop Engine が途中まで緑にした状態。残りのモジュールは緑になっておらず、人の承認もまだ。", "",
+    lines = ["SWA が途中まで緑にした状態。残りのモジュールは緑になっておらず、人の承認もまだ。", "",
              f"- 緑のモジュール: {', '.join(green)}",
              f"- 残りのモジュール: {', '.join(remaining)}",
              f"- 作業ブランチ: `{branch}` から、設計と箱の環境のファイルを除いた版"]
@@ -163,14 +163,14 @@ class PullRequests:
         """承認した ALL_GREEN を PR にする。下書きが開いていれば、それを正式にする。"""
         with self._lock:
             return self._open(PR_SUFFIX, lambda branch, behind: (
-                f"{branch}: Loop Engine の成果", pr_body(branch, modules, note)), draft=False)
+                f"{branch}: SWA の成果", pr_body(branch, modules, note)), draft=False)
 
     def open_draft(self) -> dict[str, Any]:
         """最後に緑になったモジュールまでを、<branch>-draft からの下書きの PR にする。"""
         green, remaining = draft_modules(self.mirror)
         with self._lock:
             result = self._open(DRAFT_SUFFIX, lambda branch, behind: (
-                f"{branch}: Loop Engine の途中の成果",
+                f"{branch}: SWA の途中の成果",
                 draft_body(branch, green, remaining, behind)), draft=True)
         return {**result, "green": green, "remaining": remaining}
 
@@ -259,7 +259,7 @@ class PullRequests:
                           GITIGNORE, env=env)
             tree = self._git(clone, "write-tree", env=env)
         return self._git(clone, "commit-tree", tree, "-p", head,
-                         "-m", "chore: Loop Engineの環境のファイルを除く")
+                         "-m", "chore: SWAの環境のファイルを除く")
 
 
 def main(argv: list[str]) -> int:

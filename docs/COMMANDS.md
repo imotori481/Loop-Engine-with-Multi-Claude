@@ -29,14 +29,14 @@ PowerShell なら `.\host\loop.cmd <args>`、Git Bash なら `./host/loop.cmd <a
 
 | 記号 | 何を入れるか |
 |---|---|
-| `<repo-dir>` | ホストにクローンした Loop Engine のリポジトリ |
+| `<repo-dir>` | ホストにクローンした SWA のリポジトリ |
 | `<spec>` | 仕様書のファイルのパス。手元だけで使うものは `<repo-dir>\requirements\local\` に置く |
 | `<module>` | モジュールの ID。詳細設計仕様書のパスから `docs/modules/` と `.md` を除いたもの（`core/board` など） |
 | `<comment>` | 設計を書き直させるときに人が付けるコメント |
 | `<project>` | 箱の中でのプロジェクトの名前。英小文字、数字、`.` `_` `-` |
 | `<repo-url>` | 対象のリポジトリの GitHub の URL |
 | `<clone-dir>` | ホストで対象のリポジトリをクローンしたディレクトリ |
-| `<branch>` | Loop Engine に作業させるブランチの名前 |
+| `<branch>` | SWA に作業させるブランチの名前 |
 | `<base-branch>` | 元にするブランチの名前（`main` など） |
 | `<pr-branch>` | PR に出すブランチの名前 |
 | `<admin-user>` | 箱の保守ユーザーの名前 |
@@ -216,7 +216,7 @@ git -C <clone-dir> config branch.<branch>.loopBase <base-branch>
 git switch -c <pr-branch> <branch>
 git rm -r -q --ignore-unmatch plan docs/spec docs/basic docs/modules conftest.py index.html vitest.config.mjs
 git checkout origin/<base-branch> -- .gitignore
-git commit -m "chore: Loop Engineの環境のファイルを除く"
+git commit -m "chore: SWAの環境のファイルを除く"
 git push origin <pr-branch>
 ```
 
@@ -351,8 +351,8 @@ loop update --force
 `loop update` は最初のプロビジョニングが置く。それより前は次の2行を流す。
 
 ```bash
-sudo git -C /opt/loop-engine pull
-cd /tmp && sudo ADMIN_USER=<admin-user> bash /opt/loop-engine/provision/provision.sh
+sudo git -C /opt/swa pull
+cd /tmp && sudo ADMIN_USER=<admin-user> bash /opt/swa/provision/provision.sh
 ```
 
 ### 配管を確かめる（箱）
@@ -389,7 +389,7 @@ schtasks /run /tn "WSL-keepalive-Ubuntu-24-04"
 
 ## リポジトリのテスト（ホスト）
 
-ホストにクローンした Loop Engine のリポジトリの根で流す。Python 3 が要るので、普段使いの WSL
+ホストにクローンした SWA のリポジトリの根で流す。Python 3 が要るので、普段使いの WSL
 ディストロ（箱の `Ubuntu-24.04` ではないもの）から流す。箱は Windows のパスを見せないので、
 そこでは流せない。
 

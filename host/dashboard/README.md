@@ -1,4 +1,4 @@
-# Loop Engine operator dashboard
+# Sleep Walking Alternator operator dashboard
 
 ホスト側で、ランナーの進捗、設計のせき、全モジュールが緑になった後の最終確認を表示する
 ローカル Web GUI です。人間の判断はダッシュボード自身が行わず、対象を固定した追記記録

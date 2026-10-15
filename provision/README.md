@@ -21,7 +21,7 @@ RUNNER_SPEC.md の実行環境（§1）を再現するための手順とスク�
 | Windows ドライブ | **マウントしない**（`automount enabled=false`） |
 | Windows 実行ファイル | **起動不可**（`interop enabled=false`） |
 | WSLg | **無効**（`.wslconfig` `guiApplications=false`。§3-8） |
-| このリポジトリ | 箱の中の `/opt/loop-engine` にクローンする。スクリプトはそこから実行する |
+| このリポジトリ | 箱の中の `/opt/swa` にクローンする。スクリプトはそこから実行する |
 
 アカウント:
 
@@ -212,7 +212,7 @@ Codex CLI（`@openai/codex`）は、`/srv/loop/settings.json` の `solver_tiers`
 ### 2-6. このリポジトリをクローンする（箱）
 
 ```bash
-sudo git clone -b develop <このリポジトリの https URL> /opt/loop-engine
+sudo git clone -b develop <このリポジトリの https URL> /opt/swa
 ```
 
 箱には GitHub の鍵を置かないので、https で取る。改行コードは `.gitattributes` で LF に
@@ -220,7 +220,7 @@ sudo git clone -b develop <このリポジトリの https URL> /opt/loop-engine
 取り込む（§2-10）。それより前は pull で取り込む:
 
 ```bash
-sudo git -C /opt/loop-engine pull
+sudo git -C /opt/swa pull
 ```
 
 ### 2-7. runner の公開鍵を流し込む（PowerShell）
@@ -241,7 +241,7 @@ Get-Content "$env:USERPROFILE\.ssh\loop-runner.pub" |
 ### 2-8. プロビジョニング（箱）
 
 ```bash
-cd /tmp && sudo ADMIN_USER=<保守ユーザー> bash /opt/loop-engine/provision/provision.sh
+cd /tmp && sudo ADMIN_USER=<保守ユーザー> bash /opt/swa/provision/provision.sh
 ```
 
 `cd /tmp` は省かない（§3-14）。何度流しても同じ状態になるので、スクリプトを
@@ -514,7 +514,7 @@ loop project unity-refs <名前> <tar>            # Unity の参照アセンブ�
 `loop project` は `loop-project.sh` を root で流す。`loop` がまだ無い箱では、直接流す。
 
 ```bash
-cd /tmp && sudo ADMIN_USER=<保守ユーザー> bash /opt/loop-engine/provision/loop-project.sh <引数>
+cd /tmp && sudo ADMIN_USER=<保守ユーザー> bash /opt/swa/provision/loop-project.sh <引数>
 ```
 
 置き場は次のとおり。
@@ -994,6 +994,7 @@ VirtualBox 構成の手順は `c4374f4` から拾える。
 
 ## 更新履歴
 
+- 2026/10/15: 箱の中のクローンの場所を `/opt/swa` に変更
 - 2026/10/14: §2-10 の走らせ方を3段（上流、中段、下流）の `loop go`、`approve`、`reject`、`reopen` に変更
 - 2026/10/08: §2-11 に `loop project remove` を追加
 - 2026/10/08: Promete のために .NET 10 SDK と Promete 2.1.0 を §2-8 の凍結に足し、`smoke-dotnet` を2つの組み合わせにし、`probe-promete` を追加

@@ -2,7 +2,7 @@
 # ローカルのソルバーのバックエンド。モデルサーバ用のアカウント、スクリプト、
 # 重みの置き場を用意する。冪等。
 #
-#     cd /tmp && sudo bash /opt/loop-engine/provision/70-local-solver.sh
+#     cd /tmp && sudo bash /opt/swa/provision/70-local-solver.sh
 #
 # 60-egress.sh と同じ理由で、provision.sh からは流さない。ローカルモデルを
 # 使うと決めたときにだけ正しい。
