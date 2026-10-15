@@ -2256,11 +2256,15 @@ def render_acceptance(step: dict) -> str:
 
 def test_files_section(step: dict) -> str:
     """単体テストと統合テストの置き場。統合テストの条件が無ければ空。"""
-    if len(step["files_test"]) < 2:
+    kinds = {a.get("kind") or "unit" for a in step["acceptance"]}
+    if "integration" not in kinds:
         return ""
+    where = (f"Write the unit criteria in {step['files_test'][0]} and the integration "
+             f"criteria in\n{step['files_test'][1]}." if len(step["files_test"]) > 1 else
+             f"Every criterion is an integration criterion: write them all in\n"
+             f"{step['files_test'][0]}.")
     return f"""
-Write the unit criteria in {step["files_test"][0]} and the integration criteria in
-{step["files_test"][1]}. An integration test runs this module together with the
+{where} An integration test runs this module together with the
 real modules it requires -- no stand-ins, no mocks of them.
 """
 
@@ -3543,11 +3547,13 @@ def module_files(module_id: str) -> list[str]:
     return [f"{LAYOUT['src']}/{module_id}{s}" for s in LANGUAGE["module_suffixes"]]
 
 
-def module_test_files(module_id: str, integration: bool) -> list[str]:
+def module_test_files(module_id: str, integration: bool, unit: bool = True) -> list[str]:
     """モジュールのテストのファイル。ランナーが決め、ソルバーはここに書く。
 
-    1つ目が単体テスト、2つ目が統合テスト。テストを選ぶのにファイル名を使う言語
-    （C# のクラス名、C++ のスイート名）があるので、名前は言語の決まりに合わせる。
+    単体テスト、統合テストの順で、条件のある種類のものだけを返す。条件の無い
+    ファイルを求めると、ソルバーは書くものが無く、TEST_WRITE が空のファイルで
+    止まる。テストを選ぶのにファイル名を使う言語（C# のクラス名、C++ のスイート名）
+    があるので、名前は言語の決まりに合わせる。
     """
     tests = LAYOUT["tests"]
     parent, _, name = module_id.rpartition("/")
@@ -3563,7 +3569,9 @@ def module_test_files(module_id: str, integration: bool) -> list[str]:
         names = [f"{folder}{name}Tests.cs", f"{folder}{name}IntegrationTests.cs"]
     else:
         names = [f"{folder}{name}Test.cpp", f"{folder}{name}IntegrationTest.cpp"]
-    return names if integration else names[:1]
+    if not integration:
+        return names[:1]
+    return names if unit else names[1:]
 
 
 def safe_id(step_id: str) -> str:
@@ -3651,7 +3659,8 @@ def design_problems(docs: dict[str, str],
             "id": mid, "doc": text, "provides": provides, "requires": requires,
             "criteria": criteria, "files": module_files(mid),
             "files_test": module_test_files(
-                mid, any(c["kind"] == "integration" for c in criteria)),
+                mid, any(c["kind"] == "integration" for c in criteria),
+                unit=any(c["kind"] != "integration" for c in criteria)),
             "design": text_digest(text + "\0" + (acs.get(mid) or "")),
         }
     for mid in sorted(set(acs) - set(docs)):
@@ -3660,11 +3669,11 @@ def design_problems(docs: dict[str, str],
     # 2つのモジュールのテストが同じ名前で選ばれる。
     owners: dict[str, str] = {}
     for mid, module in modules.items():
-        stem = Path(module["files_test"][0]).name
-        if stem in owners:
-            problems.append(f"{owners[stem]} and {mid} would both have tests named {stem}; "
-                            f"rename one of the modules")
-        owners[stem] = mid
+        for stem in sorted({Path(f).name for f in module["files_test"]}):
+            if stem in owners:
+                problems.append(f"{owners[stem]} and {mid} would both have tests named "
+                                f"{stem}; rename one of the modules")
+            owners[stem] = mid
     return modules, problems
 
 

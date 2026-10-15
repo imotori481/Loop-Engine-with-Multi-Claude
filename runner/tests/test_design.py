@@ -167,6 +167,17 @@ class TheShapeOfTheDesign(Python):
                       "another module", problems)
         self.assertEqual(len(modules["m"]["files_test"]), 2)
 
+    def test_only_integration_criteria_ask_for_only_the_integration_file(self):
+        # 単体テストの条件が無いのに単体テストのファイルを求め、ソルバーが書かずに
+        # TEST_WRITE が止まっていた。
+        only = [dict(c, kind="integration") for c in CRITERIA]
+        modules, _ = loop.design_problems(
+            {"m": doc({"provides": "def f() -> int"})}, {"m": ac(only)})
+        self.assertEqual(modules["m"]["files_test"], ["tests/test_m_integration.py"])
+        step = {"files_test": modules["m"]["files_test"], "acceptance": only}
+        self.assertIn("write them all in\ntests/test_m_integration.py.",
+                      loop.test_files_section(step))
+
     def test_two_modules_whose_tests_share_a_name_are_refused(self):
         with mock.patch.dict(loop.LANGUAGE, loop.LANGUAGES["csharp"], clear=True):
             _, problems = loop.design_problems(
