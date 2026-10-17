@@ -53,6 +53,47 @@ if [ -n "${LOOP_EFFORT:-}" ]; then
   esac
 fi
 
+# サブエージェント。solver.env の LOOP_SUBAGENT_MODEL が空でなければ、そのモデルで
+# 動く助手を2つ --agents で定義し、Agent ツールで呼ばせる。空なら何も足さない。
+#   scout   読むだけ。既存のコードと参照を探し、パスと署名と短い抜粋だけを返す
+#   editor  中身の決まった書き換えだけをする
+# scout が読んだファイルの中身は scout の文脈に入り、ソルバーには答えだけが戻る。
+# 助手は同じプロセスと uid で動くので、書ける場所は変わらない（40-perms.sh）。
+# 許すのはこの2つの名前だけ。組み込みの general-purpose は親のモデルを継ぐので、
+# 呼ばれると節約にならない。CLAUDE_CODE_SUBAGENT_MODEL は、名前を指定しない
+# 助手のモデルも同じものにする。
+agent_tools=""
+agent_allow=""
+agent_args=()
+agent_note=""
+if [ -n "${LOOP_SUBAGENT_MODEL:-}" ]; then
+  if ! [[ "$LOOP_SUBAGENT_MODEL" =~ ^[A-Za-z0-9._-]+$ ]]; then
+    echo "solver-claude: bad LOOP_SUBAGENT_MODEL in solver.env: $LOOP_SUBAGENT_MODEL" >&2
+    exit 5
+  fi
+  export CLAUDE_CODE_SUBAGENT_MODEL="$LOOP_SUBAGENT_MODEL"
+  agent_tools=",Agent"
+  agent_allow=" Agent(scout) Agent(editor)"
+  agent_args=(--agents "$(cat <<EOF
+{
+  "scout": {
+    "description": "Read-only code search on a small model. Use it to find existing helpers, declarations, call sites and library references across many files instead of reading them yourself. It returns paths, signatures and short excerpts.",
+    "prompt": "You search code for the solver of an automated build loop. Use Grep, Glob and Read with absolute paths. Answer exactly what you were asked: file paths with line numbers, declarations and signatures, and only the excerpts that answer the question. Do not paste whole files. Say plainly when you find nothing. You cannot write files.",
+    "tools": ["Read", "Grep", "Glob"],
+    "model": "$LOOP_SUBAGENT_MODEL"
+  },
+  "editor": {
+    "description": "Applies an edit whose exact content you have already decided, on a small model: renames, moving or deleting code, boilerplate you spell out, one change repeated across files. Give it absolute paths and the exact text. Do not give it logic to design.",
+    "prompt": "You apply edits for the solver of an automated build loop. Read a file before you Edit or Write it, with absolute paths. Make exactly the change you were given and nothing else. Do not refactor, reformat or add code of your own. If the instruction is ambiguous or the text to replace is not there, change nothing and say so. Reply with the files you changed.",
+    "tools": ["Read", "Write", "Edit", "Grep", "Glob"],
+    "model": "$LOOP_SUBAGENT_MODEL"
+  }
+}
+EOF
+)")
+  agent_note=" Two helpers on a smaller model are available through the Agent tool: scout searches and reads code and returns short findings, and editor applies an edit whose exact content you give it. Delegate wide searches to scout and mechanical edits to editor. Design and write the logic yourself. Read a file again before you edit a file that editor changed."
+fi
+
 # 呼び出しごとに使い捨ての HOME を作る。前のステップの記憶を次へ持ち越させない。
 # BOOTSTRAP はステップ間でソルバーが記憶を失うことを求めている。codex の
 # --ephemeral と同じ役割を、置き場を無くすことで果たす。
@@ -62,7 +103,7 @@ trap 'rm -rf "$HOME"' EXIT
 
 # planner-run と同じく、既定のシステムプロンプトを、ブリーフが唯一の入力である
 # ことと作業ディレクトリの場所だけに置き換える。cwd は solver-run が決めている。
-SYSTEM_PROMPT="You are the solver in an automated build loop. The user message is your brief and your only input. Your working directory is $PWD; a relative path in the brief is relative to it. Use the Read, Write and Edit tools with absolute paths, and Grep and Glob to find code already in the project. Change only the files the brief allows. You cannot run commands or tests; the runner runs them after you finish. No one will answer questions, so do not ask any. When done, reply as the brief says."
+SYSTEM_PROMPT="You are the solver in an automated build loop. The user message is your brief and your only input. Your working directory is $PWD; a relative path in the brief is relative to it. Use the Read, Write and Edit tools with absolute paths, and Grep and Glob to find code already in the project. Change only the files the brief allows. You cannot run commands or tests; the runner runs them after you finish. No one will answer questions, so do not ask any. When done, reply as the brief says.$agent_note"
 
 # --safe-mode/ --setting-sources "" / --no-session-persistence
 #     ブリーフだけを入力にする（RUNNER_SPEC 5 章）。planner-run と同じ。
@@ -72,8 +113,13 @@ SYSTEM_PROMPT="You are the solver in an automated build loop. The user message i
 #     読むだけなので柵は緩まない。これが無いと、ソルバーはブリーフに載らない既存の
 #     ヘルパーを見つけられず、同じ処理の static 関数を新しく書いていた。探すターンの
 #     分トークンは増えるが、成果物の品質を先にとる。
+#     サブエージェントを使うときは Agent(scout) と Agent(editor) も許す。
 # --tools "Read,Write,Edit,Grep,Glob"
 #     使えるツールそのものを同じ5つに絞り、ほかのツールの定義を文脈から外す。
+#     サブエージェントを使うときだけ Agent を足す。
+# --agents
+#     サブエージェントの定義。--setting-sources "" で .claude/agents/ は読まないので、
+#     ここで渡す。
 # --system-prompt
 #     既定のシステムプロンプトを上の短いものに置き換える。
 # --output-format json
@@ -94,13 +140,14 @@ set +e
 timeout --kill-after=30 "$LIMIT" claude -p \
   "${role_args[@]}" \
   "${refs_args[@]}" \
+  "${agent_args[@]}" \
   --output-format json \
   --safe-mode \
   --setting-sources "" \
   --no-session-persistence \
-  --allowedTools "Read Write Edit Grep Glob" \
+  --allowedTools "Read Write Edit Grep Glob$agent_allow" \
   --disallowedTools "Bash" \
-  --tools "Read,Write,Edit,Grep,Glob" \
+  --tools "Read,Write,Edit,Grep,Glob$agent_tools" \
   --system-prompt "$SYSTEM_PROMPT" \
   < "$BRIEF"
 rc=$?

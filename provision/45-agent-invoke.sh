@@ -146,6 +146,19 @@ EOF
   fi
 done
 
+# サブエージェントのモデル。critic はツールが Read と Write だけなので持たない。
+for who in solver planner; do
+  if ! grep -q '^LOOP_SUBAGENT_MODEL=' "/etc/loop/$who.env"; then
+    cat >> "/etc/loop/$who.env" <<'EOF'
+
+# サブエージェントのモデル。探索と機械的な書き換えをこのモデルの助手に回す。
+# 空ならサブエージェントを使わない。
+# 例: LOOP_SUBAGENT_MODEL=claude-haiku-5-5
+LOOP_SUBAGENT_MODEL=
+EOF
+  fi
+done
+
 # 形の壊れた drop-in があると、sudo は一切動かなくなる。それを直すための sudo も
 # 含めてだ。どちらも有効にする前に検証する。
 for spec in "solver:91-runner-to-solver" "planner:92-runner-to-planner" \

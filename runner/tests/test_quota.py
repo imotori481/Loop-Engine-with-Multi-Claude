@@ -136,6 +136,28 @@ class UsageIsRecorded(unittest.TestCase):
         self.assertNotIn("iterations", line)
         self.assertIn("iterations", record["usage"])
 
+    def test_a_subagent_on_another_model_is_counted_from_model_usage(self):
+        mock.patch.stopall()
+        with tempfile.TemporaryDirectory() as temp, \
+             mock.patch.object(loop, "LEDGER", Path(temp) / "ledger.jsonl"):
+            screen = io.StringIO()
+            with contextlib.redirect_stdout(screen):
+                loop.record_usage("solver", "IMPL", json.loads(self.payload(
+                    usage={"input_tokens": 4, "cache_read_input_tokens": 100,
+                           "cache_creation_input_tokens": 6, "output_tokens": 20},
+                    modelUsage={
+                        "claude-opus-5-5": {"inputTokens": 4, "outputTokens": 20,
+                                            "cacheReadInputTokens": 100,
+                                            "cacheCreationInputTokens": 6},
+                        "claude-haiku-5-5": {"inputTokens": 1, "outputTokens": 5,
+                                             "cacheReadInputTokens": 30,
+                                             "cacheCreationInputTokens": 9}})))
+            record = json.loads(loop.LEDGER.read_text(encoding="utf-8"))
+        self.assertEqual(screen.getvalue().strip(),
+                         "[USAGE] who=solver phase=IMPL model=claude-haiku-5-5,claude-opus-5-5 "
+                         "in=150 out=25 read=130 write=15 sec=4 usd=0.01")
+        self.assertEqual(record["model_usage"]["claude-haiku-5-5"]["outputTokens"], 5)
+
     def test_output_that_is_not_json_is_passed_through(self):
         result = loop.run_agent("solver", "IMPL", lambda: proc(0, "plain text"))
         self.assertEqual(result.stdout, "plain text")

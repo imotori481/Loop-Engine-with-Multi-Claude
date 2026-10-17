@@ -57,6 +57,37 @@ if [ -n "${LOOP_EFFORT:-}" ]; then
   esac
 fi
 
+# サブエージェント。planner.env の LOOP_SUBAGENT_MODEL が空でなければ、そのモデルで
+# 動く読むだけの助手 scout を --agents で定義し、Agent ツールで呼ばせる。空なら何も
+# 足さない。既存のコードを探して読む分が scout の文脈に入り、プランナーには答え
+# だけが戻る。書き換えの助手は渡さない。設計を書くのはプランナー自身だ。
+# 許すのは scout の名前だけ。理由は solver-claude と同じ。
+agent_tools=""
+agent_allow=""
+agent_args=()
+agent_note=""
+if [ -n "${LOOP_SUBAGENT_MODEL:-}" ]; then
+  if ! [[ "$LOOP_SUBAGENT_MODEL" =~ ^[A-Za-z0-9._-]+$ ]]; then
+    echo "planner-run: bad LOOP_SUBAGENT_MODEL in planner.env: $LOOP_SUBAGENT_MODEL" >&2
+    exit 5
+  fi
+  export CLAUDE_CODE_SUBAGENT_MODEL="$LOOP_SUBAGENT_MODEL"
+  agent_tools=",Agent"
+  agent_allow=" Agent(scout)"
+  agent_args=(--agents "$(cat <<EOF
+{
+  "scout": {
+    "description": "Read-only code search on a small model. Use it to find existing types, functions, call sites and how a feature is wired across many files instead of reading them yourself. It returns paths, signatures and short excerpts.",
+    "prompt": "You search code for the planner of an automated build loop. Use Grep, Glob and Read with absolute paths. Answer exactly what you were asked: file paths with line numbers, declarations and signatures, and only the excerpts that answer the question. Do not paste whole files. Say plainly when you find nothing. You cannot write files.",
+    "tools": ["Read", "Grep", "Glob"],
+    "model": "$LOOP_SUBAGENT_MODEL"
+  }
+}
+EOF
+)")
+  agent_note=" A read-only helper on a smaller model, scout, is available through the Agent tool. Delegate wide searches of the existing code to it. Write the design yourself."
+fi
+
 # 呼び出しごとに使い捨ての HOME を作る。Claude Code は設定、ポリシー、
 # バックアップの状態を HOME に書く。毎回新しくすれば、ある計画の呼び出しから次へ
 # 何も持ち越せない。`--bare` なら1つのフラグで済むが、--bare は OAuth を拒む。
@@ -77,7 +108,7 @@ cd "$OUT"
 # 役に要るのは、ブリーフが唯一の入力であることと、作業ディレクトリの場所だけ。
 # ブリーフは「the current directory」に書かせるので、その絶対パスをここで渡す。
 # ツールは絶対パスを取る。
-SYSTEM_PROMPT="You are the planner in an automated build loop. The user message is your brief and your only input. Your working directory is $OUT; a relative path in the brief is relative to it. Use the Read, Write and Edit tools with absolute paths, and Grep and Glob to read the code the brief points you to. Write only the files the brief asks for. No one will answer questions, so do not ask any. When done, reply as the brief says."
+SYSTEM_PROMPT="You are the planner in an automated build loop. The user message is your brief and your only input. Your working directory is $OUT; a relative path in the brief is relative to it. Use the Read, Write and Edit tools with absolute paths, and Grep and Glob to read the code the brief points you to. Write only the files the brief asks for. No one will answer questions, so do not ask any. When done, reply as the brief says.$agent_note"
 
 # --safe-mode           CLAUDE.md、スキル、プラグイン、フック、MCP サーバ、
 #                        独自コマンドをすべて切る。認証、モデル、組み込みの
@@ -90,9 +121,13 @@ SYSTEM_PROMPT="You are the planner in an automated build loop. The user message 
 # --output-format json   結果の文と消費量を1つの JSON で返す。ランナーが
 #                        消費量を台帳に残し、結果の文だけを取り出す。
 # --allowedTools         out/ の設計を読み書きし、既存のコードを読む。
-#                        ほかに前もって許すものは無い。
+#                        ほかに前もって許すものは無い。サブエージェントを使う
+#                        ときだけ Agent(scout) を足す。
 # --tools                使えるツールそのものを同じ5つに絞る。--allowedTools は
 #                        許可だけで、ほかのツールの定義は文脈に残る。
+#                        サブエージェントを使うときだけ Agent を足す。
+# --agents               サブエージェントの定義。--setting-sources "" で
+#                        .claude/agents/ は読まないので、ここで渡す。
 # --system-prompt        既定のシステムプロンプトを上の短いものに置き換える。
 #
 # 上限時間はランナーではなくここで掛ける。ランナーは別の uid で、このプロセスに
@@ -100,12 +135,13 @@ SYSTEM_PROMPT="You are the planner in an automated build loop. The user message 
 set +e
 timeout --kill-after=30 "$LIMIT" claude -p \
   "${role_args[@]}" \
+  "${agent_args[@]}" \
   --output-format json \
   --safe-mode \
   --setting-sources "" \
   --no-session-persistence \
-  --allowedTools "Read Write Edit Grep Glob" \
-  --tools "Read,Write,Edit,Grep,Glob" \
+  --allowedTools "Read Write Edit Grep Glob$agent_allow" \
+  --tools "Read,Write,Edit,Grep,Glob$agent_tools" \
   --system-prompt "$SYSTEM_PROMPT" \
   < "$BRIEF"
 rc=$?

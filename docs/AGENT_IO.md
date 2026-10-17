@@ -21,6 +21,20 @@
 
 ブリーフは呼び出しのたびに上書きする。置き場に残るのは、役と位相ごとの最後の1回分になる。
 
+### サブエージェント
+
+`/etc/loop/<役>.env` の `LOOP_SUBAGENT_MODEL` にモデルを書くと、そのモデルで動く助手を `--agents` で渡し、`Agent` ツールを足す。空なら渡さない。
+
+| 助手 | 渡す役 | ツール | 任せる仕事 |
+|---|---|---|---|
+| `scout` | planner、solver | Read Grep Glob | 既存のコードと参照を探し、パスと署名と短い抜粋だけを返す |
+| `editor` | solver | Read Write Edit Grep Glob | 中身の決まった書き換え。名前の変更、コードの移動、書き方を指定した定型 |
+
+- 探索で読んだファイルの中身は助手の文脈に入る。役の文脈には答えだけが戻る
+- 許すのは上の名前だけ。親のモデルを継ぐ組み込みの助手は呼べない
+- 助手は役と同じ uid で動く。書ける場所は役と変わらない
+- critic には渡さない
+
 ```mermaid
 flowchart LR
   runner["runner"]
@@ -101,7 +115,7 @@ STUB は既存のメソッドの本体をスタブに差し替えるので、今
 
 ## 消費の記録
 
-`run_agent` は呼び出しごとに `USAGE` を台帳（`plan/ledger.jsonl`）に書く。中身は `claude -p --output-format json` が返す `usage` の全体、`cost_usd`、`duration_ms`、`turns`、モデル。
+`run_agent` は呼び出しごとに `USAGE` を台帳（`plan/ledger.jsonl`）に書く。中身は `claude -p --output-format json` が返す `usage` の全体、モデルごとの内訳（`model_usage`）、`cost_usd`、`duration_ms`、`turns`、モデル。
 
 画面とログには、同じ内容を1行で出す。
 
@@ -111,10 +125,13 @@ STUB は既存のメソッドの本体をスタブに差し替えるので、今
 
 | 項目 | 中身 |
 |---|---|
+| `model` | 使ったモデル。サブエージェントのモデルも並ぶ |
 | `in` | 入力、キャッシュ読み取り、キャッシュ書き込みの和 |
 | `out` | 出力 |
 | `read` | キャッシュ読み取り（`cache_read_input_tokens`） |
 | `write` | キャッシュ書き込み（`cache_creation_input_tokens`） |
+
+`modelUsage` がモデルごとのトークンの内訳を持つときは、4つの量をその和から出す。サブエージェントの分も入る。内訳が無いときは `usage` から出す。
 
 種類ごとの読み方は次のとおり。
 
@@ -165,3 +182,4 @@ C# で10ステップを全部緑にした回の、台帳とブリーフの実測
 - 2026/09/30: IMPL のブリーフに載せるこのステップの前のコードとの差分を追加
 - 2026/09/30: solver のツールに Grep と Glob を追加
 - 2026/10/14: planner、critic、solver の受け渡しを3段（上流、中段、下流）の設計に変更
+- 2026/10/17: サブエージェントと、消費の記録のモデルごとの内訳を追加

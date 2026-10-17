@@ -2073,13 +2073,28 @@ def record_usage(who: str, phase: str, data: dict) -> None:
     画面を数行占めていた。入力は、キャッシュから読んだ分と書いた分を足す。
     read と write はそのうちのキャッシュの読み取りと書き込みで、`loop now` が
     種類別の消費を数えるのに使う。
+
+    modelUsage がモデルごとのトークンの内訳を持つときは、そちらを足す。
+    サブエージェントは別のモデルで動き、その分は modelUsage にしか出ないことがある。
+    内訳は台帳に丸ごと残す。どれだけ親のモデルから助手のモデルに移ったかは、
+    内訳でしか読めない。
     """
     usage = data.get("usage") or {}
-    models = sorted(data.get("modelUsage") or {})
-    cache_read = int(usage.get("cache_read_input_tokens") or 0)
-    cache_write = int(usage.get("cache_creation_input_tokens") or 0)
-    tokens_in = int(usage.get("input_tokens") or 0) + cache_read + cache_write
-    tokens_out = int(usage.get("output_tokens") or 0)
+    model_usage = data.get("modelUsage") or {}
+    models = sorted(model_usage)
+    per_model = [u for u in model_usage.values() if isinstance(u, dict)]
+    if per_model and all("inputTokens" in u for u in per_model):
+        def total(key: str) -> int:
+            return sum(int(u.get(key) or 0) for u in per_model)
+        cache_read = total("cacheReadInputTokens")
+        cache_write = total("cacheCreationInputTokens")
+        tokens_in = total("inputTokens") + cache_read + cache_write
+        tokens_out = total("outputTokens")
+    else:
+        cache_read = int(usage.get("cache_read_input_tokens") or 0)
+        cache_write = int(usage.get("cache_creation_input_tokens") or 0)
+        tokens_in = int(usage.get("input_tokens") or 0) + cache_read + cache_write
+        tokens_out = int(usage.get("output_tokens") or 0)
     seconds = (data.get("duration_ms") or 0) / 1000
     cost = data.get("total_cost_usd")
     echo = (f"who={who} phase={phase} model={','.join(models) or '-'} "
@@ -2090,6 +2105,7 @@ def record_usage(who: str, phase: str, data: dict) -> None:
     ledger("USAGE", echo=echo, who=who, phase=phase,
            models=models,
            usage=data.get("usage"),
+           model_usage=data.get("modelUsage"),
            cost_usd=cost,
            duration_ms=data.get("duration_ms"),
            turns=data.get("num_turns"),
